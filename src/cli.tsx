@@ -9,7 +9,9 @@ import type { ScopeFilter, SessionSource } from './types/session.js';
 const cli = meow(
   `
   Usage
-    $ aside [options]
+    $ aside [options]            Run the side chat in the current pane
+    $ aside dock [options]       Open the side chat in a docked split (tmux / iTerm2)
+    $ aside install [--write]    Add a tmux key (<prefix> C-a) to summon the dock
 
   A read-only side chat that watches your running agent session so you can ask
   questions about it without branching the main thread.
@@ -21,6 +23,9 @@ const cli = meow(
     --session          Watch a specific session id (repeatable)
     --source           Watch only "claude", "codex", or "pi" sessions
     --auth-file        OAuth credentials file path (default: ~/.pi/agent/auth.json)
+    --side             Dock side: "right" (default) or "bottom"
+    --size             Dock pane size (default: 40%)
+    --write            (install) append the binding to ~/.tmux.conf
     -v, --version      Show version
     -h, --help         Show help
 
@@ -41,6 +46,8 @@ const cli = meow(
   Examples
     $ aside
     $ aside --source codex
+    $ aside dock --source codex          # docked split beside your agent
+    $ aside install --write              # bind <prefix> C-a to summon it
     $ aside --project myrepo --provider openai --model gpt-4o-mini
 `,
   {
@@ -52,9 +59,20 @@ const cli = meow(
       session: { type: 'string', isMultiple: true },
       source: { type: 'string' },
       authFile: { type: 'string', default: DEFAULT_AUTH_FILE },
+      side: { type: 'string', default: 'right' },
+      size: { type: 'string', default: '40%' },
+      write: { type: 'boolean', default: false },
     },
   },
 );
+
+const command = cli.input[0];
+
+// `install` doesn't need session flags — handle it first.
+if (command === 'install') {
+  const { installTmux } = await import('./launcher.js');
+  process.exit(installTmux(cli.flags.write));
+}
 
 const scopeFilter: ScopeFilter = {};
 if (cli.flags.project) {
@@ -65,6 +83,21 @@ if (cli.flags.session && cli.flags.session.length > 0) {
 }
 if (cli.flags.source === 'claude' || cli.flags.source === 'codex' || cli.flags.source === 'pi') {
   scopeFilter.source = cli.flags.source as SessionSource;
+}
+
+// `dock` opens the TUI in a split pane and forwards the same scope/model flags.
+if (command === 'dock') {
+  const args: string[] = [];
+  if (cli.flags.provider !== DEFAULT_PROVIDER) args.push('--provider', cli.flags.provider);
+  if (cli.flags.model !== DEFAULT_MODEL) args.push('--model', cli.flags.model);
+  if (cli.flags.project) args.push('--project', cli.flags.project);
+  if (scopeFilter.source) args.push('--source', scopeFilter.source);
+  for (const id of cli.flags.session ?? []) args.push('--session', id);
+  if (cli.flags.authFile !== DEFAULT_AUTH_FILE) args.push('--auth-file', cli.flags.authFile);
+
+  const side = cli.flags.side === 'bottom' ? 'bottom' : 'right';
+  const { dock } = await import('./launcher.js');
+  process.exit(dock({ args, side, size: cli.flags.size }));
 }
 
 render(

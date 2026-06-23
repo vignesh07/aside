@@ -41,11 +41,25 @@ auto-commentary engine for an interactive, read-only Q&A engine.
 ```bash
 npm install
 npm run build
-node dist/cli.js                 # or: npm start
+node dist/cli.js                 # or: npm start — run in the current pane
 
 node dist/cli.js --source codex  # watch only Codex sessions
 node dist/cli.js --project myrepo --provider openai --model gpt-4o-mini
 ```
+
+### Docked side chat (the "chat bar in the same window" feel)
+
+`aside` can't draw inside another app's terminal UI, so the docked feel is a
+terminal split:
+
+```bash
+aside dock                 # open aside in a split pane (tmux or iTerm2)
+aside dock --side bottom   # dock below instead of to the right
+aside install --write      # bind <prefix> C-a in tmux to summon it hands-free
+```
+
+In tmux this is the real win: bind a key once with `aside install`, then summon
+the side chat without ever leaving the agent in the other pane.
 
 Needs an API key for the chat provider (e.g. `ANTHROPIC_API_KEY`), or OAuth
 credentials at `~/.pi/agent/auth.json`.
@@ -72,8 +86,8 @@ node scripts/smoke.mjs
 
 ### Roadmap
 
-- [ ] `/aside`-style launcher that opens the TUI as a docked tmux/iTerm split
-      (the "chat bar in the same window" feel)
+- [x] launcher that opens the TUI as a docked tmux/iTerm split, with a tmux
+      keybinding to summon it hands-free (`aside dock` / `aside install`)
 - [ ] macOS menubar frontend for the Codex/Claude desktop apps
 - [ ] richer transcript view (live feed of what the agent is doing) alongside chat
 
