@@ -61,6 +61,20 @@ aside install --write      # bind <prefix> C-a in tmux to summon it hands-free
 In tmux this is the real win: bind a key once with `aside install`, then summon
 the side chat without ever leaving the agent in the other pane.
 
+### macOS menubar (for the Codex / Claude desktop apps)
+
+For the GUI agents, a TUI split doesn't fit — so there's an Electron menubar app
+that reuses the **same** TS core (scanners, tailer, `SideChatService`):
+
+```bash
+npm run build            # build the shared core first
+cd menubar && npm install && npm start
+```
+
+A dropdown hangs off the menubar with a session picker and the side chat. The
+Electron main process drives `MenubarBackend` (a thin, Electron-free wrapper over
+the core), so there's no duplicated logic between the TUI and the menubar.
+
 Needs an API key for the chat provider (e.g. `ANTHROPIC_API_KEY`), or OAuth
 credentials at `~/.pi/agent/auth.json`.
 
@@ -88,7 +102,11 @@ node scripts/smoke.mjs
 
 - [x] launcher that opens the TUI as a docked tmux/iTerm split, with a tmux
       keybinding to summon it hands-free (`aside dock` / `aside install`)
-- [ ] macOS menubar frontend for the Codex/Claude desktop apps
+- [x] shared, framework-agnostic `SideChatService` so every frontend reuses one
+      implementation
+- [~] macOS menubar frontend (`menubar/`) — builds + backend is unit-tested;
+      tray/window not yet visually verified, no app packaging/icon yet
+- [ ] model picker in the menubar UI (the TUI has one; menubar is fixed-model)
 - [ ] richer transcript view (live feed of what the agent is doing) alongside chat
 
 [`@mariozechner/pi-ai`]: https://www.npmjs.com/package/@mariozechner/pi-ai
