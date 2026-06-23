@@ -128,10 +128,10 @@ export class SideChatEngine {
 
 /** Render the watched session's recent activity as a plain-text block. */
 function renderTranscript(projectName: string, transcript: SessionEvent[]): string {
-  if (transcript.length === 0) {
+  const lines = transcript.map(formatEvent).filter(Boolean);
+  if (lines.length === 0) {
     return `You are watching session "${projectName}". No activity has been observed yet.`;
   }
-  const lines = transcript.map(formatEvent).filter(Boolean);
   return `=== Live transcript of session "${projectName}" (oldest first) ===\n${lines.join('\n')}`;
 }
 
@@ -177,4 +177,4 @@ function formatEvent(event: SessionEvent): string {
   }
 }
 
-export { SYSTEM_PROMPT, renderTranscript, formatEvent };
+export { SYSTEM_PROMPT, renderTranscript, renderHistory, formatEvent };

@@ -87,16 +87,13 @@ if (cli.flags.source === 'claude' || cli.flags.source === 'codex' || cli.flags.s
 
 // `dock` opens the TUI in a split pane and forwards the same scope/model flags.
 if (command === 'dock') {
-  const args: string[] = [];
-  if (cli.flags.provider !== DEFAULT_PROVIDER) args.push('--provider', cli.flags.provider);
-  if (cli.flags.model !== DEFAULT_MODEL) args.push('--model', cli.flags.model);
-  if (cli.flags.project) args.push('--project', cli.flags.project);
-  if (scopeFilter.source) args.push('--source', scopeFilter.source);
-  for (const id of cli.flags.session ?? []) args.push('--session', id);
-  if (cli.flags.authFile !== DEFAULT_AUTH_FILE) args.push('--auth-file', cli.flags.authFile);
-
+  const { dock, buildDockArgs } = await import('./launcher.js');
+  const args = buildDockArgs(cli.flags, {
+    provider: DEFAULT_PROVIDER,
+    model: DEFAULT_MODEL,
+    authFile: DEFAULT_AUTH_FILE,
+  });
   const side = cli.flags.side === 'bottom' ? 'bottom' : 'right';
-  const { dock } = await import('./launcher.js');
   process.exit(dock({ args, side, size: cli.flags.size }));
 }
 

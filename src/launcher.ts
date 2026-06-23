@@ -38,6 +38,52 @@ function asideInvocation(extraArgs: string[]): string {
   return [process.execPath, cliPath, ...extraArgs].map(shellQuote).join(' ');
 }
 
+/** Flag values relevant to docking, mirrored from the CLI. */
+export interface DockFlags {
+  provider: string;
+  model: string;
+  project?: string;
+  source?: string;
+  session?: string[];
+  authFile: string;
+}
+
+/** Defaults the CLI applies, so we only forward flags the user actually changed. */
+export interface DockDefaults {
+  provider: string;
+  model: string;
+  authFile: string;
+}
+
+/**
+ * Build the argument list forwarded to the docked `aside` TUI. Only non-default
+ * scope/model flags are passed through, keeping the docked command minimal.
+ * Pure and exported so the passthrough logic is unit-testable.
+ */
+export function buildDockArgs(flags: DockFlags, defaults: DockDefaults): string[] {
+  const args: string[] = [];
+  if (flags.provider !== defaults.provider) args.push('--provider', flags.provider);
+  if (flags.model !== defaults.model) args.push('--model', flags.model);
+  if (flags.project) args.push('--project', flags.project);
+  if (flags.source === 'claude' || flags.source === 'codex' || flags.source === 'pi') {
+    args.push('--source', flags.source);
+  }
+  for (const id of flags.session ?? []) args.push('--session', id);
+  if (flags.authFile !== defaults.authFile) args.push('--auth-file', flags.authFile);
+  return args;
+}
+
+/**
+ * Build the tmux bind-key line that summons the dock. tmux parses its own
+ * config quoting before handing the argument to /bin/sh, so we wrap the whole
+ * command in single quotes for tmux and double-quote each path inside (handles
+ * spaces) — surviving both tmux's parser and the shell. Pure/exported for tests.
+ */
+export function buildTmuxBindLine(execPath: string, cliPath: string): string {
+  const inner = [execPath, cliPath, 'dock'].map((a) => `"${a}"`).join(' ');
+  return `bind-key C-a run-shell '${inner}'`;
+}
+
 export function isInsideTmux(): boolean {
   return Boolean(process.env['TMUX']);
 }
@@ -107,13 +153,8 @@ const TMUX_MARKER = '# aside: summon docked side chat';
  * appends it to ~/.tmux.conf (idempotently).
  */
 export function installTmux(write: boolean): number {
-  // tmux parses its own config quoting before handing the run-shell argument to
-  // /bin/sh, so the shell `'\''` idiom doesn't apply here. Wrap the whole
-  // command in single quotes for tmux and double-quote each path inside (handles
-  // spaces) — that survives both tmux's parser and the shell cleanly.
   const cliPath = fileURLToPath(new URL('./cli.js', import.meta.url));
-  const inner = [process.execPath, cliPath, 'dock'].map((a) => `"${a}"`).join(' ');
-  const bindLine = `bind-key C-a run-shell '${inner}'`;
+  const bindLine = buildTmuxBindLine(process.execPath, cliPath);
   const block = `${TMUX_MARKER}\n${bindLine}`;
 
   if (!write) {
