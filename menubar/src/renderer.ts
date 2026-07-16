@@ -2,6 +2,7 @@
 // the main process only through the `window.aside` bridge from preload.cjs.
 
 import type { MenubarState } from './backend.js';
+import { stripMarkdown } from '../../dist/utils/markdown.js';
 
 interface AsideBridge {
   getState(): Promise<MenubarState>;
@@ -47,7 +48,9 @@ function render(state: MenubarState): void {
     for (const s of state.sessions) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${s.source} · ${s.projectName} — ${s.status}, quiet ${formatDuration(s.idleForMs)}`;
+      // Kept short: the picker is a narrow control and the browser silently
+      // ellipsises overflow, which cuts the idle value mid-unit ("quiet 2").
+      opt.textContent = `${s.source} · ${s.projectName} · ${s.status} ${formatDuration(s.idleForMs)}`;
       sessionsEl.appendChild(opt);
     }
   }
@@ -77,7 +80,9 @@ function render(state: MenubarState): void {
     who.textContent = turn.role === 'user' ? 'you' : 'aside';
     const body = document.createElement('div');
     body.className = 'body';
-    body.textContent = turn.content;
+    // textContent, not innerHTML: model output is never trusted as markup. So
+    // any markdown would show verbatim — flatten it to prose first.
+    body.textContent = stripMarkdown(turn.content);
     div.append(who, body);
     messagesEl.appendChild(div);
   }

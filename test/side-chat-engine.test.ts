@@ -28,4 +28,11 @@ describe('SYSTEM_PROMPT', () => {
   it('distinguishes benign quiet from a stall', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/waiting for input|not automatically a problem/);
   });
+
+  it('asks for plain prose, since both frontends render text literally', () => {
+    // Markdown is not parsed by the Ink pane or the menubar renderer, so "##"
+    // and "**" reach the user verbatim.
+    expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/plain prose/);
+    expect(SYSTEM_PROMPT).toMatch(/markdown/i);
+  });
 });

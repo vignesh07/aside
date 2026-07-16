@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { COLORS } from '../../config/defaults.js';
 import { wrapText } from '../../utils/wrap-text.js';
+import { stripMarkdown } from '../../utils/markdown.js';
 import type { ChatTurn } from '../../types/chat.js';
 
 interface ChatPaneProps {
@@ -52,7 +53,9 @@ export function ChatPane({ messages, isThinking, watching, width, maxRows }: Cha
       bold: true,
     });
     const color = turn.error ? COLORS.healthCritical : COLORS.textPrimary;
-    for (const [i, text] of wrapText(turn.content, textWidth).entries()) {
+    // Ink paints literal text, so unrendered markdown would reach the user as
+    // noise. Flatten before wrapping — the syntax would skew the line count too.
+    for (const [i, text] of wrapText(stripMarkdown(turn.content), textWidth).entries()) {
       lines.push({ key: `${turn.id}-${i}`, text, color });
     }
     lines.push({ key: `${turn.id}-gap`, text: '', color: COLORS.textDim });
