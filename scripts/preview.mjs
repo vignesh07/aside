@@ -13,6 +13,7 @@
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { App } from '../dist/app.js';
+import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../dist/config/defaults.js';
 
 const argv = process.argv.slice(2);
 const waitIdx = argv.indexOf('--wait');
@@ -22,8 +23,8 @@ const keys = waitIdx === -1 ? argv : argv.slice(0, waitIdx);
 
 const { lastFrame, stdin, unmount } = render(
   React.createElement(App, {
-    provider: 'anthropic',
-    model: 'claude-haiku-4-5-20251001',
+    provider: DEFAULT_PROVIDER,
+    model: DEFAULT_MODEL,
     scopeFilter: {},
   }),
 );
