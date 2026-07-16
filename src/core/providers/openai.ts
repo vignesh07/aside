@@ -1,4 +1,4 @@
-import { errorFromResponse, ProviderError } from './types.js';
+import { assembleSystemPrompt, errorFromResponse, ProviderError } from './types.js';
 import type { CompletionRequest, Provider } from './types.js';
 
 const API_URL = 'https://api.openai.com/v1/chat/completions';
@@ -14,7 +14,9 @@ export const openai: Provider = {
     { id: 'gpt-4o', label: 'GPT-4o' },
   ],
 
-  async complete({ model, systemPrompt, question, apiKey, signal }: CompletionRequest) {
+  async complete(req: CompletionRequest) {
+    const { model, question, apiKey, signal } = req;
+    const systemPrompt = assembleSystemPrompt(req);
     if (!apiKey) throw new ProviderError('openai: no API key', 'openai');
 
     const response = await fetch(API_URL, {

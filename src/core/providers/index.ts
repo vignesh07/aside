@@ -8,7 +8,12 @@ import type { CompletionRequest, Provider } from './types.js';
 export { ProviderError } from './types.js';
 export type { CompletionRequest, ModelSpec, Provider } from './types.js';
 export { listInstalledModels } from './ollama.js';
-export { OBSERVER_CWD, OBSERVER_PROJECT_MARKER } from './claude-cli.js';
+export {
+  OBSERVER_CWD,
+  OBSERVER_PROJECT_MARKER,
+  disposeClaudeSession,
+  isClaudeSessionRunning,
+} from './claude-cli.js';
 
 /**
  * Registration order is picker order, and the first entry is the default.

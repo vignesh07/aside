@@ -12,6 +12,7 @@
 
 import { SessionTailer } from './session-tailer.js';
 import { classifyLine, activityFromEvent } from './event-classifier.js';
+import { disposeClaudeSession } from './providers/index.js';
 import type { AskParams } from './side-chat-engine.js';
 import type { SessionEvent } from '../types/events.js';
 import type { ChatTurn } from '../types/chat.js';
@@ -171,6 +172,9 @@ export class SideChatService {
 
   dispose(): void {
     this.tailer.stopAll();
+    // The observer may be holding a live CLI process open for continuity. It's a
+    // child of ours, so nothing else will reap it.
+    disposeClaudeSession();
   }
 
   private appendTurn(turn: ChatTurn): void {

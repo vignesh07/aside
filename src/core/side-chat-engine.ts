@@ -75,18 +75,17 @@ export class SideChatEngine {
       throw new Error(`Unknown provider: ${this.config.provider}`);
     }
 
-    // Both the observed world and the prior Q&A are folded into the system
-    // prompt, so exactly one user message goes out. Replaying history as real
-    // assistant turns would buy nothing here and costs a wire format per vendor.
-    const systemPrompt = [
-      SYSTEM_PROMPT,
-      renderWorld(world, this.config.transcriptBudget ?? TRANSCRIPT_BUDGET_CHARS),
-      renderHistory(history),
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-
-    return complete(provider.id, { model: this.config.model, systemPrompt, question });
+    // Handed over in pieces rather than pre-mixed, because the provider decides
+    // what it needs. A stateless HTTP API takes all three every call; the
+    // persistent CLI session fixes its role at spawn and already remembers its
+    // own history, so only the world and the question change per turn.
+    return complete(provider.id, {
+      model: this.config.model,
+      systemPrompt: SYSTEM_PROMPT,
+      context: renderWorld(world, this.config.transcriptBudget ?? TRANSCRIPT_BUDGET_CHARS),
+      history: renderHistory(history),
+      question,
+    });
   }
 }
 

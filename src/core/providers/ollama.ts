@@ -1,4 +1,4 @@
-import { errorFromResponse } from './types.js';
+import { assembleSystemPrompt, errorFromResponse } from './types.js';
 import type { CompletionRequest, ModelSpec, Provider } from './types.js';
 
 /**
@@ -34,7 +34,9 @@ export const ollama: Provider = {
     { id: 'qwen2.5', label: 'Qwen 2.5 (local)' },
   ],
 
-  async complete({ model, systemPrompt, question, signal }: CompletionRequest) {
+  async complete(req: CompletionRequest) {
+    const { model, question, signal } = req;
+    const systemPrompt = assembleSystemPrompt(req);
     let response: Response;
     try {
       response = await fetch(`${host()}/api/chat`, {

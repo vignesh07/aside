@@ -21,14 +21,37 @@ export interface ModelSpec {
   recommended?: boolean;
 }
 
+/**
+ * One question, in the pieces a provider needs to assemble it.
+ *
+ * The split matters because providers fall into two kinds. Stateless ones (a
+ * plain HTTP API) get every piece on every call. A session provider keeps one
+ * live conversation: its system prompt is fixed when the process starts, and it
+ * remembers its own history — so only the parts that actually change per turn
+ * can be sent per turn.
+ */
 export interface CompletionRequest {
   model: string;
+  /** The observer's role. Static — safe to fix for a whole conversation. */
   systemPrompt: string;
-  /** The user's question. History is folded into systemPrompt by the caller. */
+  /** What the agents are doing right now. Changes every turn. */
+  context: string;
+  /** Prior turns, pre-rendered. Session providers ignore it: they have their own. */
+  history: string;
   question: string;
   /** Omitted for providers that need no credential (e.g. a local runtime). */
   apiKey?: string;
   signal?: AbortSignal;
+}
+
+/**
+ * Everything a stateless provider sends as its system prompt.
+ *
+ * Role, world, and history collapse into one block because an HTTP API has no
+ * memory between calls — there's nowhere else to put them.
+ */
+export function assembleSystemPrompt(req: CompletionRequest): string {
+  return [req.systemPrompt, req.context, req.history].filter(Boolean).join('\n\n');
 }
 
 export interface Provider {

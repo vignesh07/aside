@@ -13,6 +13,7 @@ import {
   ProviderError,
   OBSERVER_PROJECT_MARKER,
 } from '../src/core/providers/index.js';
+import { assembleSystemPrompt } from '../src/core/providers/types.js';
 import { isObserverSession } from '../src/core/session-scanner.js';
 import { DEFAULT_PROVIDER } from '../src/config/defaults.js';
 import type { TrackedSession } from '../src/types/session.js';
@@ -66,7 +67,7 @@ describe('registry', () => {
 
   it('rejects an unknown provider by name, listing what exists', async () => {
     await expect(
-      complete('gemini', { model: 'x', systemPrompt: 's', question: 'q' }),
+      complete('gemini', { model: 'x', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/Unknown provider "gemini".*anthropic/s);
   });
 });
@@ -141,11 +142,34 @@ describe('observer session filtering', () => {
   });
 });
 
+describe('assembleSystemPrompt', () => {
+  // Stateless providers have no memory between calls, so role, world and
+  // history all have to travel in the system prompt. A session provider fixes
+  // its role at spawn and keeps its own history — hence the split.
+  it('joins role, world and history in that order', () => {
+    expect(
+      assembleSystemPrompt({
+        model: 'm',
+        systemPrompt: 'ROLE',
+        context: 'WORLD',
+        history: 'HISTORY',
+        question: 'q',
+      }),
+    ).toBe('ROLE\n\nWORLD\n\nHISTORY');
+  });
+
+  it('omits empty sections rather than leaving blank gaps', () => {
+    expect(
+      assembleSystemPrompt({ model: 'm', systemPrompt: 'ROLE', context: '', history: '', question: 'q' }),
+    ).toBe('ROLE');
+  });
+});
+
 describe('complete', () => {
   it('points at a local model when a cloud key is missing', async () => {
     delete process.env['ANTHROPIC_API_KEY'];
     await expect(
-      complete('anthropic', { model: 'claude-haiku-4-5-20251001', systemPrompt: 's', question: 'q' }),
+      complete('anthropic', { model: 'claude-haiku-4-5-20251001', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/ollama.*no key/s);
   });
 
@@ -156,6 +180,8 @@ describe('complete', () => {
     const out = await complete('anthropic', {
       model: 'claude-haiku-4-5-20251001',
       systemPrompt: 'sys',
+      context: '',
+      history: '',
       question: 'q',
     });
 
@@ -180,7 +206,7 @@ describe('complete', () => {
       ],
     });
     expect(
-      await complete('anthropic', { model: 'm', systemPrompt: 's', question: 'q' }),
+      await complete('anthropic', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).toBe('ab');
   });
 
@@ -188,7 +214,7 @@ describe('complete', () => {
     process.env['OPENAI_API_KEY'] = 'sk-oai';
     const fetchMock = stubFetch({ choices: [{ message: { content: 'hi' } }] });
 
-    const out = await complete('openai', { model: 'gpt-4o-mini', systemPrompt: 'sys', question: 'q' });
+    const out = await complete('openai', { model: 'gpt-4o-mini', systemPrompt: 'sys', context: '', history: '', question: 'q' });
 
     expect(out).toBe('hi');
     const headers = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
@@ -202,7 +228,7 @@ describe('complete', () => {
   it('sends the ollama shape with no credential and streaming off', async () => {
     const fetchMock = stubFetch({ message: { content: 'local answer' } });
 
-    const out = await complete('ollama', { model: 'llama3.2', systemPrompt: 'sys', question: 'q' });
+    const out = await complete('ollama', { model: 'llama3.2', systemPrompt: 'sys', context: '', history: '', question: 'q' });
 
     expect(out).toBe('local answer');
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -214,7 +240,7 @@ describe('complete', () => {
   it('honours OLLAMA_HOST, tolerating a bare host:port', async () => {
     process.env['OLLAMA_HOST'] = 'box:1234';
     const fetchMock = stubFetch({ message: { content: 'x' } });
-    await complete('ollama', { model: 'm', systemPrompt: 's', question: 'q' });
+    await complete('ollama', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' });
     expect(String(fetchMock.mock.calls[0]![0])).toBe('http://box:1234/api/chat');
   });
 
@@ -225,7 +251,7 @@ describe('complete', () => {
     }) as unknown as typeof fetch;
 
     await expect(
-      complete('ollama', { model: 'm', systemPrompt: 's', question: 'q' }),
+      complete('ollama', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/Is Ollama running\?/);
   });
 
@@ -234,7 +260,7 @@ describe('complete', () => {
     stubFetch({ error: { message: 'invalid x-api-key' } }, { ok: false, status: 401 });
 
     await expect(
-      complete('anthropic', { model: 'm', systemPrompt: 's', question: 'q' }),
+      complete('anthropic', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/credentials rejected \(401\).*invalid x-api-key/s);
   });
 
@@ -242,14 +268,14 @@ describe('complete', () => {
     process.env['OPENAI_API_KEY'] = 'sk';
     stubFetch({ error: { message: 'slow down' } }, { ok: false, status: 429 });
     await expect(
-      complete('openai', { model: 'm', systemPrompt: 's', question: 'q' }),
+      complete('openai', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/rate limited/);
   });
 
   it('reports an empty response rather than returning an empty string', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk';
     stubFetch({ content: [] });
-    expect(await complete('anthropic', { model: 'm', systemPrompt: 's', question: 'q' })).toBe(
+    expect(await complete('anthropic', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' })).toBe(
       '(no response)',
     );
   });
@@ -257,7 +283,7 @@ describe('complete', () => {
   it('raises ProviderError carrying the provider and status', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk';
     stubFetch({}, { ok: false, status: 500 });
-    const err = await complete('anthropic', { model: 'm', systemPrompt: 's', question: 'q' }).catch(
+    const err = await complete('anthropic', { model: 'm', systemPrompt: 's', context: '', history: '', question: 'q' }).catch(
       (e) => e,
     );
     expect(err).toBeInstanceOf(ProviderError);

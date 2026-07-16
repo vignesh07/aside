@@ -1,4 +1,4 @@
-import { errorFromResponse, ProviderError } from './types.js';
+import { assembleSystemPrompt, errorFromResponse, ProviderError } from './types.js';
 import type { CompletionRequest, Provider } from './types.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
@@ -20,7 +20,9 @@ export const anthropic: Provider = {
     { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
   ],
 
-  async complete({ model, systemPrompt, question, apiKey, signal }: CompletionRequest) {
+  async complete(req: CompletionRequest) {
+    const { model, question, apiKey, signal } = req;
+    const systemPrompt = assembleSystemPrompt(req);
     if (!apiKey) throw new ProviderError('anthropic: no API key', 'anthropic');
 
     const response = await fetch(API_URL, {

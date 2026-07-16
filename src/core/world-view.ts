@@ -178,11 +178,47 @@ export function renderWorld(world: WorldSnapshot, totalChars: number = TRANSCRIP
     .join('\n\n');
 }
 
-/** Render prior side-chat turns as context so the conversation stays coherent. */
-export function renderHistory(history: ChatTurn[]): string {
+/**
+ * Character budget for prior chat turns folded into the prompt.
+ *
+ * This chat is long-lived — the user opens it, asks, closes, and comes back
+ * tomorrow. Unbounded, every prior answer (~1.5k tokens each) would ride along
+ * on every subsequent question: cost rising with the age of the conversation
+ * until it eventually blows the context entirely.
+ */
+export const HISTORY_BUDGET_CHARS = 8_000;
+
+/**
+ * Render prior side-chat turns as context so the conversation stays coherent.
+ *
+ * Keeps the most recent turns within budget. Older ones are dropped — and the
+ * drop is *stated*, because a model told nothing about what it forgot will
+ * happily contradict something it said an hour ago with full confidence.
+ */
+export function renderHistory(
+  history: ChatTurn[],
+  budgetChars: number = HISTORY_BUDGET_CHARS,
+): string {
   if (history.length === 0) return '';
-  const lines = history.map(
-    (turn) => `${turn.role === 'user' ? 'User asked' : 'You answered'}: ${turn.content}`,
-  );
-  return `=== Earlier in this side chat (for continuity) ===\n${lines.join('\n')}`;
+
+  const kept: string[] = [];
+  let spent = 0;
+  let dropped = 0;
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i]!;
+    const line = `${turn.role === 'user' ? 'User asked' : 'You answered'}: ${turn.content}`;
+    if (spent + line.length > budgetChars && kept.length > 0) {
+      dropped = i + 1;
+      break;
+    }
+    kept.unshift(line);
+    spent += line.length + 1;
+  }
+
+  const header =
+    dropped > 0
+      ? `=== Earlier in this side chat (${dropped} older turn(s) omitted for length) ===`
+      : '=== Earlier in this side chat (for continuity) ===';
+  return `${header}\n${kept.join('\n')}`;
 }
