@@ -13,8 +13,12 @@ const cli = meow(
     $ aside dock [options]       Open the side chat in a docked split (tmux / iTerm2)
     $ aside install [--write]    Add a tmux key (<prefix> C-a) to summon the dock
 
-  A read-only side chat that watches your running agent session so you can ask
-  questions about it without branching the main thread.
+  A read-only bird's-eye chat for your AI coding agents. Watches every Claude
+  Code, Codex and Pi session on this machine and answers questions across all
+  of them — "what's running?", "why did it pick that path?", "is anything
+  stuck?" — without interrupting or branching any of them.
+
+  It only ever reads. It has no tools and cannot touch your sessions.
 
   Options
     -p, --provider     LLM provider for the side chat (pi-ai provider id, default: anthropic)
@@ -39,8 +43,8 @@ const cli = meow(
     esc      Unfocus the chat input
     enter    Send your question
     m        Open model picker
-    tab / j  Next session
-    k        Previous session
+    tab / j  Focus next session (deepens its detail; the chat spans them all)
+    k        Focus previous session
     q        Quit
 
   Examples
@@ -52,6 +56,9 @@ const cli = meow(
 `,
   {
     importMeta: import.meta,
+    // The help text opens with its own summary; meow would otherwise print the
+    // package.json description above it and say the same thing twice.
+    description: false,
     flags: {
       provider: { type: 'string', shortFlag: 'p', default: DEFAULT_PROVIDER },
       model: { type: 'string', shortFlag: 'm', default: DEFAULT_MODEL },

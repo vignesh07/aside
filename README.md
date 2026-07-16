@@ -1,21 +1,42 @@
 # aside
 
-A **read-only bird's-eye chat** for your AI coding agents. While Claude Code,
-Codex, and others run, `aside` watches *all* of their sessions and lets you ask
-questions across them — *without* interrupting or branching any main thread.
+A **read-only bird's-eye chat** for your AI coding agents — **across vendors**.
+
+`aside` watches every Claude Code, Codex, and Pi session on your machine at once
+and answers questions about all of them in a single chat, without interrupting
+or branching any of them.
 
 > "why did it edit that file?" · "what's running right now?" · "has anything
 > been stuck for a while?" — ask `aside`, not the agent.
 
+```
+you › what is each of my agents doing, and is anything stuck?
+
+aside › fold (codex): Running isolation checks on the Electron app. Lint,
+        typecheck and build passed; pnpm test:e2e just exited 1. Not stuck —
+        actively diagnosing.
+
+        aside (claude): Building both frontends. Quiet for 7s, but a build is
+        still in progress. Not stuck — mid-build.
+
+        Nothing looks stuck. Both are active and on track.
+```
+
 ## Why
 
-When you interrupt a coding agent to ask a clarifying question, the question and
-its answer become part of the main context — costing tokens and sometimes
-steering the agent off course. `aside` decouples the two: it observes your
-sessions (read-only) and answers in a separate chat that the agents never see.
+Two reasons.
 
-It's one chat over every session, not one chat per session. Run three agents
-across three repos and ask "which of these is actually making progress?".
+**Asking costs you.** When you interrupt an agent to ask a clarifying question,
+the question and its answer land in the main context — burning tokens and
+sometimes steering the agent off course. `aside` decouples them: it observes
+read-only and answers in a chat your agents never see.
+
+**Nobody watches across vendors.** Claude Code's own agent view covers Claude
+Code. Your Codex sessions are invisible to it, and always will be. `aside` reads
+all of them through one mechanism, so "which of my agents is actually making
+progress?" is a question you can ask once and have answered about everything.
+
+It's one chat over every session, not one chat per session.
 
 ## What it can and can't see
 
@@ -26,6 +47,21 @@ it went that way, how long it's been quiet, how much context it's burned.
 terminals, or browser tabs. It reads agent transcripts; that's the whole
 mechanism. Ask it about a running `docker compose` and it will tell you that's
 outside its view rather than guess.
+
+## How it compares
+
+There are good tools adjacent to this. They mostly *display state*; `aside`
+*reasons about it*, and it does so across vendors.
+
+| | scope | what it gives you |
+|---|---|---|
+| Claude Code agent view (`claude agents`) | Claude Code only | A live list of your sessions and which need input. Native, and better at this than any third party. |
+| Observability dashboards (e.g. agents-observe, ai-observer) | varies; some cross-tool | Hook/OTel event streams, token and cost metrics, replay. |
+| **aside** | **Claude Code + Codex + Pi, together** | **A chat. Ask "why did it pick that path?", "is that quiet a stall or is it waiting on me?", "which of these is actually progressing?"** |
+
+If you only run Claude Code, use agent view — it's native and it's good. `aside`
+earns its place when you run **more than one vendor** and want one thing that
+understands all of them, or when you want the *why* rather than the *what*.
 
 ## How it works
 
@@ -60,15 +96,33 @@ The session scanning, tailing, classification, session picker, and model picker
 are reused from [`talkatui`](https://github.com/) — `aside` swaps the
 auto-commentary engine for an interactive, read-only Q&A engine.
 
+## Install
+
+```bash
+npm install -g @vignesh07/aside
+aside
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/vignesh07/aside.git
+cd aside && npm install && npm run build
+npm start
+```
+
+Needs an API key for the chat provider (e.g. `ANTHROPIC_API_KEY`), or OAuth
+credentials at `~/.pi/agent/auth.json`. That key is only for the side chat —
+`aside` reads your agents' transcripts straight off disk and needs no
+credentials for them.
+
 ## Usage
 
 ```bash
-npm install
-npm run build
-node dist/cli.js                 # or: npm start — run in the current pane
-
-node dist/cli.js --source codex  # watch only Codex sessions
-node dist/cli.js --project myrepo --provider openai --model gpt-4o-mini
+aside                       # watch everything
+aside --source codex        # watch only Codex sessions
+aside --project myrepo      # scope to one project
+aside --provider openai --model gpt-4o-mini   # pick the observer's model
 ```
 
 ### Docked side chat (the "chat bar in the same window" feel)
@@ -99,8 +153,14 @@ A dropdown hangs off the menubar with a session picker and the side chat. The
 Electron main process drives `MenubarBackend` (a thin, Electron-free wrapper over
 the core), so there's no duplicated logic between the TUI and the menubar.
 
-Needs an API key for the chat provider (e.g. `ANTHROPIC_API_KEY`), or OAuth
-credentials at `~/.pi/agent/auth.json`.
+To inspect it without clicking a tray icon (it hides on blur, so it can't be
+screenshotted normally):
+
+```bash
+npx electron dist/main.js --show                        # pin it open
+npx electron dist/main.js --capture /tmp/shot.png \
+  --ask "is anything stuck?"                            # render, ask, screenshot, quit
+```
 
 ### Keys
 

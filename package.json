@@ -1,16 +1,41 @@
 {
-  "name": "aside",
+  "name": "@vignesh07/aside",
   "version": "0.1.0",
-  "description": "A read-only side chat that watches your agent session (Claude Code, Codex) so you can ask questions without branching the main thread.",
+  "description": "A read-only bird's-eye chat for your AI coding agents. Watches every Claude Code, Codex, and Pi session on your machine and answers questions across all of them — without interrupting any of them.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "observability",
+    "tui",
+    "cli",
+    "read-only",
+    "agent-monitoring"
+  ],
+  "homepage": "https://github.com/vignesh07/aside#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vignesh07/aside.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vignesh07/aside/issues"
+  },
   "type": "module",
   "bin": {
     "aside": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "scripts/smoke.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "prepack": "npm run build",
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
+    "preview": "node scripts/preview.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
     "lint": "tsc --noEmit"
@@ -32,6 +57,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "license": "MIT"
 }
