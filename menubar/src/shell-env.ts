@@ -19,31 +19,39 @@ import { execFileSync } from 'node:child_process';
 /**
  * Variables worth importing.
  *
- * Deliberately narrow. Adopting a login shell's whole environment would let it
- * overwrite PATH and friends inside a running app — an unpredictable blast
- * radius for something we only need credentials from.
+ * Deliberately narrow: adopting a login shell's entire environment inside a
+ * running app is an unpredictable blast radius.
+ *
+ * PATH is the exception, and it's not optional. The default provider answers by
+ * spawning the user's `claude` CLI, which lives somewhere like ~/.local/bin or
+ * a Homebrew prefix — none of which are in the PATH launchd hands a GUI app
+ * (/usr/bin:/bin:/usr/sbin:/sbin). Without the shell's PATH, the packaged app
+ * cannot find the CLI at all, and the no-API-key path fails for exactly the
+ * users it exists for.
  */
-const CREDENTIAL_VAR = /^[A-Z0-9_]*(API_KEY|AUTH_TOKEN|API_TOKEN)$/;
+const IMPORTABLE_VAR = /^(PATH|[A-Z0-9_]*(API_KEY|AUTH_TOKEN|API_TOKEN))$/;
 
 /** Ignore absurd values: a credential is not 100kB of shell function. */
 const MAX_VALUE_LENGTH = 8_192;
 
 export interface ShellEnvResult {
-  /** Credential variables found in the login shell that weren't already set. */
+  /** Variables adopted from the login shell. */
   imported: string[];
   /** Populated when the shell couldn't be read; import is best-effort. */
   error?: string;
 }
 
 /**
- * Import credential variables from the login shell into `process.env`.
+ * Import PATH and credential variables from the login shell into `process.env`.
  *
- * Never overwrites a variable that's already set — an explicitly provided
- * environment must win over whatever a dotfile happens to say.
+ * Credentials never overwrite one that's already set — an explicitly provided
+ * environment must win over whatever a dotfile happens to say. PATH is the
+ * exception: launchd always sets a minimal one, so "already set" carries no
+ * intent, and keeping it would defeat the point of asking.
  *
  * Best-effort by design: a shell that hangs, errors, or prints nothing leaves
- * the process exactly as it was. Failing to import is not worse than never
- * having tried, and it must never stop the app from starting.
+ * the process exactly as it was. Failing to import is no worse than never
+ * having tried, and must never stop the app from starting.
  */
 export function importShellEnv(timeoutMs = 5_000): ShellEnvResult {
   const shell = process.env['SHELL'];
@@ -75,9 +83,12 @@ export function importShellEnv(timeoutMs = 5_000): ShellEnvResult {
     if (!match) continue;
 
     const [, key, value] = match as unknown as [string, string, string];
-    if (!CREDENTIAL_VAR.test(key)) continue;
+    if (!IMPORTABLE_VAR.test(key)) continue;
     if (!value || value.length > MAX_VALUE_LENGTH) continue;
-    if (process.env[key]) continue; // an explicit env always wins
+    // A credential already in the environment was put there deliberately.
+    // A PATH already here came from launchd and means nothing, so take the
+    // shell's — otherwise the CLI we need stays unreachable.
+    if (key !== 'PATH' && process.env[key]) continue;
 
     process.env[key] = value;
     imported.push(key);
@@ -86,9 +97,15 @@ export function importShellEnv(timeoutMs = 5_000): ShellEnvResult {
   return { imported };
 }
 
-/** True when no credential variable is present, i.e. an import is worth trying. */
-export function isMissingCredentials(): boolean {
-  return !Object.keys(process.env).some(
-    (k) => CREDENTIAL_VAR.test(k) && (process.env[k]?.length ?? 0) > 0,
-  );
+/**
+ * True when the app looks like it was launched from a GUI rather than a shell.
+ *
+ * Detected via PATH: launchd hands GUI apps a minimal, fixed PATH with no user
+ * directories in it. That's the signal that the rest of the shell environment —
+ * the CLI's location, any exported keys — is missing too.
+ */
+export function isMissingShellEnv(): boolean {
+  const path = process.env['PATH'] ?? '';
+  const hasUserPaths = /\/(usr\/local|opt\/homebrew|\.local|\.npm-global|\.cargo)\/bin/.test(path);
+  return !hasUserPaths;
 }

@@ -33,7 +33,7 @@ const cli = meow(
     -h, --help         Show help
 
   Credentials
-    No API key needed. By default aside answers by running your own `claude`
+    No API key needed. By default aside answers by running your own "claude"
     CLI (with all tools disabled), so it uses the Claude Code login you already
     have. It never reads your tokens — Claude Code stays in charge of auth.
 

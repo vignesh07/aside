@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { MenubarBackend, type MenubarState } from './backend.js';
-import { importShellEnv, isMissingCredentials } from './shell-env.js';
+import { importShellEnv, isMissingShellEnv } from './shell-env.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -112,12 +112,15 @@ app.whenReady().then(() => {
   // Menubar-only app: no dock icon.
   app.dock?.hide();
 
-  // A GUI launch inherits launchd's environment, not the user's shell — so a key
-  // exported from .zshrc is invisible here and every question fails with "no API
-  // key" despite working perfectly in any terminal. Recover it from the login
-  // shell. Skipped when a credential is already present (the common case when
-  // launched from a terminal), so startup isn't taxed for nothing.
-  if (isMissingCredentials()) {
+  // A GUI launch inherits launchd's environment, not the user's shell. Two
+  // things break as a result, and both look like the app is simply broken:
+  //   - PATH lacks ~/.local/bin etc, so the `claude` CLI the default provider
+  //     spawns can't be found at all;
+  //   - a key exported from .zshrc is invisible, so key-based providers fail.
+  // Both work perfectly when launched from a terminal, which is exactly how
+  // this gets missed. Recover them from the login shell; skipped when launched
+  // from a shell, so startup isn't taxed for nothing.
+  if (isMissingShellEnv()) {
     const { imported, error } = importShellEnv();
     if (imported.length > 0) console.log(`  • imported from login shell: ${imported.join(', ')}`);
     else if (error) console.warn(`  • shell env import failed: ${error}`);

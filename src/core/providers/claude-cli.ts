@@ -1,11 +1,8 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { promisify } from 'node:util';
 import type { CompletionRequest, Provider } from './types.js';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Sessions the observer itself creates land under this directory.
@@ -65,55 +62,114 @@ export const claudeCli: Provider = {
     const env = { ...process.env };
     for (const key of OVERRIDING_VARS) delete env[key];
 
-    try {
-      const { stdout } = await execFileAsync(
-        'claude',
-        [
-          '-p',
-          question,
-          // "" disables every built-in tool. aside is a read-only observer, and
-          // Claude Code ships with Write/Edit/Bash enabled — telling the model it
-          // has no tools is not the same as it having none. This is the mechanism
-          // that makes the read-only promise true rather than aspirational.
-          '--tools',
-          '',
-          '--append-system-prompt',
-          systemPrompt,
-          '--model',
-          model,
-        ],
-        {
-          cwd: OBSERVER_CWD,
-          env,
-          timeout: TIMEOUT_MS,
-          maxBuffer: MAX_OUTPUT_BYTES,
-          ...(signal ? { signal } : {}),
-        },
-      );
-      return stdout.trim() || '(no response)';
-    } catch (err: unknown) {
-      throw explain(err);
-    }
+    const args = [
+      '-p',
+      question,
+      // "" disables every built-in tool. aside is a read-only observer, and
+      // Claude Code ships with Write/Edit/Bash enabled — telling a model it has
+      // no tools is not the same as it having none. This is the mechanism that
+      // makes the read-only promise true rather than aspirational.
+      '--tools',
+      '',
+      '--append-system-prompt',
+      systemPrompt,
+      '--model',
+      model,
+    ];
+
+    return run('claude', args, { cwd: OBSERVER_CWD, env, signal });
   },
 };
 
+interface RunOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * Run the CLI with stdin closed and collect stdout.
+ *
+ * spawn, not execFile, specifically for stdin: `claude -p` reads it, expecting
+ * a possible piped prompt. Handed an open pipe that never closes — which is what
+ * execFile provides and gives no way to override — it stalls, warns "no stdin
+ * data received in 3s", and the run fails. 'ignore' closes it outright, which
+ * tells the CLI up front that the prompt is in argv and nothing is coming.
+ */
+function run(command: string, args: string[], opts: RunOptions): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let size = 0;
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, TIMEOUT_MS);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      // A runaway CLI must not be able to exhaust memory.
+      if (size > MAX_OUTPUT_BYTES) {
+        child.kill('SIGKILL');
+        return;
+      }
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(explain(err));
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`claude-cli: timed out after ${TIMEOUT_MS / 1000}s.`));
+        return;
+      }
+      if (code !== 0) {
+        // Claude Code reports failures on stdout, not stderr — "Not logged in ·
+        // Please run /login" arrives there with an empty stderr. Reading only
+        // stderr turns every such failure into a bare "exited with code 1".
+        reject(explain(Object.assign(new Error(`exited with code ${code}`), { stderr, stdout })));
+        return;
+      }
+      resolve(stdout.trim() || '(no response)');
+    });
+  });
+}
+
 function explain(err: unknown): Error {
-  const e = err as NodeJS.ErrnoException & { stderr?: string; killed?: boolean };
+  const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
 
   if (e.code === 'ENOENT') {
     return new Error(
-      'claude-cli: the `claude` command was not found. Install Claude Code, or pick a ' +
-        'different provider. (If aside was launched from Finder it may not see your ' +
-        'PATH — launching from a terminal is a quick way to check.)',
+      'claude-cli: the "claude" command was not found. Install Claude Code, or pick another ' +
+        'provider (--provider ollama needs nothing). If aside was launched from Finder it ' +
+        'may not have your PATH.',
     );
   }
-  if (e.killed) {
-    return new Error(`claude-cli: timed out after ${TIMEOUT_MS / 1000}s.`);
-  }
 
-  const stderr = (e.stderr ?? '').trim();
-  if (/not logged in|please run.*login|authentication/i.test(stderr)) {
-    return new Error('claude-cli: Claude Code is not logged in. Run `claude` once and sign in.');
+  // Both streams: Claude Code puts user-facing failures on stdout.
+  const output = `${(e.stdout ?? '').trim()}\n${(e.stderr ?? '').trim()}`.trim();
+
+  if (/not logged in|please run\s*\/?login|authentication/i.test(output)) {
+    return new Error(
+      'claude-cli: Claude Code is not logged in. Run "claude" in a terminal and sign in, ' +
+        'then try again.',
+    );
   }
-  return new Error(`claude-cli: ${stderr || e.message || 'failed'}`.slice(0, 400));
+  return new Error(`claude-cli: ${output || e.message || 'failed'}`.slice(0, 400));
 }
