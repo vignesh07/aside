@@ -265,7 +265,7 @@ layout bugs that only appear at a given terminal size.
       `aside.app` with a tray icon — DMG/zip for arm64 + x64
 - [x] Developer ID signing + hardened runtime + notarization, with a
       `verify:signing` check that asserts what Gatekeeper actually enforces
-- [ ] model picker in the menubar UI (the TUI has one; menubar is fixed-model)
+- [x] model picker in both frontends — the observer runs on any pi-ai provider
 - [ ] richer transcript view (live feed of what the agents are doing) alongside chat
 - [ ] proactive nudges ("session X has been stuck 20m") rather than only
       answering when asked

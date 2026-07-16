@@ -25,18 +25,28 @@ function fakeSession(id: string, status: TrackedSession['status'] = 'active'): T
   };
 }
 
+const FAKE_MODELS = [
+  { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', recommended: true },
+  { provider: 'openai', model: 'gpt-4o-mini' },
+];
+
 function makeBackend(sessions: TrackedSession[]) {
+  const setModelCalls: Array<[string, string]> = [];
   const service = new SideChatService({
     ask: async (_p: AskParams) => 'answer',
-    setModel: () => {},
+    setModel: (p: string, m: string) => setModelCalls.push([p, m]),
   });
   const states: number[] = [];
   const backend = new MenubarBackend(
     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     () => states.push(1),
-    { scan: () => ({ sessions, jsonlPaths: new Map() }), service },
+    {
+      scan: () => ({ sessions, jsonlPaths: new Map() }),
+      service,
+      models: () => FAKE_MODELS,
+    },
   );
-  return { backend, service };
+  return { backend, service, setModelCalls };
 }
 
 describe('MenubarBackend', () => {
@@ -87,6 +97,23 @@ describe('MenubarBackend', () => {
     const msgs = backend.getState().messages;
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
     expect(msgs[1]!.content).toBe('answer');
+  });
+
+  it('offers the model catalog so the menubar can switch provider', () => {
+    const { backend } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    // Cross-provider is the product's whole position; a fixed-model menubar
+    // can't deliver it.
+    expect(backend.getState().models.map((m) => m.provider)).toEqual(['anthropic', 'openai']);
+  });
+
+  it('routes a model switch to the engine and reflects it in state', () => {
+    const { backend, setModelCalls } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    backend.setModel('openai', 'gpt-4o-mini');
+    expect(setModelCalls).toEqual([['openai', 'gpt-4o-mini']]);
+    expect(backend.getState().provider).toBe('openai');
+    expect(backend.getState().model).toBe('gpt-4o-mini');
   });
 
   it('reports idle time per session for the roster', () => {

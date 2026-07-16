@@ -9,6 +9,8 @@ import { scanAllSessions } from '../../dist/core/session-scanner.js';
 import { SideChatService } from '../../dist/core/side-chat-service.js';
 import { SideChatEngine } from '../../dist/core/side-chat-engine.js';
 import { TIMING } from '../../dist/config/defaults.js';
+import { flattenModelCatalog } from '../../dist/config/model-catalog.js';
+import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
 
@@ -32,6 +34,8 @@ export interface MenubarState {
   thinking: boolean;
   provider: string;
   model: string;
+  /** Every provider/model the observer can run on, for the picker. */
+  models: ModelOption[];
 }
 
 export interface BackendConfig {
@@ -44,11 +48,14 @@ export interface BackendConfig {
 export interface BackendDeps {
   scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
   service?: SideChatService;
+  models?: () => ModelOption[];
 }
 
 export class MenubarBackend {
   private readonly service: SideChatService;
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
+  /** Catalogued once: it's derived from pi-ai's static tables, not live state. */
+  private readonly models: ModelOption[];
   private sessions: TrackedSession[] = [];
   private focusId: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -59,6 +66,7 @@ export class MenubarBackend {
     deps: BackendDeps = {},
   ) {
     this.scan = deps.scan ?? (() => scanAllSessions({}));
+    this.models = (deps.models ?? flattenModelCatalog)();
     this.service =
       deps.service ??
       new SideChatService(new SideChatEngine(config), {
@@ -120,6 +128,7 @@ export class MenubarBackend {
       thinking: this.service.isThinking(),
       provider: this.config.provider,
       model: this.config.model,
+      models: this.models,
     };
   }
 

@@ -19,10 +19,14 @@ declare global {
 }
 
 const sessionsEl = document.getElementById('sessions') as HTMLSelectElement;
+const modelsEl = document.getElementById('models') as HTMLSelectElement;
 const messagesEl = document.getElementById('messages') as HTMLDivElement;
 const formEl = document.getElementById('composer') as HTMLFormElement;
 const inputEl = document.getElementById('input') as HTMLInputElement;
 const sendEl = document.getElementById('send') as HTMLButtonElement;
+
+/** "provider:model" — a single select value addressing both. */
+const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
 /** Human duration for roster labels: "4s", "12m", "3h", "2d". */
 function formatDuration(ms: number): string {
@@ -55,6 +59,36 @@ function render(state: MenubarState): void {
     }
   }
   if (state.focusId) sessionsEl.value = state.focusId;
+
+  // Model picker. Grouped by provider — switching *provider* is the point, and a
+  // flat list of every model across every vendor is unnavigable. Rebuilt only
+  // when the catalog changes (it's static), so an open dropdown isn't clobbered.
+  const modelsKey = String(state.models.length);
+  if (modelsEl.dataset['key'] !== modelsKey) {
+    modelsEl.dataset['key'] = modelsKey;
+    modelsEl.innerHTML = '';
+    const byProvider = new Map<string, typeof state.models>();
+    for (const m of state.models) {
+      const list = byProvider.get(m.provider) ?? [];
+      list.push(m);
+      byProvider.set(m.provider, list);
+    }
+    for (const [provider, list] of byProvider) {
+      const group = document.createElement('optgroup');
+      group.label = provider;
+      for (const m of list) {
+        const opt = document.createElement('option');
+        opt.value = modelKey(m.provider, m.model);
+        opt.textContent = `${m.label ?? m.model}${m.recommended ? ' ·' : ''}`;
+        group.appendChild(opt);
+      }
+      modelsEl.appendChild(group);
+    }
+  }
+  modelsEl.value = modelKey(state.provider, state.model);
+  // Swapping models mid-answer would silently apply to the next turn, not this
+  // one — confusing enough to just disable.
+  modelsEl.disabled = state.thinking;
 
   // The chat is never gated on a selection: "nothing is running" is a valid
   // answer to a valid question.
@@ -97,6 +131,14 @@ function render(state: MenubarState): void {
 
 sessionsEl.addEventListener('change', () => {
   void window.aside.selectSession(sessionsEl.value);
+});
+
+modelsEl.addEventListener('change', () => {
+  // Split on the first colon only: model ids contain colons (e.g. "vendor:tag").
+  const raw = modelsEl.value;
+  const sep = raw.indexOf(':');
+  if (sep === -1) return;
+  void window.aside.setModel(raw.slice(0, sep), raw.slice(sep + 1));
 });
 
 formEl.addEventListener('submit', (e) => {
