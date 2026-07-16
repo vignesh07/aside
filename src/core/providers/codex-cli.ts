@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { CompletionRequest, Provider } from './types.js';
 import { OBSERVER_CWD } from './claude-session.js';
 
@@ -25,26 +26,47 @@ const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 /** Session id of the last answer, so follow-ups continue the same conversation. */
 let lastSessionActive = false;
 
+/** Numeric sort key from a `codex-cli 0.144.5` version banner. */
+function versionRank(output: string): number {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(output);
+  if (!match) return 0;
+  const [, major, minor, patch] = match as unknown as [string, string, string, string];
+  return Number(major) * 1_000_000 + Number(minor) * 1_000 + Number(patch);
+}
+
 /**
- * Find a Codex binary that actually runs.
+ * Find the newest working Codex binary.
  *
- * `codex` on PATH is not trustworthy: npm's wrapper resolves a per-platform
- * vendor binary that is routinely missing (a partial install leaves the wrapper
- * on PATH and the executable absent), and a Homebrew install may be too old for
- * the model in the user's config. So probe candidates and take the first that
- * responds, rather than assuming the first on PATH is usable.
+ * `codex` on PATH is not trustworthy, in two different ways:
+ *
+ *  - npm's wrapper resolves a per-platform vendor binary that is routinely
+ *    missing — a partial or wrong-arch install leaves the wrapper on PATH and no
+ *    executable behind it, so it's on PATH and still unusable.
+ *  - a second install (Homebrew) may be years old. It answers --version happily
+ *    and then rejects the model or config the user actually has, which surfaces
+ *    as a baffling error about their own settings.
+ *
+ * So probe every candidate and take the newest that responds — "first on PATH"
+ * and "first that runs" both pick wrong on a machine with two installs.
  */
 export function resolveCodexBinary(): string | null {
   const candidates = ['codex', '/opt/homebrew/bin/codex', '/usr/local/bin/codex'];
+  let best: { path: string; rank: number } | null = null;
+
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ['--version'], { stdio: 'ignore', timeout: 10_000 });
-      return candidate;
+      const out = execFileSync(candidate, ['--version'], {
+        encoding: 'utf-8',
+        timeout: 10_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const rank = versionRank(out);
+      if (!best || rank > best.rank) best = { path: candidate, rank };
     } catch {
-      continue;
+      continue; // Present but unusable is the same as absent.
     }
   }
-  return null;
+  return best?.path ?? null;
 }
 
 export const codexCli: Provider = {
@@ -80,6 +102,12 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
   const resume = lastSessionActive ? ['resume', '--last'] : [];
   const prompt = context ? `${context}\n\n---\n\nQuestion: ${question}` : question;
 
+  // Codex writes its final message here. Asking for the answer directly beats
+  // scraping stdout, which interleaves the model's text with Codex's own
+  // timestamped logs, token counts, and a repeat of the final message — all of
+  // which would land in the chat panel.
+  const answerFile = path.join(OBSERVER_CWD, `answer-${process.pid}-${Date.now()}.txt`);
+
   const args = [
     'exec',
     ...resume,
@@ -94,6 +122,8 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
     // with it — their config is not ours to be fragile about.
     '-c',
     'mcp_servers={}',
+    '--output-last-message',
+    answerFile,
     '--model',
     model,
   ];
@@ -133,27 +163,26 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
 
     child.on('close', (code) => {
       clearTimeout(timer);
+      const answer = readAnswer(answerFile);
       if (timedOut) return reject(new Error(`codex-cli: timed out after ${TIMEOUT_MS / 1000}s.`));
       if (code !== 0) return reject(explain(new Error(`exited with code ${code}`), stderr + stdout));
       lastSessionActive = true;
-      resolve(extractAnswer(stdout));
+      resolve(answer || '(no response)');
     });
   });
 }
 
-/**
- * Pull the agent's reply out of `codex exec` output.
- *
- * Codex prefixes log lines with a bracketed timestamp and interleaves them with
- * the model's text. Returning the raw stream would put its own logging in the
- * chat panel, so drop anything that looks like a log line.
- */
-function extractAnswer(stdout: string): string {
-  const lines = stdout
-    .split('\n')
-    .filter((l) => !/^\[\d{4}-\d{2}-\d{2}T/.test(l.trim()))
-    .filter((l) => !/^(thinking|codex|tokens used|User instructions:)/i.test(l.trim()));
-  return lines.join('\n').trim() || '(no response)';
+/** Read and clean up the file Codex wrote its final message to. */
+function readAnswer(file: string): string {
+  try {
+    const text = fs.readFileSync(file, 'utf-8').trim();
+    fs.rmSync(file, { force: true });
+    return text;
+  } catch {
+    // No file means Codex died before answering; the exit code and stderr carry
+    // the real story, so don't mask it with a file-not-found.
+    return '';
+  }
 }
 
 function explain(err: unknown, output: string): Error {
