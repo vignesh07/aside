@@ -5,6 +5,7 @@ import { scanAllSessions } from '../dist/core/session-scanner.js';
 import { classifyLine } from '../dist/core/event-classifier.js';
 import { SideChatEngine } from '../dist/core/side-chat-engine.js';
 import { renderWorld } from '../dist/core/world-view.js';
+import { disposeClaudeSession } from '../dist/core/providers/index.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../dist/config/defaults.js';
 import * as fs from 'node:fs';
 
@@ -61,3 +62,9 @@ const question =
   'Across all my agent sessions: what is each one doing, and is any of them stuck or idle longer than it should be?';
 console.log(`\nasking the observer: "${question}"\n`);
 console.log('ANSWER:', await engine.ask({ world, history: [], question }));
+
+// The default provider holds a `claude` process open for conversation
+// continuity. It's our child, so nothing else reaps it — without this the script
+// prints its answer and then hangs forever waiting on a session no one will use
+// again. Long-lived hosts (the TUI, the menubar) dispose via SideChatService.
+disposeClaudeSession();
