@@ -163,14 +163,44 @@ npm run dist      # DMG + zip, arm64 and x64 -> release/
 It's a menubar-only app (`LSUIElement`) — no dock icon, no Cmd-Tab entry. Click
 the bubble in the menubar to drop the chat down.
 
-> **The app is unsigned.** There's no Apple Developer ID behind this, so it
-> can't be notarized. macOS will refuse it on first launch ("cannot be opened
-> because the developer cannot be verified"). Right-click → Open, or:
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/aside.app
-> ```
-> Only do that because you built it or you trust the source. If this ever ships
-> to people who aren't you, it needs signing + notarization first.
+### Signing and notarization
+
+Builds are signed with a Developer ID Application certificate and notarized, so
+the app opens on other machines without a Gatekeeper warning.
+
+**Credentials never live in this repo.** They're stored once in the macOS
+keychain and referenced by profile name:
+
+```bash
+# One time. Use an app-specific password from appleid.apple.com
+# (Sign-In and Security -> App-Specific Passwords) — NOT your Apple ID password.
+xcrun notarytool store-credentials "aside-notary" \
+  --apple-id "<your-apple-id>" \
+  --team-id 8ZS766K9K4 \
+  --password "<app-specific-password>"
+```
+
+Then `npm run dist` signs, notarizes and staples. Without that profile the build
+still succeeds — it just warns loudly and produces a signed-but-not-notarized
+app, which will be blocked on any machine but yours.
+
+Check what you actually built:
+
+```bash
+npm run verify:signing
+```
+
+It asserts the things Gatekeeper checks — deep signature validity, Developer ID
+authority, hardened runtime, the JIT entitlements, a stapled ticket, and the
+final `spctl` verdict. "It launched on my Mac" proves none of these: an
+un-notarized app runs fine on the machine that signed it.
+
+> **Why Electron apps break when you sign them.** Notarization requires the
+> hardened runtime; the hardened runtime blocks JIT; V8 *is* a JIT. So a signed
+> Electron app without `com.apple.security.cs.allow-jit` and
+> `com.apple.security.cs.allow-unsigned-executable-memory` signs perfectly and
+> then dies instantly on launch. That's what `entitlements.mac.plist` is for, and
+> why `verify:signing` checks for those two by name.
 
 A dropdown hangs off the menubar with a session picker and the side chat. The
 Electron main process drives `MenubarBackend` (a thin, Electron-free wrapper over
@@ -233,7 +263,8 @@ layout bugs that only appear at a given terminal size.
       time, and a budgeted two-tier prompt
 - [x] macOS menubar frontend (`menubar/`), packaged as a real menubar-only
       `aside.app` with a tray icon — DMG/zip for arm64 + x64
-- [ ] code signing + notarization (the app is currently unsigned; see above)
+- [x] Developer ID signing + hardened runtime + notarization, with a
+      `verify:signing` check that asserts what Gatekeeper actually enforces
 - [ ] model picker in the menubar UI (the TUI has one; menubar is fixed-model)
 - [ ] richer transcript view (live feed of what the agents are doing) alongside chat
 - [ ] proactive nudges ("session X has been stuck 20m") rather than only

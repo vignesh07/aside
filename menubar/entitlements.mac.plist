@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the signed, hardened-runtime build.
+
+  Notarization requires the hardened runtime. The hardened runtime blocks the
+  things a JavaScript engine must do — so without these, the app signs cleanly,
+  passes notarization, and then dies on launch with a code-signing kill. That
+  failure looks like "signing broke my app" but is really "V8 was denied JIT".
+
+  Each of these is the minimum Electron needs. Do not add sandbox or hardening
+  entitlements speculatively; every one widens what the app is permitted to do.
+-->
+<plist version="1.0">
+<dict>
+  <!-- V8 compiles JS to machine code at runtime. Without this the renderer is
+       killed the moment it tries to JIT. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <!-- V8 also writes to executable pages outside the JIT path (and Electron's
+       own bootstrap does). Required alongside allow-jit for Electron. -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- Electron's helper processes are launched with DYLD_* set. The hardened
+       runtime strips those unless this is granted, and the helpers fail. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- The app loads the Electron framework and node modules that are signed
+       under this app's identity rather than Apple's. Library validation would
+       reject them. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
