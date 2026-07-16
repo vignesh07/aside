@@ -8,22 +8,23 @@ interface ChatInputProps {
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   focused: boolean;
-  disabled: boolean;
 }
 
-export function ChatInput({ value, onChange, onSubmit, focused, disabled }: ChatInputProps) {
+export function ChatInput({ value, onChange, onSubmit, focused }: ChatInputProps) {
   return (
     <Box borderStyle="single" borderColor={focused ? COLORS.header2 : COLORS.border} paddingX={1}>
       <Text color={focused ? COLORS.header2 : COLORS.textDim}>{'› '}</Text>
       {focused ? (
+        // Never disabled: "nothing is running" is a valid answer to a valid
+        // question, so the chat stays open even with no sessions discovered.
         <TextInput
           value={value}
           onChange={onChange}
           onSubmit={onSubmit}
-          placeholder={disabled ? 'no session selected' : 'ask about this session…'}
+          placeholder="ask about your agents…"
         />
       ) : (
-        <Text color={COLORS.textDim}>press i to ask · tab to switch session · q to quit</Text>
+        <Text color={COLORS.textDim}>press i to ask · tab to focus a session · q to quit</Text>
       )}
     </Box>
   );

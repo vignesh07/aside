@@ -18,12 +18,16 @@ export interface SessionSummary {
   projectName: string;
   status: string;
   currentActivity: string;
+  /** Milliseconds since this session's last observed event. */
+  idleForMs: number;
 }
 
 /** Everything the renderer needs to draw the dropdown. */
 export interface MenubarState {
   sessions: SessionSummary[];
-  selectedId: string | null;
+  /** Focused session — deepens its transcript in the prompt; never scopes the chat. */
+  focusId: string | null;
+  /** The single bird's-eye conversation, spanning every session. */
   messages: ChatTurn[];
   thinking: boolean;
   provider: string;
@@ -46,7 +50,7 @@ export class MenubarBackend {
   private readonly service: SideChatService;
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
   private sessions: TrackedSession[] = [];
-  private selectedId: string | null = null;
+  private focusId: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -82,8 +86,10 @@ export class MenubarBackend {
     this.service.dispose();
   }
 
-  selectSession(id: string): void {
-    this.selectedId = id;
+  /** Focus a session (or null for none) to deepen its transcript in the prompt. */
+  selectSession(id: string | null): void {
+    this.focusId = id;
+    this.service.setFocus(id);
     this.emit();
   }
 
@@ -93,11 +99,13 @@ export class MenubarBackend {
     this.emit();
   }
 
+  /** Ask about the whole world. No session selection required. */
   ask(question: string): Promise<void> {
-    return this.service.ask(this.selectedId, question);
+    return this.service.ask(question);
   }
 
   getState(): MenubarState {
+    const now = Date.now();
     return {
       sessions: this.sessions.map((s) => ({
         id: s.id,
@@ -105,21 +113,26 @@ export class MenubarBackend {
         projectName: s.projectName,
         status: s.status,
         currentActivity: s.currentActivity,
+        idleForMs: Math.max(0, now - s.lastEventTime.getTime()),
       })),
-      selectedId: this.selectedId,
-      messages: this.selectedId ? this.service.getChat(this.selectedId) : [],
+      focusId: this.focusId,
+      messages: this.service.getChat(),
       thinking: this.service.isThinking(),
       provider: this.config.provider,
       model: this.config.model,
     };
   }
 
-  /** Rescan sessions, keep a valid selection, and re-sync the tailer. */
+  /** Rescan sessions, keep the focus valid, and re-sync the tailer. */
   refresh(): void {
     const { sessions, jsonlPaths } = this.scan();
     this.sessions = sessions;
-    if (!this.selectedId || !sessions.some((s) => s.id === this.selectedId)) {
-      this.selectedId = sessions[0]?.id ?? null;
+    // Focus defaults to the top-ranked session for transcript depth, but the
+    // chat works regardless — an invalid focus degrades to "no focus", not to a
+    // broken chat.
+    if (!this.focusId || !sessions.some((s) => s.id === this.focusId)) {
+      this.focusId = sessions[0]?.id ?? null;
+      this.service.setFocus(this.focusId);
     }
     this.service.syncSessions(sessions, jsonlPaths);
     this.emit();

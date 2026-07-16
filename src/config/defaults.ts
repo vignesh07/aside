@@ -47,6 +47,26 @@ export const TIMING = {
   maxCommentaryLines: 200,
 } as const;
 
+/**
+ * Truncation limits, applied at classify time.
+ *
+ * Prose (user prompts, agent replies) is where the *reasoning* lives — it's what
+ * answers "why did the agent pick this path?", so it's kept long. Targets (file
+ * paths, commands) are identifiers, not arguments, so they stay terse. Anything
+ * too long for a given surface is cut again at render time; classification is
+ * deliberately the generous end, since data dropped here can't be recovered.
+ */
+export const TRUNCATE = {
+  /** User prompts and assistant text — carries intent and rationale. */
+  prose: 600,
+  /** Tool targets: file paths, commands, patterns. */
+  target: 60,
+  /** Shell command lines. */
+  command: 80,
+  /** One-line activity string for a session card / roster line. */
+  activity: 80,
+} as const;
+
 export const DEFAULT_PROVIDER = 'anthropic';
 export const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 export const DEFAULT_AUTH_FILE = `${process.env['HOME']}/.pi/agent/auth.json`;

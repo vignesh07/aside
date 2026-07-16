@@ -8,7 +8,8 @@ import type { TrackedSession } from '../types/session.js';
 interface UseSideChatProps {
   sessions: TrackedSession[];
   jsonlPaths: Map<string, string>;
-  selectedId: string | null;
+  /** Focused session — a lens for transcript depth, not a chat scope. */
+  focusId: string | null;
   provider: string;
   model: string;
   authFile?: string;
@@ -16,9 +17,9 @@ interface UseSideChatProps {
 }
 
 interface UseSideChatResult {
-  /** Recent activity of the selected session, oldest-first. */
+  /** Recent activity of the focused session, oldest-first (for the transcript pane). */
   transcript: SessionEvent[];
-  /** Side-chat turns for the selected session. */
+  /** The single bird's-eye conversation, spanning every session. */
   messages: ChatTurn[];
   isThinking: boolean;
   ask: (question: string) => void;
@@ -32,7 +33,7 @@ interface UseSideChatResult {
 export function useSideChat({
   sessions,
   jsonlPaths,
-  selectedId,
+  focusId,
   provider,
   model,
   authFile,
@@ -43,8 +44,8 @@ export function useSideChat({
 
   const onActivityRef = useRef(onSessionActivity);
   onActivityRef.current = onSessionActivity;
-  const selectedIdRef = useRef<string | null>(selectedId);
-  selectedIdRef.current = selectedId;
+  const focusIdRef = useRef<string | null>(focusId);
+  focusIdRef.current = focusId;
 
   const serviceRef = useRef<SideChatService | null>(null);
 
@@ -53,11 +54,9 @@ export function useSideChat({
     serviceRef.current = new SideChatService(new SideChatEngine({ provider, model, authFile }), {
       onActivity: (id, activity) => onActivityRef.current(id, activity),
       onThinking: rerender,
-      onChat: (id) => {
-        if (id === selectedIdRef.current) rerender();
-      },
+      onChat: rerender,
       onTranscript: (id) => {
-        if (id === selectedIdRef.current) rerender();
+        if (id === focusIdRef.current) rerender();
       },
     });
   }
@@ -71,6 +70,10 @@ export function useSideChat({
   }, [sessions, jsonlPaths]);
 
   useEffect(() => {
+    serviceRef.current?.setFocus(focusId);
+  }, [focusId]);
+
+  useEffect(() => {
     return () => {
       serviceRef.current?.dispose();
       serviceRef.current = null;
@@ -78,13 +81,13 @@ export function useSideChat({
   }, []);
 
   const ask = useCallback((question: string) => {
-    void serviceRef.current?.ask(selectedIdRef.current, question);
+    void serviceRef.current?.ask(question);
   }, []);
 
   const service = serviceRef.current;
   return {
-    transcript: selectedId && service ? service.getTranscript(selectedId) : [],
-    messages: selectedId && service ? service.getChat(selectedId) : [],
+    transcript: focusId && service ? service.getTranscript(focusId) : [],
+    messages: service?.getChat() ?? [],
     isThinking: service?.isThinking() ?? false,
     ask,
   };

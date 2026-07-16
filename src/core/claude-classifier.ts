@@ -1,4 +1,5 @@
 import type { SessionEvent } from '../types/events.js';
+import { TRUNCATE } from '../config/defaults.js';
 
 /**
  * Classify a raw Claude Code JSONL line into a domain SessionEvent.
@@ -22,7 +23,7 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
       const content = message.content;
       let summary: string;
       if (typeof content === 'string') {
-        summary = truncate(content, 100);
+        summary = truncate(content, TRUNCATE.prose);
       } else if (Array.isArray(content)) {
         // Tool results from user
         const toolResult = content.find((c: Record<string, unknown>) => c['type'] === 'tool_result');
@@ -35,7 +36,7 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
           return { kind: 'tool_result_ok', tool: toolUseId, summary: 'Tool completed', ts };
         }
         const text = content.find((c: Record<string, unknown>) => c['type'] === 'text');
-        summary = truncate((text?.['text'] as string) || 'User message', 100);
+        summary = truncate((text?.['text'] as string) || 'User message', TRUNCATE.prose);
       } else {
         summary = 'User message';
       }
@@ -50,7 +51,7 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
 
     const content = message.content as Array<Record<string, unknown>>;
     if (!Array.isArray(content)) {
-      return { kind: 'assistant_text', preview: truncate(String(message.content), 100), ts };
+      return { kind: 'assistant_text', preview: truncate(String(message.content), TRUNCATE.prose), ts };
     }
 
     // Look for tool_use blocks first (most interesting for commentary)
@@ -66,7 +67,7 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
     // Text content
     for (const block of content) {
       if (block['type'] === 'text' && block['text']) {
-        return { kind: 'assistant_text', preview: truncate(block['text'] as string, 100), ts };
+        return { kind: 'assistant_text', preview: truncate(block['text'] as string, TRUNCATE.prose), ts };
       }
     }
 
@@ -80,7 +81,7 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
     if (data['type'] === 'bash_progress') {
       const command = (data['command'] as string) || '';
       const elapsed = (data['elapsedTimeSeconds'] as number) || 0;
-      return { kind: 'bash_running', command: truncate(command, 80), elapsedSeconds: elapsed, ts };
+      return { kind: 'bash_running', command: truncate(command, TRUNCATE.command), elapsedSeconds: elapsed, ts };
     }
     return null;
   }
@@ -102,21 +103,21 @@ function extractToolTarget(tool: string, input?: Record<string, unknown>): strin
   switch (tool) {
     case 'Read':
     case 'Write':
-      return truncate((input['file_path'] as string) || '', 60);
+      return truncate((input['file_path'] as string) || '', TRUNCATE.target);
     case 'Edit':
-      return truncate((input['file_path'] as string) || '', 60);
+      return truncate((input['file_path'] as string) || '', TRUNCATE.target);
     case 'Bash':
-      return truncate((input['command'] as string) || '', 60);
+      return truncate((input['command'] as string) || '', TRUNCATE.target);
     case 'Glob':
-      return truncate((input['pattern'] as string) || '', 60);
+      return truncate((input['pattern'] as string) || '', TRUNCATE.target);
     case 'Grep':
-      return truncate((input['pattern'] as string) || '', 60);
+      return truncate((input['pattern'] as string) || '', TRUNCATE.target);
     case 'WebFetch':
-      return truncate((input['url'] as string) || '', 60);
+      return truncate((input['url'] as string) || '', TRUNCATE.target);
     case 'WebSearch':
-      return truncate((input['query'] as string) || '', 60);
+      return truncate((input['query'] as string) || '', TRUNCATE.target);
     case 'Task':
-      return truncate((input['description'] as string) || '', 60);
+      return truncate((input['description'] as string) || '', TRUNCATE.target);
     default:
       return '';
   }

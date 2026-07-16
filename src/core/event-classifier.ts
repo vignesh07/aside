@@ -3,6 +3,7 @@ import { classifyCodexLine } from './codex-classifier.js';
 import { classifyPiLine } from './pi-classifier.js';
 import type { SessionEvent } from '../types/events.js';
 import type { SessionSource } from '../types/session.js';
+import { TRUNCATE } from '../config/defaults.js';
 
 /**
  * Classify a raw JSONL line based on the session source.
@@ -18,9 +19,23 @@ export function classifyLine(raw: string, source: SessionSource): SessionEvent |
 }
 
 /**
- * Extract a human-readable activity description from an event.
+ * Extract a one-line, human-readable activity description from an event.
+ *
+ * Events carry prose at full classification width (see {@link TRUNCATE.prose}),
+ * which is far too wide for a session card or roster line — so the result is cut
+ * to {@link TRUNCATE.activity} here, at the point of display.
  */
 export function activityFromEvent(event: SessionEvent): string {
+  return clampActivity(describeEvent(event));
+}
+
+function clampActivity(s: string): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= TRUNCATE.activity) return oneLine;
+  return oneLine.slice(0, TRUNCATE.activity - 3) + '...';
+}
+
+function describeEvent(event: SessionEvent): string {
   switch (event.kind) {
     case 'user_prompt':
       return `Prompt: ${event.summary}`;

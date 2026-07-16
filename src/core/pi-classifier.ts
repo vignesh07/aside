@@ -1,4 +1,5 @@
 import type { SessionEvent } from '../types/events.js';
+import { TRUNCATE } from '../config/defaults.js';
 
 /**
  * Classify a raw Pi Coding Agent JSONL line into a domain SessionEvent.
@@ -32,7 +33,7 @@ export function classifyPiLine(raw: string): SessionEvent | null {
   if (role === 'user') {
     const text = extractTextBlock(msg['content']);
     if (!text) return null;
-    return { kind: 'user_prompt', summary: truncate(text, 100), ts };
+    return { kind: 'user_prompt', summary: truncate(text, TRUNCATE.prose), ts };
   }
 
   if (role === 'assistant') {
@@ -53,7 +54,7 @@ export function classifyPiLine(raw: string): SessionEvent | null {
       if (!block || typeof block !== 'object') continue;
       const item = block as Record<string, unknown>;
       if (item['type'] === 'text' && typeof item['text'] === 'string') {
-        return { kind: 'assistant_text', preview: truncate(item['text'], 100), ts };
+        return { kind: 'assistant_text', preview: truncate(item['text'], TRUNCATE.prose), ts };
       }
     }
 
@@ -69,7 +70,7 @@ export function classifyPiLine(raw: string): SessionEvent | null {
       return {
         kind: 'tool_result_error',
         tool: toolName,
-        error: truncate(text, 100),
+        error: truncate(text, TRUNCATE.prose),
         ts,
       };
     }
@@ -77,13 +78,13 @@ export function classifyPiLine(raw: string): SessionEvent | null {
     return {
       kind: 'tool_result_ok',
       tool: toolName,
-      summary: truncate(text, 80),
+      summary: truncate(text, TRUNCATE.command),
       ts,
     };
   }
 
   if (role === 'bashExecution') {
-    const command = truncate(String(msg['command'] || ''), 80);
+    const command = truncate(String(msg['command'] || ''), TRUNCATE.command);
     const rawExitCode = msg['exitCode'];
     const cancelled = msg['cancelled'] === true;
     const exitCode = typeof rawExitCode === 'number' && Number.isFinite(rawExitCode)
@@ -124,14 +125,14 @@ function extractToolTarget(rawArguments: unknown): string {
     '';
 
   if (typeof target === 'string') {
-    return truncate(target, 60);
+    return truncate(target, TRUNCATE.target);
   }
 
   if (Array.isArray(target)) {
-    return truncate(target.map((v) => String(v)).join(' '), 60);
+    return truncate(target.map((v) => String(v)).join(' '), TRUNCATE.target);
   }
 
-  return truncate(String(target), 60);
+  return truncate(String(target), TRUNCATE.target);
 }
 
 function truncate(s: string, max: number): string {

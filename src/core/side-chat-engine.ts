@@ -1,39 +1,48 @@
-import type { SessionEvent } from '../types/events.js';
 import type { ChatTurn } from '../types/chat.js';
+import type { WorldSnapshot } from '../types/world.js';
 import { resolveOAuthApiKeyForProvider } from './oauth-auth-store.js';
+import { renderWorld, renderHistory, TRANSCRIPT_BUDGET_CHARS } from './world-view.js';
 
 /**
- * The side chat is a *read-only observer*. It can see everything the watched
- * agent session is doing, but it has no tools and cannot act on the session,
- * the filesystem, or anything else. Its only job is to answer the user's
- * questions about what the main agent is up to — so the user can ask "by the
- * way, why did it pick X?" without derailing the main thread.
+ * The side chat is a *read-only observer* with a bird's-eye view: it sees every
+ * agent session aside can discover, not just one. It has no tools and cannot act
+ * on any session, the filesystem, or anything else — so the user can ask "why did
+ * it pick that path?" or "is anything stuck?" without touching the main threads.
  */
-const SYSTEM_PROMPT = `You are "aside" — a read-only observer attached to a running AI coding-agent session.
+const SYSTEM_PROMPT = `You are "aside" — a read-only observer with a bird's-eye view of the AI coding-agent sessions running on this user's machine.
 
-You can see a live transcript of what the main agent (Claude Code, Codex, etc.) is doing: the user's prompts, the agent's responses, the tools it runs, files it edits, and command output. The user is chatting with YOU on the side, so they can ask questions WITHOUT interrupting or steering the main agent.
+You are given, for every session you can see: a roster line (project, branch, source, status, how long it has been quiet, context usage, last observed activity), and — for the sessions most worth the detail — a recent transcript of prompts, agent replies, tool calls, file edits, and command output.
+
+The user chats with YOU on the side. They are asking about their agents WITHOUT interrupting or steering them.
 
 Your job:
-- Answer questions about what the main session is doing, why, and what it might do next.
-- Explain decisions, summarize progress, flag risks or mistakes you notice.
-- Be concise and direct. This is a side panel in a terminal, not an essay.
+- Answer questions across all sessions: what each agent is doing right now, why it went the way it did, what it will likely do next.
+- Compare and connect sessions when it helps ("both are editing the same file", "this one has been stuck for 20 minutes while that one finished").
+- Notice things worth flagging: a session quiet far longer than its work suggests it should be, repeated failing commands, a session burning context, an agent that looks off-track.
+- Be concise and direct. This is a side panel, not an essay.
+
+Reading the data:
+- "Current time" and each session's "quiet for" are computed for you. Use them for anything about idleness or how long something has taken — you cannot infer elapsed time from the transcript alone, because a session that does nothing writes nothing.
+- A session being quiet is not automatically a problem. An agent waiting on the user, or finished, is quiet and fine. Say what the quiet most likely means given its last activity, and distinguish "waiting for input" from "stalled mid-task".
+- Transcript prose is truncated, so an agent's reasoning may be cut off mid-thought. Don't mistake a truncation for the agent stopping.
 
 Hard constraints:
-- You are READ-ONLY. You have no tools and cannot edit files, run commands, or send anything into the main session. Never claim to have done so.
-- If asked to *do* something to the codebase, explain that you only observe — the user should tell the main agent directly.
-- If the transcript doesn't contain the answer, say so plainly rather than guessing. Don't invent activity that isn't in the transcript.`;
+- You are READ-ONLY. You have no tools and cannot edit files, run commands, or send anything into any session. Never claim to have done so.
+- If asked to *do* something, explain that you only observe — the user should tell that agent directly.
+- You see agent sessions only. You cannot see builds, containers, other terminals, browser tabs, or anything else on the machine. If asked about something outside the sessions, say plainly that it's outside what you can see.
+- If the data doesn't answer the question, say so rather than guessing. Never invent activity that isn't in the transcript. If detail for a session was omitted from your context, say that instead of assuming it was idle.`;
 
 export interface SideChatEngineConfig {
   provider: string;
   model: string;
   authFile?: string;
+  /** Character budget for rendered transcripts. Defaults to {@link TRANSCRIPT_BUDGET_CHARS}. */
+  transcriptBudget?: number;
 }
 
 export interface AskParams {
-  /** Human-readable name of the watched session (project/branch). */
-  projectName: string;
-  /** Recent activity in the watched session, oldest-first. */
-  transcript: SessionEvent[];
+  /** Everything the observer can see, at one instant. */
+  world: WorldSnapshot;
   /** Prior side-chat turns for continuity (excludes the new question). */
   history: ChatTurn[];
   /** The new question the user is asking. */
@@ -41,10 +50,10 @@ export interface AskParams {
 }
 
 /**
- * Answers questions about a watched session. Reuses pi-ai for multi-provider
- * routing and the shared OAuth key resolution, mirroring talkatui's engine —
- * the only real differences are the prompt and that this is request/response
- * instead of auto-generated commentary.
+ * Answers questions about every watched session. Reuses pi-ai for multi-provider
+ * routing and the shared OAuth key resolution — the prompt is rebuilt on every
+ * ask, so the observer always reasons over current state rather than a snapshot
+ * taken when the chat opened.
  */
 export class SideChatEngine {
   private config: SideChatEngineConfig;
@@ -60,7 +69,7 @@ export class SideChatEngine {
     this.piAi = null;
   }
 
-  async ask({ projectName, transcript, history, question }: AskParams): Promise<string> {
+  async ask({ world, history, question }: AskParams): Promise<string> {
     const piAi = await this.loadPiAi();
     const providers = piAi.getProviders();
     if (!providers.includes(this.config.provider as never)) {
@@ -74,14 +83,13 @@ export class SideChatEngine {
 
     const explicitApiKey = await this.resolveApiKey(piAi, provider);
 
-    // Both the watched transcript and the prior side-chat Q&A are folded into
-    // the system prompt, so the single outgoing message is a clean UserMessage.
+    // Both the observed world and the prior side-chat Q&A are folded into the
+    // system prompt, so the single outgoing message is a clean UserMessage.
     // (pi-ai's AssistantMessage carries provider metadata we can't fabricate,
-    // so we don't try to replay history as real assistant turns.) The prompt is
-    // rebuilt every ask, so the observer always sees the latest activity.
+    // so we don't try to replay history as real assistant turns.)
     const systemPrompt = [
       SYSTEM_PROMPT,
-      renderTranscript(projectName, transcript),
+      renderWorld(world, this.config.transcriptBudget ?? TRANSCRIPT_BUDGET_CHARS),
       renderHistory(history),
     ]
       .filter(Boolean)
@@ -126,55 +134,4 @@ export class SideChatEngine {
   }
 }
 
-/** Render the watched session's recent activity as a plain-text block. */
-function renderTranscript(projectName: string, transcript: SessionEvent[]): string {
-  const lines = transcript.map(formatEvent).filter(Boolean);
-  if (lines.length === 0) {
-    return `You are watching session "${projectName}". No activity has been observed yet.`;
-  }
-  return `=== Live transcript of session "${projectName}" (oldest first) ===\n${lines.join('\n')}`;
-}
-
-/** Render prior side-chat turns as context so the conversation stays coherent. */
-function renderHistory(history: ChatTurn[]): string {
-  if (history.length === 0) return '';
-  const lines = history.map((turn) => `${turn.role === 'user' ? 'User asked' : 'You answered'}: ${turn.content}`);
-  return `=== Earlier in this side chat (for continuity) ===\n${lines.join('\n')}`;
-}
-
-function formatEvent(event: SessionEvent): string {
-  switch (event.kind) {
-    case 'session_started':
-      return `[session started] project=${event.project} branch=${event.branch} model=${event.model}`;
-    case 'user_prompt':
-      return `[user] ${event.summary}`;
-    case 'assistant_text':
-      return `[agent] ${event.preview}`;
-    case 'tool_call':
-      return `[tool] ${event.tool} → ${event.target}`;
-    case 'tool_result_ok':
-      return `[tool ok] ${event.tool}: ${event.summary}`;
-    case 'tool_result_error':
-      return `[tool ERROR] ${event.tool}: ${event.error}`;
-    case 'tool_rejected':
-      return `[tool rejected by user] ${event.tool}`;
-    case 'bash_running':
-      return `[bash running ${event.elapsedSeconds}s] ${event.command}`;
-    case 'bash_complete':
-      return `[bash done exit=${event.exitCode}] ${event.command}`;
-    case 'file_written':
-      return `[wrote file] ${event.path}`;
-    case 'file_edited':
-      return `[edited file] ${event.path}`;
-    case 'turn_complete':
-      return `[turn complete in ${(event.durationMs / 1000).toFixed(1)}s]`;
-    case 'context_health':
-      return `[context ${event.usedPercent}% used (${event.status})]`;
-    case 'unknown':
-      return '';
-    default:
-      return '';
-  }
-}
-
-export { SYSTEM_PROMPT, renderTranscript, renderHistory, formatEvent };
+export { SYSTEM_PROMPT };

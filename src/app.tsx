@@ -39,17 +39,24 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
   const [inputFocused, setInputFocused] = useState(false);
   const [inputValue, setInputValue] = useState('');
 
+  // `selectedId` is a *focus lens*, not a chat scope: it buys the highlighted
+  // session more transcript depth in the prompt. The chat always spans them all.
   const { messages, isThinking, ask } = useSideChat({
     sessions,
     jsonlPaths,
-    selectedId,
+    focusId: selectedId,
     provider: currentProvider,
     model: currentModel,
     authFile,
     onSessionActivity: setSessionActivity,
   });
 
-  const selectedSession = sessions.find((s) => s.id === selectedId) ?? null;
+  const focusedSession = sessions.find((s) => s.id === selectedId) ?? null;
+  const scopeLine =
+    sessions.length === 0
+      ? 'no agent sessions found'
+      : `${sessions.length} session${sessions.length === 1 ? '' : 's'}` +
+        (focusedSession ? ` · focused: ${focusedSession.projectName}` : '');
 
   const handleSubmit = (value: string) => {
     const trimmed = value.trim();
@@ -143,7 +150,7 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
             <ChatPane
               messages={messages}
               isThinking={isThinking}
-              watching={selectedSession?.currentActivity ?? null}
+              watching={scopeLine}
               maxVisible={maxVisible}
             />
           </RetroBox>
@@ -155,7 +162,6 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
         onChange={setInputValue}
         onSubmit={handleSubmit}
         focused={inputFocused}
-        disabled={!selectedId}
       />
 
       <Footer provider={currentProvider} model={currentModel} sessionCount={sessions.length} />

@@ -1,26 +1,42 @@
 # aside
 
-A **read-only side chat** for your AI coding agent. While Claude Code, Codex, or
-another agent runs, `aside` watches its session and lets you ask questions about
-it — *without* interrupting or branching the main thread.
+A **read-only bird's-eye chat** for your AI coding agents. While Claude Code,
+Codex, and others run, `aside` watches *all* of their sessions and lets you ask
+questions across them — *without* interrupting or branching any main thread.
 
-> "by the way, why did it edit that file?" — ask `aside`, not the agent.
+> "why did it edit that file?" · "what's running right now?" · "has anything
+> been stuck for a while?" — ask `aside`, not the agent.
 
 ## Why
 
 When you interrupt a coding agent to ask a clarifying question, the question and
 its answer become part of the main context — costing tokens and sometimes
-steering the agent off course. `aside` decouples the two: it observes the main
-session (read-only) and answers in a separate chat that the agent never sees.
+steering the agent off course. `aside` decouples the two: it observes your
+sessions (read-only) and answers in a separate chat that the agents never see.
+
+It's one chat over every session, not one chat per session. Run three agents
+across three repos and ask "which of these is actually making progress?".
+
+## What it can and can't see
+
+**Can:** every agent session it can discover on disk — what each is doing, why
+it went that way, how long it's been quiet, how much context it's burned.
+
+**Can't:** anything else on your machine. Not your builds, containers, other
+terminals, or browser tabs. It reads agent transcripts; that's the whole
+mechanism. Ask it about a running `docker compose` and it will tell you that's
+outside its view rather than guess.
 
 ## How it works
 
 ```
-provider adapters → discover + tail session JSONL → normalize to events
+provider adapters → discover + tail every session's JSONL → normalize to events
                                                         ↓
-                          read-only context for a side-chat LLM (any provider)
+                              roster (all sessions) + budgeted transcript detail
                                                         ↓
-                                                  TUI (this repo)
+                          read-only context for an observer LLM (any provider)
+                                                        ↓
+                                            TUI  ·  macOS menubar
 ```
 
 - **Watches** the same on-disk transcripts the agents already write:
@@ -28,7 +44,15 @@ provider adapters → discover + tail session JSONL → normalize to events
   - Codex CLI **and** Codex Desktop — `~/.codex/sessions/**/rollout-*.jsonl`
   - Pi — `~/.pi/agent/sessions/**/*.jsonl`
 - **Read-only.** It opens transcripts for reading only and has no tools — it
-  can never write to your session, files, or shell.
+  can never write to your sessions, files, or shell.
+- **Two-tier context.** Every session gets a roster line (status, idle time,
+  context usage) — cheap, and it's what answers "what's running?". Transcript
+  detail is then allocated under a fixed character budget, ranked by focus and
+  liveness, so ten sessions don't blow up (or dilute) the prompt. Anything
+  dropped is stated in the prompt, never silently implied to be idle.
+- **Idle is computed, not observed.** A session that does nothing writes nothing,
+  so elapsed time can't come from a transcript. `aside` derives it from a real
+  clock and hands it to the model explicitly.
 - **Any provider** for the chat itself (via [`@mariozechner/pi-ai`]). Defaults
   to Claude.
 
@@ -86,17 +110,23 @@ credentials at `~/.pi/agent/auth.json`.
 | `esc` | unfocus |
 | `enter` | send |
 | `m` | model picker |
-| `tab` / `j` / `k` | switch session |
+| `tab` / `j` / `k` | focus a session (deepens its detail; never scopes the chat) |
 | `q` | quit |
+
+Selecting a session is never required — the chat always spans every session.
+Focus just buys the highlighted one a bigger share of the transcript budget.
 
 ## Status
 
-Working vertical slice: discovery → live tail → ask a question → answer, across
-Claude/Codex/Pi sessions. Verify the pipeline headlessly with:
+Working vertical slice: discover every session → live tail → ask one question
+across all of them → answer, over Claude/Codex/Pi. Verify headlessly with:
 
 ```bash
 node scripts/smoke.mjs
 ```
+
+which prints the roster the model sees, the budgeted prompt size, and a real
+cross-session answer.
 
 ### Roadmap
 
@@ -104,9 +134,13 @@ node scripts/smoke.mjs
       keybinding to summon it hands-free (`aside dock` / `aside install`)
 - [x] shared, framework-agnostic `SideChatService` so every frontend reuses one
       implementation
+- [x] bird's-eye view: one chat across every session, with a roster, derived idle
+      time, and a budgeted two-tier prompt
 - [~] macOS menubar frontend (`menubar/`) — builds + backend is unit-tested;
       tray/window not yet visually verified, no app packaging/icon yet
 - [ ] model picker in the menubar UI (the TUI has one; menubar is fixed-model)
-- [ ] richer transcript view (live feed of what the agent is doing) alongside chat
+- [ ] richer transcript view (live feed of what the agents are doing) alongside chat
+- [ ] proactive nudges ("session X has been stuck 20m") rather than only
+      answering when asked
 
 [`@mariozechner/pi-ai`]: https://www.npmjs.com/package/@mariozechner/pi-ai

@@ -1,4 +1,5 @@
 import type { SessionEvent } from '../types/events.js';
+import { TRUNCATE } from '../config/defaults.js';
 
 const callIdToTool = new Map<string, string>();
 const callIdOrder: string[] = [];
@@ -33,7 +34,7 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
 
     if (eventType === 'user_message') {
       const message = (payload['message'] as string) || 'User message';
-      return { kind: 'user_prompt', summary: truncate(message, 100), ts };
+      return { kind: 'user_prompt', summary: truncate(message, TRUNCATE.prose), ts };
     }
 
     if (eventType === 'task_started') {
@@ -41,8 +42,9 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
     }
 
     if (eventType === 'task_complete') {
-      const lastMsg = payload['last_agent_message'] as string | null;
-      const preview = lastMsg ? truncate(lastMsg, 100) : 'Task complete';
+      // `last_agent_message` is deliberately not re-emitted: the same text already
+      // arrives as an `assistant_text` response_item, so surfacing it here would
+      // double it in the transcript.
       return { kind: 'turn_complete', durationMs: 0, ts };
     }
 
@@ -61,7 +63,7 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
             const text = (block['text'] as string) || '';
             // Skip environment context blocks
             if (text.includes('<environment_context>')) return null;
-            return { kind: 'user_prompt', summary: truncate(text, 100), ts };
+            return { kind: 'user_prompt', summary: truncate(text, TRUNCATE.prose), ts };
           }
         }
       }
@@ -87,7 +89,7 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
           60
         );
       } catch {
-        target = truncate(args, 60);
+        target = truncate(args, TRUNCATE.target);
       }
       if (callId) {
         rememberCallTool(callId, name);
@@ -103,14 +105,14 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
         return {
           kind: 'tool_result_error',
           tool: toolName,
-          error: truncate(parsedOutput.text || 'Tool execution failed', 100),
+          error: truncate(parsedOutput.text || 'Tool execution failed', TRUNCATE.prose),
           ts,
         };
       }
       return {
         kind: 'tool_result_ok',
         tool: toolName,
-        summary: truncate(parsedOutput.text || 'Tool completed', 80),
+        summary: truncate(parsedOutput.text || 'Tool completed', TRUNCATE.command),
         ts,
       };
     }
@@ -121,7 +123,7 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
       if (content) {
         for (const block of content) {
           if (block['type'] === 'output_text') {
-            return { kind: 'assistant_text', preview: truncate((block['text'] as string) || '', 100), ts };
+            return { kind: 'assistant_text', preview: truncate((block['text'] as string) || '', TRUNCATE.prose), ts };
           }
         }
       }

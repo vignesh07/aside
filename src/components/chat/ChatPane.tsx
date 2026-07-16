@@ -6,7 +6,7 @@ import type { ChatTurn } from '../../types/chat.js';
 interface ChatPaneProps {
   messages: ChatTurn[];
   isThinking: boolean;
-  /** Short description of what the watched session is doing right now. */
+  /** Scope line: how many sessions the observer can see, and which is focused. */
   watching: string | null;
   /** How many turns fit; older turns scroll off the top. */
   maxVisible: number;
@@ -27,9 +27,9 @@ export function ChatPane({ messages, isThinking, watching, maxVisible }: ChatPan
 
       {messages.length === 0 && !isThinking && (
         <Text color={COLORS.textDim}>
-          Ask anything about the session you're watching — "what is it doing?",
-          "why did it edit that file?", "is it stuck?". This chat stays on the
-          side; the main agent never sees it.
+          Ask about any of your agents — "what's running?", "why did it edit that
+          file?", "is anything stuck?". One chat, all sessions. It only observes;
+          your agents never see this.
         </Text>
       )}
 

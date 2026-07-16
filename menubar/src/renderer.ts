@@ -23,37 +23,50 @@ const formEl = document.getElementById('composer') as HTMLFormElement;
 const inputEl = document.getElementById('input') as HTMLInputElement;
 const sendEl = document.getElementById('send') as HTMLButtonElement;
 
-let lastSelectedId: string | null = null;
+/** Human duration for roster labels: "4s", "12m", "3h", "2d". */
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
 
 function render(state: MenubarState): void {
-  // Session dropdown — only rebuild when the option set changes, to avoid
-  // clobbering an in-progress selection.
-  const optionsKey = state.sessions.map((s) => `${s.id}:${s.status}`).join('|');
+  // Session dropdown — a focus lens, not a chat scope. Only rebuilt when the
+  // labels actually change, to avoid clobbering an open dropdown. Idle time is
+  // in the key because it's in the label.
+  const optionsKey = state.sessions
+    .map((s) => `${s.id}:${s.status}:${formatDuration(s.idleForMs)}`)
+    .join('|');
   if (sessionsEl.dataset['key'] !== optionsKey) {
     sessionsEl.dataset['key'] = optionsKey;
     sessionsEl.innerHTML = '';
     for (const s of state.sessions) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${s.source} · ${s.projectName} (${s.status})`;
+      opt.textContent = `${s.source} · ${s.projectName} — ${s.status}, quiet ${formatDuration(s.idleForMs)}`;
       sessionsEl.appendChild(opt);
     }
   }
-  if (state.selectedId) sessionsEl.value = state.selectedId;
-  lastSelectedId = state.selectedId;
+  if (state.focusId) sessionsEl.value = state.focusId;
 
-  const canChat = Boolean(state.selectedId) && !state.thinking;
-  inputEl.disabled = !state.selectedId;
-  sendEl.disabled = !canChat;
+  // The chat is never gated on a selection: "nothing is running" is a valid
+  // answer to a valid question.
+  inputEl.disabled = false;
+  sendEl.disabled = state.thinking;
 
   // Messages.
   messagesEl.innerHTML = '';
   if (state.messages.length === 0 && !state.thinking) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = state.selectedId
-      ? "Ask anything about the session you're watching. This chat stays on the side — the main agent never sees it."
-      : 'No active sessions found yet.';
+    empty.textContent =
+      state.sessions.length > 0
+        ? `Watching ${state.sessions.length} agent session${state.sessions.length === 1 ? '' : 's'}. Ask "what's running?", "why did it do that?", "is anything stuck?" — they never see this chat.`
+        : 'No agent sessions found yet. aside will pick them up as they start.';
     messagesEl.appendChild(empty);
   }
   for (const turn of state.messages) {
@@ -84,7 +97,7 @@ sessionsEl.addEventListener('change', () => {
 formEl.addEventListener('submit', (e) => {
   e.preventDefault();
   const question = inputEl.value.trim();
-  if (!question || !lastSelectedId) return;
+  if (!question) return;
   inputEl.value = '';
   void window.aside.ask(question);
 });

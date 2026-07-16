@@ -1,10 +1,14 @@
 // Framework-agnostic side-chat service.
 //
 // This owns everything the side chat needs that has nothing to do with how it's
-// rendered: tailing watched sessions, accumulating their transcripts, holding
-// per-session chat history, and asking the engine. The Ink TUI hook and the
-// Electron menubar both drive the *same* instance of this, so there's one copy
-// of the logic regardless of frontend.
+// rendered: tailing every discoverable session, accumulating their transcripts,
+// holding the chat history, and asking the engine. The Ink TUI hook and the
+// Electron menubar both drive the *same* instance, so there's one copy of the
+// logic regardless of frontend.
+//
+// The chat is a bird's-eye view: one conversation about all sessions, not one
+// conversation per session. Focus is a lens that buys a session more transcript
+// detail in the prompt — it never scopes the chat to that session.
 
 import { SessionTailer } from './session-tailer.js';
 import { classifyLine, activityFromEvent } from './event-classifier.js';
@@ -12,8 +16,9 @@ import type { AskParams } from './side-chat-engine.js';
 import type { SessionEvent } from '../types/events.js';
 import type { ChatTurn } from '../types/chat.js';
 import type { TrackedSession, SessionSource } from '../types/session.js';
+import type { SessionSnapshot, WorldSnapshot } from '../types/world.js';
 
-/** Max transcript events kept per session, to bound the prompt sent to the model. */
+/** Max transcript events retained per session. The prompt budget cuts further at render time. */
 const MAX_TRANSCRIPT = 150;
 
 /** The slice of the engine the service depends on — injected so it can be faked in tests. */
@@ -28,8 +33,8 @@ export interface SideChatServiceHandlers {
   onTranscript?: (sessionId: string) => void;
   /** A live (non-seed) event suggests new activity for a session. */
   onActivity?: (sessionId: string, activity: string) => void;
-  /** A session's side-chat history changed (new question or answer). */
-  onChat?: (sessionId: string) => void;
+  /** The side-chat history changed (new question or answer). */
+  onChat?: () => void;
   /** The engine started/finished answering. */
   onThinking?: (thinking: boolean) => void;
 }
@@ -37,15 +42,18 @@ export interface SideChatServiceHandlers {
 export class SideChatService {
   private readonly tailer = new SessionTailer();
   private readonly transcripts = new Map<string, SessionEvent[]>();
-  private readonly chats = new Map<string, ChatTurn[]>();
   private readonly sources = new Map<string, SessionSource>();
+  private chat: ChatTurn[] = [];
   private sessions: TrackedSession[] = [];
+  private focusId: string | null = null;
   private thinking = false;
   private turnSeq = 0;
 
   constructor(
     private readonly engine: AskEngine,
     private readonly handlers: SideChatServiceHandlers = {},
+    /** Injectable clock so idle math is deterministic in tests. */
+    private readonly now: () => Date = () => new Date(),
   ) {
     this.tailer.on(
       'line',
@@ -93,40 +101,69 @@ export class SideChatService {
     }
   }
 
+  /**
+   * Focus a session, or null for none. Focus only deepens that session's
+   * transcript in the prompt; the chat still spans every session.
+   */
+  setFocus(sessionId: string | null): void {
+    this.focusId = sessionId;
+  }
+
+  getFocus(): string | null {
+    return this.focusId;
+  }
+
   getTranscript(sessionId: string): SessionEvent[] {
     return this.transcripts.get(sessionId) ?? [];
   }
 
-  getChat(sessionId: string): ChatTurn[] {
-    return this.chats.get(sessionId) ?? [];
+  /** The one bird's-eye conversation. */
+  getChat(): ChatTurn[] {
+    return this.chat;
   }
 
   isThinking(): boolean {
     return this.thinking;
   }
 
-  /** Ask the observer a question about a watched session. Resolves when answered. */
-  async ask(sessionId: string | null, question: string): Promise<void> {
+  /** Everything the observer can see right now. */
+  snapshot(): WorldSnapshot {
+    const now = this.now();
+    const sessions: SessionSnapshot[] = this.sessions.map((s) => ({
+      id: s.id,
+      source: s.source,
+      projectName: s.projectName,
+      gitBranch: s.gitBranch,
+      model: s.model,
+      status: s.status,
+      idleForMs: Math.max(0, now.getTime() - s.lastEventTime.getTime()),
+      currentActivity: s.currentActivity,
+      contextUsedPercent: s.usedPercent,
+      contextStatus: s.contextStatus,
+      transcript: this.getTranscript(s.id),
+    }));
+    return { now, sessions, focusId: this.focusId };
+  }
+
+  /**
+   * Ask the observer a question about the sessions it can see. Needs no session
+   * selection — the whole world is in scope. Resolves when answered.
+   */
+  async ask(question: string): Promise<void> {
     const trimmed = question.trim();
-    if (!sessionId || !trimmed) return;
+    if (!trimmed) return;
 
     // History is the conversation *before* this question.
-    const history = [...(this.chats.get(sessionId) ?? [])];
-    this.appendTurn(sessionId, this.newTurn('user', trimmed));
+    const history = [...this.chat];
+    this.appendTurn(this.newTurn('user', trimmed));
     this.setThinking(true);
 
-    const session = this.sessions.find((s) => s.id === sessionId);
-    const projectName = session
-      ? `${session.projectName}${session.gitBranch ? ` (${session.gitBranch})` : ''}`
-      : 'unknown';
-    const transcript = [...this.getTranscript(sessionId)];
-
     try {
-      const answer = await this.engine.ask({ projectName, transcript, history, question: trimmed });
-      this.appendTurn(sessionId, this.newTurn('assistant', answer));
+      const answer = await this.engine.ask({ world: this.snapshot(), history, question: trimmed });
+      this.appendTurn(this.newTurn('assistant', answer));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.appendTurn(sessionId, this.newTurn('assistant', `⚠ ${message}`, true));
+      this.appendTurn(this.newTurn('assistant', `⚠ ${message}`, true));
     } finally {
       this.setThinking(false);
     }
@@ -136,10 +173,9 @@ export class SideChatService {
     this.tailer.stopAll();
   }
 
-  private appendTurn(sessionId: string, turn: ChatTurn): void {
-    const next = [...(this.chats.get(sessionId) ?? []), turn];
-    this.chats.set(sessionId, next);
-    this.handlers.onChat?.(sessionId);
+  private appendTurn(turn: ChatTurn): void {
+    this.chat = [...this.chat, turn];
+    this.handlers.onChat?.();
   }
 
   private setThinking(thinking: boolean): void {

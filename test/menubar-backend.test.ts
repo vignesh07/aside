@@ -40,32 +40,47 @@ function makeBackend(sessions: TrackedSession[]) {
 }
 
 describe('MenubarBackend', () => {
-  it('auto-selects the first session on refresh', () => {
+  it('focuses the first session on refresh', () => {
     const { backend } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    expect(backend.getState().selectedId).toBe('a');
+    expect(backend.getState().focusId).toBe('a');
     expect(backend.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
   });
 
-  it('keeps an existing valid selection across refreshes', () => {
+  it('keeps an existing valid focus across refreshes', () => {
     const { backend } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
     backend.selectSession('b');
     backend.refresh();
-    expect(backend.getState().selectedId).toBe('b');
+    expect(backend.getState().focusId).toBe('b');
   });
 
-  it('re-selects when the chosen session disappears', () => {
+  it('re-focuses when the focused session disappears', () => {
     const sessions = [fakeSession('a'), fakeSession('b')];
     const { backend } = makeBackend(sessions);
     backend.refresh();
     backend.selectSession('b');
     sessions.pop(); // 'b' vanishes
     backend.refresh();
-    expect(backend.getState().selectedId).toBe('a');
+    expect(backend.getState().focusId).toBe('a');
   });
 
-  it('routes ask() to the selected session', async () => {
+  it('propagates focus to the service so the prompt deepens that transcript', () => {
+    const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
+    backend.refresh();
+    backend.selectSession('b');
+    expect(service.getFocus()).toBe('b');
+  });
+
+  it('answers with no sessions at all — "nothing is running" is a valid answer', async () => {
+    const { backend } = makeBackend([]);
+    backend.refresh();
+    expect(backend.getState().focusId).toBeNull();
+    await backend.ask('what is running?');
+    expect(backend.getState().messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('routes ask() to the shared bird\'s-eye chat', async () => {
     const { backend } = makeBackend([fakeSession('a')]);
     backend.refresh();
     await backend.ask('what is happening?');
@@ -74,10 +89,11 @@ describe('MenubarBackend', () => {
     expect(msgs[1]!.content).toBe('answer');
   });
 
-  it('reports an empty selection when there are no sessions', () => {
-    const { backend } = makeBackend([]);
+  it('reports idle time per session for the roster', () => {
+    const { backend } = makeBackend([fakeSession('a')]);
     backend.refresh();
-    expect(backend.getState().selectedId).toBeNull();
-    expect(backend.getState().messages).toEqual([]);
+    // lastEventTime is the epoch, so idleness is the wall clock — just assert it
+    // is populated and non-negative rather than pinning a moving number.
+    expect(backend.getState().sessions[0]!.idleForMs).toBeGreaterThan(0);
   });
 });
