@@ -1,0 +1,55 @@
+appId: com.vignesh.aside
+productName: aside
+copyright: Copyright © 2026 Vignesh Natarajan
+
+directories:
+  output: release
+  buildResources: assets
+
+# Arch is pinned explicitly by the npm scripts rather than left to the host.
+# `--dir` follows the host arch, and a toolchain running under Rosetta reports
+# x86_64 on Apple Silicon — which silently produces an emulated x64 app on an
+# arm64 machine. Always name the arch.
+
+# The core is inlined into build/ by scripts/bundle.mjs, so nothing outside this
+# package needs to ship. node_modules carries pi-ai, the one runtime dependency.
+files:
+  - build/**
+  - index.html
+  - preload.cjs
+  - assets/trayTemplate.png
+  - assets/trayTemplate@2x.png
+  - package.json
+  - '!**/*.map'
+
+mac:
+  icon: assets/icon.icns
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  extendInfo:
+    # Menubar-only: no dock icon, no Cmd-Tab entry. This is the real mechanism —
+    # app.dock.hide() only handles the dock, and only after launch.
+    LSUIElement: true
+  # Unsigned: there's no Developer ID here, so notarization can't run. Gatekeeper
+  # will quarantine the download until the user clears it (see README).
+  identity: null
+
+dmg:
+  title: aside ${version}
+  contents:
+    - x: 140
+      y: 180
+      type: file
+    - x: 400
+      y: 180
+      type: link
+      path: /Applications

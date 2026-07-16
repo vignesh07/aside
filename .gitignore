@@ -5,3 +5,9 @@ dist/
 
 # npm pack artifacts
 *.tgz
+
+# Electron bundle + packaged apps (hundreds of MB; rebuilt by `npm run dist`).
+# The generated icons under menubar/assets ARE committed: electron-builder needs
+# icon.icns at build time, and regenerating them requires an Electron run.
+menubar/build/
+menubar/release/

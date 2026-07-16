@@ -43,6 +43,23 @@ let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
 
+/**
+ * The menubar icon.
+ *
+ * macOS picks the @2x file next to it automatically, and treats the image as a
+ * template (auto-inverted for light/dark menubars and the clicked state) because
+ * of the "Template" filename. setTemplateImage is belt-and-braces.
+ *
+ * Falls back to a text label if the asset is missing: an empty tray image is an
+ * *invisible* menubar item, which reads as the app failing to launch at all.
+ */
+function trayImage(): Electron.NativeImage {
+  const image = nativeImage.createFromPath(path.join(here, '..', 'assets', 'trayTemplate.png'));
+  if (image.isEmpty()) return nativeImage.createEmpty();
+  image.setTemplateImage(true);
+  return image;
+}
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: WINDOW_WIDTH,
@@ -111,9 +128,10 @@ app.whenReady().then(() => {
     backend?.setModel(provider, model),
   );
 
-  // Empty image + title renders as a text label in the macOS menubar.
-  tray = new Tray(nativeImage.createEmpty());
-  tray.setTitle('aside');
+  const icon = trayImage();
+  tray = new Tray(icon);
+  // Without an icon there'd be nothing to click, so label it instead.
+  if (icon.isEmpty()) tray.setTitle('aside');
   tray.setToolTip("aside — read-only bird's-eye chat for your agents");
   tray.on('click', toggleWindow);
 

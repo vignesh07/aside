@@ -1,0 +1,25 @@
+<!--
+  macOS menubar tray icon source.
+
+  Template images must be pure black + alpha: macOS ignores the colour and uses
+  the alpha channel to render the icon, inverting it automatically for dark and
+  light menubars and for the highlighted (clicked) state. Any colour here would
+  be discarded, so black is not a style choice.
+
+  Drawn at 32x32 and rendered down to 16 (@1x) and 32 (@2x). Strokes are heavy
+  on purpose — hairlines disappear at 16px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <path
+    d="M 6 4 H 26 A 4 4 0 0 1 30 8 V 18 A 4 4 0 0 1 26 22 H 15 L 8 28 V 22 H 6 A 4 4 0 0 1 2 18 V 8 A 4 4 0 0 1 6 4 Z"
+    fill="none"
+    stroke="#000000"
+    stroke-width="2.4"
+    stroke-linejoin="round"
+  />
+  <g fill="#000000">
+    <circle cx="10.5" cy="13" r="1.7" />
+    <circle cx="16" cy="13" r="1.7" />
+    <circle cx="21.5" cy="13" r="1.7" />
+  </g>
+</svg>

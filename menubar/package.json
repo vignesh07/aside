@@ -4,13 +4,23 @@
   "private": true,
   "description": "macOS menubar frontend for aside — reuses the same TS core as the TUI.",
   "type": "module",
-  "main": "dist/main.js",
+  "main": "build/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "npm run build && electron dist/main.js"
+    "icons": "electron scripts/build-icons.mjs",
+    "bundle": "node scripts/bundle.mjs",
+    "start": "npm run bundle && electron build/main.js",
+    "pack": "npm run bundle && electron-builder --mac --dir --arm64",
+    "pack:x64": "npm run bundle && electron-builder --mac --dir --x64",
+    "dist": "npm run bundle && electron-builder --mac --arm64 --x64"
   },
   "devDependencies": {
     "electron": "^31.0.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.55.4"
   }
 }

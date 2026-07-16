@@ -142,12 +142,35 @@ the side chat without ever leaving the agent in the other pane.
 ### macOS menubar (for the Codex / Claude desktop apps)
 
 For the GUI agents, a TUI split doesn't fit — so there's an Electron menubar app
-that reuses the **same** TS core (scanners, tailer, `SideChatService`):
+that reuses the **same** TS core (scanners, tailer, `SideChatService`).
+
+Run it from source:
 
 ```bash
-npm run build            # build the shared core first
+npm run build                       # build the shared core first
 cd menubar && npm install && npm start
 ```
+
+Build a real `aside.app`:
+
+```bash
+cd menubar
+npm run icons     # regenerate tray/app icons from the SVG sources (rarely needed)
+npm run pack      # unpacked .app -> release/mac-arm64/aside.app
+npm run dist      # DMG + zip, arm64 and x64 -> release/
+```
+
+It's a menubar-only app (`LSUIElement`) — no dock icon, no Cmd-Tab entry. Click
+the bubble in the menubar to drop the chat down.
+
+> **The app is unsigned.** There's no Apple Developer ID behind this, so it
+> can't be notarized. macOS will refuse it on first launch ("cannot be opened
+> because the developer cannot be verified"). Right-click → Open, or:
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/aside.app
+> ```
+> Only do that because you built it or you trust the source. If this ever ships
+> to people who aren't you, it needs signing + notarization first.
 
 A dropdown hangs off the menubar with a session picker and the side chat. The
 Electron main process drives `MenubarBackend` (a thin, Electron-free wrapper over
@@ -208,8 +231,9 @@ layout bugs that only appear at a given terminal size.
       implementation
 - [x] bird's-eye view: one chat across every session, with a roster, derived idle
       time, and a budgeted two-tier prompt
-- [~] macOS menubar frontend (`menubar/`) — builds + backend is unit-tested;
-      tray/window not yet visually verified, no app packaging/icon yet
+- [x] macOS menubar frontend (`menubar/`), packaged as a real menubar-only
+      `aside.app` with a tray icon — DMG/zip for arm64 + x64
+- [ ] code signing + notarization (the app is currently unsigned; see above)
 - [ ] model picker in the menubar UI (the TUI has one; menubar is fixed-model)
 - [ ] richer transcript view (live feed of what the agents are doing) alongside chat
 - [ ] proactive nudges ("session X has been stuck 20m") rather than only
