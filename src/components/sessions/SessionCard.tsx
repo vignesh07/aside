@@ -43,7 +43,9 @@ export function SessionCard({ session, selected }: SessionCardProps) {
           <Text>{statusIcon} </Text>
           <Text color={COLORS.textDim}>
             {session.status === 'active'
-              ? session.currentActivity
+              ? // Falls back to a word: a bare status icon on an empty line reads
+                // as a rendering glitch rather than "running, nothing seen yet".
+                session.currentActivity || 'active'
               : `${session.status === 'idle' ? 'Idle' : 'Ended'} ${timeAgo(session.lastEventTime)}`}
           </Text>
         </Text>

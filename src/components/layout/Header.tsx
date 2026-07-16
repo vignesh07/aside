@@ -8,7 +8,7 @@ export function Header() {
       <Text color={COLORS.header2} bold>
         aside
       </Text>
-      <Text color={COLORS.textDim}> — side chat for your agent session (read-only)</Text>
+      <Text color={COLORS.textDim}> — read-only bird's-eye chat for your agents</Text>
     </Box>
   );
 }

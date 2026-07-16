@@ -128,6 +128,18 @@ node scripts/smoke.mjs
 which prints the roster the model sees, the budgeted prompt size, and a real
 cross-session answer.
 
+To see the TUI itself without an interactive terminal — in a pipe, a CI log, or
+an agent session with no TTY — render real frames with:
+
+```bash
+node scripts/preview.mjs                       # launch frame
+node scripts/preview.mjs m                     # model picker open
+node scripts/preview.mjs i "is it stuck?" ENTER --wait 25   # a real Q&A
+```
+
+This mounts the actual `<App/>` against your real sessions, so it catches
+layout bugs that only appear at a given terminal size.
+
 ### Roadmap
 
 - [x] launcher that opens the TUI as a docked tmux/iTerm split, with a tmux

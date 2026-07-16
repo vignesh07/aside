@@ -2,8 +2,16 @@ import React, { useState, useRef } from 'react';
 import { Box, useApp, useInput, useStdout } from 'ink';
 import { Header } from './components/layout/Header.js';
 import { Footer } from './components/layout/Footer.js';
-import { ModelPicker } from './components/layout/ModelPicker.js';
-import { SessionList } from './components/sessions/SessionList.js';
+import {
+  ModelPicker,
+  MODEL_PICKER_CHROME_ROWS,
+  MODEL_PICKER_MAX_VISIBLE,
+} from './components/layout/ModelPicker.js';
+import {
+  SessionList,
+  SESSION_CARD_ROWS,
+  SESSION_LIST_CHROME_ROWS,
+} from './components/sessions/SessionList.js';
 import { ChatPane } from './components/chat/ChatPane.js';
 import { ChatInput } from './components/chat/ChatInput.js';
 import { RetroBox } from './components/shared/RetroBox.js';
@@ -120,11 +128,29 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
     }
   });
 
-  const pickerRows = modelPickerOpen ? 10 : 0;
+  // Height budgeting. Ink overlaps text that overflows a fixed-height Box rather
+  // than clipping it, so every box here is sized to what its contents actually
+  // need — and its contents are told how much room they got. Guessing a height
+  // (the picker used to be a hardcoded 10 against ~13 rows of content) corrupts
+  // the frame instead of cropping it.
   const inputRows = 3;
-  const chromeRows = 1 /*header*/ + pickerRows + inputRows + 1 /*footer*/;
-  const contentRows = Math.max(rows - chromeRows, 6);
-  const maxVisible = Math.max(Math.floor(contentRows / 3), 3);
+  const available = Math.max(rows - 1 /*header*/ - inputRows - 1 /*footer*/, 6);
+
+  // The picker takes at most half the pane, and never more rows than it can fill.
+  const pickerOptionRows = modelPickerOpen
+    ? Math.max(1, Math.min(MODEL_PICKER_MAX_VISIBLE, Math.floor(available / 2) - MODEL_PICKER_CHROME_ROWS))
+    : 0;
+  const pickerRows = modelPickerOpen ? pickerOptionRows + MODEL_PICKER_CHROME_ROWS : 0;
+
+  const contentRows = Math.max(available - pickerRows, 4);
+  const maxCards = Math.max(1, Math.floor((contentRows - SESSION_LIST_CHROME_ROWS) / SESSION_CARD_ROWS));
+
+  // Chat pane: RetroBox border (2) + title (1) + the "watching" line and its
+  // margin (2). What's left is what the conversation may paint into.
+  const CHAT_CHROME_ROWS = 5;
+  const chatRows = Math.max(1, contentRows - CHAT_CHROME_ROWS);
+  // 65% column, less the box border (2) and its horizontal padding (2).
+  const chatWidth = Math.max(20, Math.floor(columns * 0.65) - 4);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -137,13 +163,14 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
             selectedIndex={modelPickerIndex}
             currentProvider={currentProvider}
             currentModel={currentModel}
+            maxVisible={pickerOptionRows}
           />
         </Box>
       )}
 
       <Box flexDirection="row" height={contentRows}>
         <Box width="35%" minWidth={0}>
-          <SessionList sessions={sessions} selectedId={selectedId} />
+          <SessionList sessions={sessions} selectedId={selectedId} maxCards={maxCards} />
         </Box>
         <Box width="65%" minWidth={0}>
           <RetroBox title="side chat" height={contentRows}>
@@ -151,7 +178,8 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
               messages={messages}
               isThinking={isThinking}
               watching={scopeLine}
-              maxVisible={maxVisible}
+              width={chatWidth}
+              maxRows={chatRows}
             />
           </RetroBox>
         </Box>

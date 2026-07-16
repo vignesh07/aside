@@ -9,9 +9,21 @@ interface ModelPickerProps {
   selectedIndex: number;
   currentProvider: string;
   currentModel: string;
+  /** Option rows to draw. The caller sizes this to the rows it actually allotted. */
+  maxVisible?: number;
 }
 
-const MAX_VISIBLE = 7;
+/**
+ * Rows the picker spends on anything that isn't an option: box border (2),
+ * title, the hint line, the "Current:" line, and the margin above the list.
+ * Callers add this to their option count to reserve the right height — Ink
+ * overlaps text rather than clipping it, so an under-sized box corrupts the
+ * frame instead of just cropping it.
+ */
+export const MODEL_PICKER_CHROME_ROWS = 6;
+
+export const MODEL_PICKER_MAX_VISIBLE = 7;
+
 const CLEAR_PAD = 220;
 
 function labelFor(option: ModelOption): string {
@@ -19,7 +31,13 @@ function labelFor(option: ModelOption): string {
   return `[${option.provider}] ${option.label ?? option.model}${recommended}`;
 }
 
-export function ModelPicker({ options, selectedIndex, currentProvider, currentModel }: ModelPickerProps) {
+export function ModelPicker({
+  options,
+  selectedIndex,
+  currentProvider,
+  currentModel,
+  maxVisible = MODEL_PICKER_MAX_VISIBLE,
+}: ModelPickerProps) {
   if (options.length === 0) {
     return (
       <RetroBox title="MODEL PICKER" titleColor={COLORS.header1}>
@@ -30,13 +48,14 @@ export function ModelPicker({ options, selectedIndex, currentProvider, currentMo
 
   const safeSelectedIndex = Number.isFinite(selectedIndex) ? Math.trunc(selectedIndex) : 0;
   const normalizedSelected = ((safeSelectedIndex % options.length) + options.length) % options.length;
+  const windowSize = Math.max(1, Math.trunc(maxVisible));
   // Keep highlight movement intuitive: move down through visible rows first,
   // then scroll once the cursor reaches the bottom of the visible window.
   const start = Math.max(0, Math.min(
-    normalizedSelected - (MAX_VISIBLE - 1),
-    Math.max(options.length - MAX_VISIBLE, 0)
+    normalizedSelected - (windowSize - 1),
+    Math.max(options.length - windowSize, 0)
   ));
-  const visible = options.slice(start, start + MAX_VISIBLE);
+  const visible = options.slice(start, start + windowSize);
 
   return (
     <RetroBox title="MODEL PICKER" titleColor={COLORS.header1}>
