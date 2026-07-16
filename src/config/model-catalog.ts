@@ -1,5 +1,4 @@
-import { getModels, getProviders } from '@mariozechner/pi-ai';
-import type { KnownProvider } from '@mariozechner/pi-ai';
+import { getProviders, listInstalledModels } from '../core/providers/index.js';
 
 export interface ModelOption {
   provider: string;
@@ -8,59 +7,60 @@ export interface ModelOption {
   label?: string;
 }
 
-const PRIORITY_PROVIDERS: ReadonlyArray<KnownProvider> = ['anthropic', 'openai', 'google'];
-const RECOMMENDED_HINT_RE = /(nano|mini|haiku|flash-lite|flash|lite|small|fast)/i;
-
-function combinedCost(model: { cost?: { input?: number; output?: number } }): number {
-  const input = model.cost?.input ?? Number.POSITIVE_INFINITY;
-  const output = model.cost?.output ?? Number.POSITIVE_INFINITY;
-  return input + output;
-}
-
-function labelFor(model: { id: string; name?: string }): string {
-  if (model.name && model.name.trim().length > 0) {
-    return `${model.name} (${model.id})`;
-  }
-  return model.id;
-}
-
-function isRecommendedModel(
-  model: { id: string; name?: string; cost?: { input?: number; output?: number } },
-  rankByCost: number,
-): boolean {
-  if (rankByCost < 3) return true;
-  const text = `${model.name ?? ''} ${model.id}`;
-  if (RECOMMENDED_HINT_RE.test(text)) return true;
-  // Many proxy/OAuth providers report 0-cost metadata; treat first few as recommended.
-  const cost = combinedCost(model);
-  return Number.isFinite(cost) && cost <= 2.5;
-}
-
+/**
+ * Every provider/model the observer can run on, flattened for a picker.
+ *
+ * Curated rather than exhaustive. A picker listing every model a vendor ever
+ * shipped is unusable — and `--model` accepts any id, so this is a shortlist,
+ * not a restriction.
+ */
 export function flattenModelCatalog(): ModelOption[] {
-  const providers = getProviders();
-  const sortedProviders: KnownProvider[] = [
-    ...PRIORITY_PROVIDERS.filter((p) => providers.includes(p)),
-    ...providers.filter((p) => !PRIORITY_PROVIDERS.includes(p)).sort(),
-  ];
-
   const options: ModelOption[] = [];
-  for (const provider of sortedProviders) {
-    const models = getModels(provider).slice().sort((a, b) => combinedCost(a) - combinedCost(b));
-    for (let i = 0; i < models.length; i++) {
-      const model = models[i]!;
+  for (const provider of getProviders()) {
+    for (const model of provider.models) {
       options.push({
-        provider,
+        provider: provider.id,
         model: model.id,
-        label: labelFor(model),
-        recommended: isRecommendedModel(model, i),
+        label: `${model.label} (${model.id})`,
+        ...(model.recommended ? { recommended: true } : {}),
       });
     }
   }
-
   return options;
 }
 
-export function findModelOptionIndex(options: ModelOption[], provider: string, model: string): number {
-  const idx = options.findIndex((o) => o.provider === provider && o.model === model);
-  return idx >= 0 ? idx : 0;
+/**
+ * The catalog, plus whatever local models are actually installed.
+ *
+ * The static Ollama entries are guesses at common models; this reports what the
+ * user really pulled. Best-effort — with no local runtime running the result is
+ * just the static catalog, so callers need no fallback path.
+ */
+export async function flattenModelCatalogWithLocal(): Promise<ModelOption[]> {
+  const base = flattenModelCatalog();
+  const installed = await listInstalledModels();
+  if (installed.length === 0) return base;
+
+  // Real installed models replace the guessed Ollama entries entirely.
+  const withoutGuesses = base.filter((o) => o.provider !== 'ollama');
+  return [
+    ...withoutGuesses,
+    ...installed.map((m, i) => ({
+      provider: 'ollama',
+      model: m.id,
+      label: m.label,
+      // Nudge toward the first: it needs no key and keeps transcripts local.
+      ...(i === 0 ? { recommended: true } : {}),
+    })),
+  ];
+}
+
+/** Index of provider/model in `options`, or 0 when absent. */
+export function findModelOptionIndex(
+  options: ModelOption[],
+  provider: string,
+  model: string,
+): number {
+  const index = options.findIndex((o) => o.provider === provider && o.model === model);
+  return index === -1 ? 0 : index;
 }

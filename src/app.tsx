@@ -24,10 +24,9 @@ export interface AppProps {
   provider: string;
   model: string;
   scopeFilter: ScopeFilter;
-  authFile?: string;
 }
 
-export function App({ provider, model, scopeFilter, authFile }: AppProps) {
+export function App({ provider, model, scopeFilter }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const columns = Math.max((stdout?.columns ?? 80) - 1, 40);
@@ -55,7 +54,6 @@ export function App({ provider, model, scopeFilter, authFile }: AppProps) {
     focusId: selectedId,
     provider: currentProvider,
     model: currentModel,
-    authFile,
     onSessionActivity: setSessionActivity,
   });
 

@@ -3,7 +3,7 @@ import React from 'react';
 import { render } from 'ink';
 import meow from 'meow';
 import { App } from './app.js';
-import { DEFAULT_PROVIDER, DEFAULT_MODEL, DEFAULT_AUTH_FILE } from './config/defaults.js';
+import { DEFAULT_PROVIDER, DEFAULT_MODEL } from './config/defaults.js';
 import type { ScopeFilter, SessionSource } from './types/session.js';
 
 const cli = meow(
@@ -21,22 +21,28 @@ const cli = meow(
   It only ever reads. It has no tools and cannot touch your sessions.
 
   Options
-    -p, --provider     LLM provider for the side chat (pi-ai provider id, default: anthropic)
+    -p, --provider     Who answers: claude-cli (default), ollama, anthropic, openai
     -m, --model        Model id for the side chat (default: claude-haiku-4-5-20251001)
     --project          Watch only sessions for this project name
     --session          Watch a specific session id (repeatable)
     --source           Watch only "claude", "codex", or "pi" sessions
-    --auth-file        OAuth credentials file path (default: ~/.pi/agent/auth.json)
     --side             Dock side: "right" (default) or "bottom"
     --size             Dock pane size (default: 40%)
     --write            (install) append the binding to ~/.tmux.conf
     -v, --version      Show version
     -h, --help         Show help
 
-  Environment Variables
-    ANTHROPIC_API_KEY   Needed for --provider anthropic
-    OPENAI_API_KEY      Needed for --provider openai
-    GEMINI_API_KEY      Needed for --provider google
+  Credentials
+    No API key needed. By default aside answers by running your own `claude`
+    CLI (with all tools disabled), so it uses the Claude Code login you already
+    have. It never reads your tokens — Claude Code stays in charge of auth.
+
+    --provider ollama     a local model: no key, and nothing leaves the machine
+    --provider anthropic  ANTHROPIC_API_KEY, if you'd rather use an API key
+    --provider openai     OPENAI_API_KEY
+
+    Reading your agents' transcripts needs no credential at all — those are just
+    files on disk. Credentials only matter for the observer's own answers.
 
   Keybindings
     i or /   Focus the chat input (ask a question)
@@ -53,6 +59,7 @@ const cli = meow(
     $ aside dock --source codex          # docked split beside your agent
     $ aside install --write              # bind <prefix> C-a to summon it
     $ aside --project myrepo --provider openai --model gpt-4o-mini
+    $ aside --provider ollama --model llama3.2   # local, no API key
 `,
   {
     importMeta: import.meta,
@@ -65,7 +72,6 @@ const cli = meow(
       project: { type: 'string' },
       session: { type: 'string', isMultiple: true },
       source: { type: 'string' },
-      authFile: { type: 'string', default: DEFAULT_AUTH_FILE },
       side: { type: 'string', default: 'right' },
       size: { type: 'string', default: '40%' },
       write: { type: 'boolean', default: false },
@@ -98,7 +104,6 @@ if (command === 'dock') {
   const args = buildDockArgs(cli.flags, {
     provider: DEFAULT_PROVIDER,
     model: DEFAULT_MODEL,
-    authFile: DEFAULT_AUTH_FILE,
   });
   const side = cli.flags.side === 'bottom' ? 'bottom' : 'right';
   process.exit(dock({ args, side, size: cli.flags.size }));
@@ -109,6 +114,5 @@ render(
     provider={cli.flags.provider}
     model={cli.flags.model}
     scopeFilter={scopeFilter}
-    authFile={cli.flags.authFile}
   />,
 );

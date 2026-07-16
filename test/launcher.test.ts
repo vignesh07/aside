@@ -4,14 +4,13 @@ import { buildDockArgs, buildTmuxBindLine } from '../src/launcher.js';
 const DEFAULTS = {
   provider: 'anthropic',
   model: 'claude-haiku-4-5-20251001',
-  authFile: '/home/u/.pi/agent/auth.json',
 };
 
 describe('buildDockArgs', () => {
   it('forwards nothing when only defaults are set', () => {
     expect(
       buildDockArgs(
-        { provider: DEFAULTS.provider, model: DEFAULTS.model, authFile: DEFAULTS.authFile },
+        { provider: DEFAULTS.provider, model: DEFAULTS.model },
         DEFAULTS,
       ),
     ).toEqual([]);
@@ -19,7 +18,7 @@ describe('buildDockArgs', () => {
 
   it('forwards changed provider/model and project', () => {
     const args = buildDockArgs(
-      { provider: 'openai', model: 'gpt-4o-mini', project: 'myrepo', authFile: DEFAULTS.authFile },
+      { provider: 'openai', model: 'gpt-4o-mini', project: 'myrepo' },
       DEFAULTS,
     );
     expect(args).toEqual(['--provider', 'openai', '--model', 'gpt-4o-mini', '--project', 'myrepo']);
@@ -27,26 +26,21 @@ describe('buildDockArgs', () => {
 
   it('only forwards a valid --source', () => {
     expect(
-      buildDockArgs({ provider: DEFAULTS.provider, model: DEFAULTS.model, source: 'codex', authFile: DEFAULTS.authFile }, DEFAULTS),
+      buildDockArgs({ provider: DEFAULTS.provider, model: DEFAULTS.model, source: 'codex' }, DEFAULTS),
     ).toEqual(['--source', 'codex']);
     expect(
-      buildDockArgs({ provider: DEFAULTS.provider, model: DEFAULTS.model, source: 'bogus', authFile: DEFAULTS.authFile }, DEFAULTS),
+      buildDockArgs({ provider: DEFAULTS.provider, model: DEFAULTS.model, source: 'bogus' }, DEFAULTS),
     ).toEqual([]);
   });
 
   it('forwards each repeated --session', () => {
     const args = buildDockArgs(
-      { provider: DEFAULTS.provider, model: DEFAULTS.model, session: ['a', 'b'], authFile: DEFAULTS.authFile },
+      { provider: DEFAULTS.provider, model: DEFAULTS.model, session: ['a', 'b'] },
       DEFAULTS,
     );
     expect(args).toEqual(['--session', 'a', '--session', 'b']);
   });
 
-  it('forwards a non-default auth file', () => {
-    expect(
-      buildDockArgs({ provider: DEFAULTS.provider, model: DEFAULTS.model, authFile: '/custom/auth.json' }, DEFAULTS),
-    ).toEqual(['--auth-file', '/custom/auth.json']);
-  });
 });
 
 describe('buildTmuxBindLine', () => {

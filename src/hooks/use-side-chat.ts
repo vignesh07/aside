@@ -12,7 +12,6 @@ interface UseSideChatProps {
   focusId: string | null;
   provider: string;
   model: string;
-  authFile?: string;
   onSessionActivity: (sessionId: string, activity: string) => void;
 }
 
@@ -36,7 +35,6 @@ export function useSideChat({
   focusId,
   provider,
   model,
-  authFile,
   onSessionActivity,
 }: UseSideChatProps): UseSideChatResult {
   const [, bump] = useState(0);
@@ -51,7 +49,7 @@ export function useSideChat({
 
   // One service for the lifetime of the hook; the engine is swapped on model change.
   if (serviceRef.current === null) {
-    serviceRef.current = new SideChatService(new SideChatEngine({ provider, model, authFile }), {
+    serviceRef.current = new SideChatService(new SideChatEngine({ provider, model }), {
       onActivity: (id, activity) => onActivityRef.current(id, activity),
       onThinking: rerender,
       onChat: rerender,
@@ -63,7 +61,7 @@ export function useSideChat({
 
   useEffect(() => {
     serviceRef.current?.setModel(provider, model);
-  }, [provider, model, authFile]);
+  }, [provider, model]);
 
   useEffect(() => {
     serviceRef.current?.syncSessions(sessions, jsonlPaths);

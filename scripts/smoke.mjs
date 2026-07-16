@@ -5,6 +5,7 @@ import { scanAllSessions } from '../dist/core/session-scanner.js';
 import { classifyLine } from '../dist/core/event-classifier.js';
 import { SideChatEngine } from '../dist/core/side-chat-engine.js';
 import { renderWorld } from '../dist/core/world-view.js';
+import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../dist/config/defaults.js';
 import * as fs from 'node:fs';
 
 const { sessions, jsonlPaths } = scanAllSessions({});
@@ -54,7 +55,8 @@ console.log(`rendered prompt: ${rendered.length} chars (budget-bounded)`);
 console.log('\n--- roster the model sees ---');
 console.log(rendered.split('=== Recent activity ===')[0].trim());
 
-const engine = new SideChatEngine({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' });
+const engine = new SideChatEngine({ provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL });
+console.log(`observer: ${DEFAULT_PROVIDER} / ${DEFAULT_MODEL}`);
 const question =
   'Across all my agent sessions: what is each one doing, and is any of them stuck or idle longer than it should be?';
 console.log(`\nasking the observer: "${question}"\n`);

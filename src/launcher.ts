@@ -45,14 +45,12 @@ export interface DockFlags {
   project?: string;
   source?: string;
   session?: string[];
-  authFile: string;
 }
 
 /** Defaults the CLI applies, so we only forward flags the user actually changed. */
 export interface DockDefaults {
   provider: string;
   model: string;
-  authFile: string;
 }
 
 /**
@@ -69,7 +67,6 @@ export function buildDockArgs(flags: DockFlags, defaults: DockDefaults): string[
     args.push('--source', flags.source);
   }
   for (const id of flags.session ?? []) args.push('--session', id);
-  if (flags.authFile !== defaults.authFile) args.push('--auth-file', flags.authFile);
   return args;
 }
 

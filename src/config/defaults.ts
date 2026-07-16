@@ -67,9 +67,15 @@ export const TRUNCATE = {
   activity: 80,
 } as const;
 
-export const DEFAULT_PROVIDER = 'anthropic';
+/**
+ * Default to the user's existing Claude Code login rather than an API key.
+ *
+ * aside's premise is that you're already running these agents — so the CLI is
+ * already installed and already authenticated. Delegating to it means the
+ * default experience needs no key, no signup, and no second bill.
+ */
+export const DEFAULT_PROVIDER = 'claude-cli';
 export const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
-export const DEFAULT_AUTH_FILE = `${process.env['HOME']}/.pi/agent/auth.json`;
 
 export const CLAUDE_DIR = `${process.env['HOME']}/.claude`;
 export const CODEX_DIR = `${process.env['HOME']}/.codex`;

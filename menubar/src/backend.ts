@@ -41,7 +41,6 @@ export interface MenubarState {
 export interface BackendConfig {
   provider: string;
   model: string;
-  authFile?: string;
 }
 
 /** Injection seam for tests (defaults wire up the real core). */
@@ -54,7 +53,7 @@ export interface BackendDeps {
 export class MenubarBackend {
   private readonly service: SideChatService;
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
-  /** Catalogued once: it's derived from pi-ai's static tables, not live state. */
+  /** Catalogued once: it's a static registry, not live state. */
   private readonly models: ModelOption[];
   private sessions: TrackedSession[] = [];
   private focusId: string | null = null;

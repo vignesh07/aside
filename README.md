@@ -103,6 +103,9 @@ npm install -g @vignesh07/aside
 aside
 ```
 
+No API key needed — it uses the Claude Code login you already have. See
+[Auth](#auth-no-api-key).
+
 Or from source:
 
 ```bash
@@ -111,18 +114,48 @@ cd aside && npm install && npm run build
 npm start
 ```
 
-Needs an API key for the chat provider (e.g. `ANTHROPIC_API_KEY`), or OAuth
-credentials at `~/.pi/agent/auth.json`. That key is only for the side chat —
-`aside` reads your agents' transcripts straight off disk and needs no
-credentials for them.
+### Auth: no API key
+
+`aside` uses the Claude Code login you already have. It doesn't ask for a key,
+and it never reads your tokens.
+
+The trick is delegation, not credential-borrowing: to answer a question, aside
+runs your own `claude` CLI (`claude -p`, with **all tools disabled**) and reads
+what it prints. Claude Code owns authentication and token refresh — exactly as
+if you'd typed the command. This is the same shape as
+[CodexBar](https://gordonbeeming.com/projects/codex-bar), which delegates to
+`codex app-server` rather than touching `~/.codex/`.
+
+It works because of aside's own premise: if you're watching Claude Code
+sessions, you already have Claude Code installed and signed in.
+
+Other options, if you want them:
+
+| provider | credential | notes |
+|---|---|---|
+| `claude-cli` *(default)* | **none** — your existing login | delegates to your `claude` CLI |
+| `ollama` | **none** — runs locally | transcripts never leave the machine |
+| `anthropic` | `ANTHROPIC_API_KEY` | separate, API-billed |
+| `openai` | `OPENAI_API_KEY` | separate, API-billed |
+
+**What aside will never do:** lift OAuth tokens out of `~/.claude`, your
+Keychain, or `~/.codex/auth.json`. Those tokens are issued to *those* clients;
+using them from aside would mean presenting aside to the vendor as Claude Code
+or Codex. That's client impersonation, and the account at risk would be yours.
+
+Reading your agents' transcripts needs no credential at all — that's just files
+on disk. Credentials only ever matter for the observer's own answers.
 
 ## Usage
 
 ```bash
-aside                       # watch everything
+aside                       # watch everything (uses your Claude Code login)
 aside --source codex        # watch only Codex sessions
 aside --project myrepo      # scope to one project
-aside --provider openai --model gpt-4o-mini   # pick the observer's model
+
+# the observer can run anywhere:
+aside --provider ollama --model llama3.2      # local, private, no key
+aside --provider openai --model gpt-4o-mini   # if you'd rather use a key
 ```
 
 ### Docked side chat (the "chat bar in the same window" feel)
