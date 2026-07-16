@@ -46,8 +46,25 @@ function bodyOf(fn: ReturnType<typeof stubFetch>) {
 }
 
 describe('registry', () => {
-  it('leads with the no-key login path, then keys, then local', () => {
-    expect(getProviders().map((p) => p.id)).toEqual(['claude-cli', 'anthropic', 'openai', 'ollama']);
+  it('leads with the login-backed providers, then the key-backed ones', () => {
+    // Both CLI providers delegate to a vendor client the user is already signed
+    // into, so neither costs them a credential.
+    expect(getProviders().map((p) => p.id)).toEqual([
+      'claude-cli',
+      'codex-cli',
+      'anthropic',
+      'openai',
+      'ollama',
+    ]);
+  });
+
+  it('offers a login for each vendor, needing no key', () => {
+    for (const id of ['claude-cli', 'codex-cli']) {
+      const provider = getProvider(id)!;
+      expect(provider.requiresApiKey).toBe(false);
+      expect(provider.apiKeyEnv).toEqual([]);
+      expect(isConfigured(provider)).toBe(true);
+    }
   });
 
   it('defaults to a provider that needs no API key', () => {

@@ -1,4 +1,5 @@
 import { claudeCli } from './claude-cli.js';
+import { codexCli } from './codex-cli.js';
 import { anthropic } from './anthropic.js';
 import { openai } from './openai.js';
 import { ollama } from './ollama.js';
@@ -18,15 +19,16 @@ export {
 /**
  * Registration order is picker order, and the first entry is the default.
  *
- * claude-cli leads deliberately. Anyone watching Claude Code sessions already
- * has the CLI and is already logged in — so the out-of-the-box path should cost
- * them nothing. Making them go get a second, separately-billed API key to ask
- * questions about the subscription they already pay for is a bad trade, and an
- * API key as the default quietly imposes exactly that.
+ * The two login-backed providers lead deliberately. Anyone watching Claude Code
+ * or Codex sessions already has that CLI and is already signed in — so the
+ * out-of-the-box path should cost them nothing. Making someone fetch a second,
+ * separately-billed API key to ask questions about the subscription they already
+ * pay for is a bad trade, and an API key default quietly imposes exactly that.
  *
- * Keys remain available for anyone who wants them; they're just not the toll.
+ * Both work by delegation: aside runs the vendor's own client and never touches
+ * a credential. Keys remain available; they're just not the toll.
  */
-const PROVIDERS: readonly Provider[] = [claudeCli, anthropic, openai, ollama];
+const PROVIDERS: readonly Provider[] = [claudeCli, codexCli, anthropic, openai, ollama];
 
 export function getProviders(): Provider[] {
   return [...PROVIDERS];
