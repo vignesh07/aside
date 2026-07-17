@@ -190,8 +190,15 @@ Build a real `aside.app`:
 cd menubar
 npm run icons     # regenerate tray/app icons from the SVG sources (rarely needed)
 npm run pack      # unpacked .app -> release/mac-arm64/aside.app
-npm run dist      # DMG + zip, arm64 and x64 -> release/
+npm run release   # dist + sign/notarize/staple the DMGs -> release/
 ```
+
+`npm run release` is the one to use for anything you hand to another person. Plain
+`npm run dist` signs and notarizes the **app** but leaves the **DMG** unsigned —
+and the DMG is what someone downloads. An unsigned container gives Gatekeeper no
+signature to anchor the notarization ticket to, so the download is refused before
+the (perfectly notarized) app inside is ever reached. Verifying the `.app` hides
+this entirely; only `spctl` on the DMG catches it.
 
 It's a menubar-only app (`LSUIElement`) — no dock icon, no Cmd-Tab entry. Click
 the bubble in the menubar to drop the chat down.

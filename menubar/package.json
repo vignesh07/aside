@@ -2,7 +2,7 @@
   "name": "@aside/menubar",
   "version": "0.1.0",
   "private": true,
-  "description": "macOS menubar frontend for aside — reuses the same TS core as the TUI.",
+  "description": "macOS menubar frontend for aside \u2014 reuses the same TS core as the TUI.",
   "type": "module",
   "main": "build/main.js",
   "scripts": {
@@ -13,7 +13,9 @@
     "pack": "npm run bundle && electron-builder --mac --dir --arm64",
     "pack:x64": "npm run bundle && electron-builder --mac --dir --x64",
     "dist": "npm run bundle && electron-builder --mac --arm64 --x64",
-    "verify:signing": "node scripts/verify-signing.mjs"
+    "verify:signing": "node scripts/verify-signing.mjs",
+    "sign:dmg": "node scripts/sign-dmg.mjs",
+    "release": "npm run dist && npm run sign:dmg"
   },
   "devDependencies": {
     "@electron/notarize": "^3.1.1",
