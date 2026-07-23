@@ -1,7 +1,13 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "RAILPACK"
+    "builder": "RAILPACK",
+    "watchPatterns": [
+      "/distribution/**",
+      "/package.json",
+      "/package-lock.json",
+      "/railway.json"
+    ]
   },
   "deploy": {
     "startCommand": "npm run serve:releases",
