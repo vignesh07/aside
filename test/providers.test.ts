@@ -16,6 +16,7 @@ import {
 import { assembleSystemPrompt } from '../src/core/providers/types.js';
 import { isObserverSession } from '../src/core/session-scanner.js';
 import { DEFAULT_PROVIDER } from '../src/config/defaults.js';
+import { composeClaudeTurnContent } from '../src/core/providers/claude-session.js';
 import type { TrackedSession } from '../src/types/session.js';
 
 const originalFetch = globalThis.fetch;
@@ -179,6 +180,20 @@ describe('assembleSystemPrompt', () => {
     expect(
       assembleSystemPrompt({ model: 'm', systemPrompt: 'ROLE', context: '', history: '', question: 'q' }),
     ).toBe('ROLE');
+  });
+});
+
+describe('Claude CLI durable continuity', () => {
+  it('restores persisted history when a provider process starts', () => {
+    expect(composeClaudeTurnContent('WORLD', 'new question', 'OLD CHAT', true)).toBe(
+      'WORLD\n\nOLD CHAT\n\n---\n\nQuestion: new question',
+    );
+  });
+
+  it('does not duplicate history into an already-warm process', () => {
+    expect(composeClaudeTurnContent('WORLD', 'next', 'OLD CHAT', false)).toBe(
+      'WORLD\n\n---\n\nQuestion: next',
+    );
   });
 });
 

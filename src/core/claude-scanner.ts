@@ -1,7 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CLAUDE_DIR, TIMING } from '../config/defaults.js';
-import { extractProjectName } from '../utils/project-name.js';
+import { extractProjectName, extractProjectNameFromCwd } from '../utils/project-name.js';
+import { cleanThreadTitle } from '../utils/thread-title.js';
 import { scanJsonlPrefix } from './jsonl-prefix-reader.js';
 import type { TrackedSession, ClaudeContextState } from '../types/session.js';
 
@@ -10,15 +11,27 @@ interface DiscoveredClaudeSession {
   jsonlPath: string;
 }
 
-export function scanClaudeSessions(): DiscoveredClaudeSession[] {
+interface ClaudeScannerOptions {
+  claudeDir?: string;
+  nowMs?: number;
+}
+
+const metadataCache = new Map<
+  string,
+  { mtimeMs: number; size: number; metadata: SessionMetadata }
+>();
+
+export function scanClaudeSessions(options: ClaudeScannerOptions = {}): DiscoveredClaudeSession[] {
   const results: DiscoveredClaudeSession[] = [];
+  const claudeDir = options.claudeDir ?? CLAUDE_DIR;
+  const nowMs = options.nowMs ?? Date.now();
 
-  // 1. Read context_state files to find sessions with recent activity
-  const contextStates = readContextStates();
+  // Context-state files enrich Claude sessions but are not the discovery source.
+  const contextStates = readContextStates(claudeDir);
 
-  // 2. Also scan for recently modified JSONL files directly
-  //    (catches sessions without context_state files)
-  const projectsDir = path.join(CLAUDE_DIR, 'projects');
+  // Every transcript is discoverable. Modification time only determines its
+  // activity label; it never determines whether the thread exists.
+  const projectsDir = path.join(claudeDir, 'projects');
   if (!fs.existsSync(projectsDir)) return results;
 
   const projectDirs = fs.readdirSync(projectsDir);
@@ -52,29 +65,29 @@ export function scanClaudeSessions(): DiscoveredClaudeSession[] {
       }
 
       const mtime = jsonlStat.mtimeMs;
-      const age = Date.now() - mtime;
-
-      // Only include sessions modified recently
-      if (age > TIMING.idleThresholdMs) continue;
+      const age = Math.max(0, nowMs - mtime);
 
       // Look up context state for this session
       const contextState = contextStates.find((cs) =>
         sessionId.startsWith(cs.session_id)
       );
 
-      const metadata = readSessionMetadata(jsonlPath);
+      const metadata = cachedMetadata(jsonlPath, jsonlStat);
 
       const status =
         age < TIMING.activeThresholdMs ? 'active' as const :
         age < TIMING.idleThresholdMs ? 'idle' as const :
-        'ended' as const;
+        'history' as const;
 
       results.push({
         jsonlPath,
         session: {
           id: sessionId,
           source: 'claude',
-          projectName: extractProjectName(projDir),
+          projectName: metadata.cwd
+            ? extractProjectNameFromCwd(metadata.cwd)
+            : extractProjectName(projDir),
+          title: metadata.title,
           projectDir: fullProjDir,
           jsonlPath,
           cwd: metadata.cwd || fullProjDir,
@@ -96,19 +109,19 @@ export function scanClaudeSessions(): DiscoveredClaudeSession[] {
   return results;
 }
 
-function readContextStates(): ClaudeContextState[] {
+function readContextStates(claudeDir: string): ClaudeContextState[] {
   const states: ClaudeContextState[] = [];
 
   let files: string[];
   try {
-    files = fs.readdirSync(CLAUDE_DIR).filter((f) => f.startsWith('context_state_'));
+    files = fs.readdirSync(claudeDir).filter((f) => f.startsWith('context_state_'));
   } catch {
     return states;
   }
 
   for (const file of files) {
     try {
-      const raw = fs.readFileSync(path.join(CLAUDE_DIR, file), 'utf-8');
+      const raw = fs.readFileSync(path.join(claudeDir, file), 'utf-8');
       const parsed = JSON.parse(raw) as ClaudeContextState;
       states.push(parsed);
     } catch {
@@ -125,6 +138,8 @@ interface SessionMetadata {
   slug?: string;
   model?: string;
   version?: string;
+  title?: string;
+  firstPrompt?: string;
 }
 
 function readSessionMetadata(jsonlPath: string): SessionMetadata {
@@ -138,9 +153,22 @@ function readSessionMetadata(jsonlPath: string): SessionMetadata {
       if (parsed.slug && !meta.slug) meta.slug = parsed.slug;
       if (parsed.version && !meta.version) meta.version = parsed.version;
       if (parsed.message?.model && !meta.model) meta.model = parsed.message.model;
+      if (parsed.type === 'ai-title' && parsed.aiTitle) {
+        meta.title = cleanThreadTitle(parsed.aiTitle);
+      }
+      if (parsed.type === 'user' && !meta.firstPrompt) {
+        const content = parsed.message?.content;
+        if (typeof content === 'string') meta.firstPrompt = cleanThreadTitle(content);
+        else if (Array.isArray(content)) {
+          const text = content.find(
+            (part: Record<string, unknown>) => part['type'] === 'text',
+          );
+          meta.firstPrompt = cleanThreadTitle(text?.['text']);
+        }
+      }
 
       // If we have everything, stop reading
-      if (meta.cwd && meta.gitBranch && meta.slug && meta.model && meta.version) {
+      if (meta.cwd && meta.gitBranch && meta.slug && meta.model && meta.version && meta.title) {
         return true;
       }
     } catch {
@@ -149,5 +177,20 @@ function readSessionMetadata(jsonlPath: string): SessionMetadata {
     return false;
   }, { maxBytes: 512 * 1024, maxLines: 300 });
 
+  if (!meta.title) meta.title = meta.firstPrompt;
   return meta;
+}
+
+function cachedMetadata(jsonlPath: string, stat: fs.Stats): SessionMetadata {
+  const cached = metadataCache.get(jsonlPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.metadata;
+  }
+  const metadata = readSessionMetadata(jsonlPath);
+  metadataCache.set(jsonlPath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    metadata,
+  });
+  return metadata;
 }

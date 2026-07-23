@@ -1,10 +1,23 @@
 appId: com.vignesh.aside
-productName: aside
+productName: Aside
 copyright: Copyright © 2026 Vignesh Natarajan
 
 directories:
   output: release
   buildResources: assets
+
+# Remove Electron execution paths this app does not use. Together with ASAR
+# integrity, this prevents environment variables or a loose app directory from
+# substituting code before the signed bundle starts.
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
 
 # Arch is pinned explicitly by the npm scripts rather than left to the host.
 # `--dir` follows the host arch, and a toolchain running under Rosetta reports
@@ -12,7 +25,7 @@ directories:
 # arm64 machine. Always name the arch.
 
 # The core is inlined into build/ by scripts/bundle.mjs, so nothing outside this
-# package needs to ship. node_modules carries pi-ai, the one runtime dependency.
+# package needs to ship.
 files:
   - build/**
   - index.html

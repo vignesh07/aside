@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { assembleSystemPrompt } from './types.js';
 import type { CompletionRequest, Provider } from './types.js';
 import { OBSERVER_CWD } from './claude-session.js';
 
@@ -22,9 +23,6 @@ import { OBSERVER_CWD } from './claude-session.js';
 /** Per-answer ceiling. Codex spawns a model turn; be generous but bounded. */
 const TIMEOUT_MS = 180_000;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
-
-/** Session id of the last answer, so follow-ups continue the same conversation. */
-let lastSessionActive = false;
 
 /** Numeric sort key from a `codex-cli 0.144.5` version banner. */
 function versionRank(output: string): number {
@@ -86,7 +84,8 @@ export const codexCli: Provider = {
   },
 };
 
-async function askCodex({ model, systemPrompt, context, question }: CompletionRequest): Promise<string> {
+async function askCodex(req: CompletionRequest): Promise<string> {
+  const { model, question } = req;
   const binary = resolveCodexBinary();
   if (!binary) {
     throw new Error(
@@ -96,10 +95,10 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
   }
   fs.mkdirSync(OBSERVER_CWD, { recursive: true });
 
-  // Codex has no persistent stdin protocol like Claude Code's stream-json, but
-  // `exec resume --last` continues its own most recent session — so continuity
-  // comes from Codex's session store rather than from us re-sending history.
-  const resume = lastSessionActive ? ['resume', '--last'] : [];
+  // Codex has no stable per-thread stdin session protocol. Re-sending the
+  // bounded persisted history keeps side threads independent; `resume --last`
+  // would let one selected session accidentally continue another one's chat.
+  const context = assembleSystemPrompt(req);
   const prompt = context ? `${context}\n\n---\n\nQuestion: ${question}` : question;
 
   // Codex writes its final message here. Asking for the answer directly beats
@@ -110,7 +109,6 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
 
   const args = [
     'exec',
-    ...resume,
     // Read-only: the observer must not be able to mutate anything. Codex
     // sandboxes model-generated shell commands; this is the strictest policy.
     '--sandbox',
@@ -127,12 +125,7 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
     '--model',
     model,
   ];
-  if (systemPrompt && !lastSessionActive) {
-    // Codex has no --append-system-prompt; fold the role into the first turn.
-    args.push(`${systemPrompt}\n\n---\n\n${prompt}`);
-  } else {
-    args.push(prompt);
-  }
+  args.push(prompt);
 
   return new Promise<string>((resolve, reject) => {
     const child = spawn(binary, args, {
@@ -166,7 +159,6 @@ async function askCodex({ model, systemPrompt, context, question }: CompletionRe
       const answer = readAnswer(answerFile);
       if (timedOut) return reject(new Error(`codex-cli: timed out after ${TIMEOUT_MS / 1000}s.`));
       if (code !== 0) return reject(explain(new Error(`exited with code ${code}`), stderr + stdout));
-      lastSessionActive = true;
       resolve(answer || '(no response)');
     });
   });
@@ -204,5 +196,6 @@ function explain(err: unknown, output: string): Error {
 
 /** Forget the conversation, so the next ask starts a fresh Codex session. */
 export function resetCodexSession(): void {
-  lastSessionActive = false;
+  // Kept as a compatibility no-op. Codex side threads are stateless and receive
+  // their bounded persisted history on every call.
 }

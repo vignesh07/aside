@@ -7,8 +7,8 @@ describe('SYSTEM_PROMPT', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/no tools|cannot edit/);
   });
 
-  it('frames the view as spanning every session, not one', () => {
-    expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/bird's-eye|every session|all sessions/);
+  it('frames the fleet view as recent plus searchable relevant history', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/query-relevant|selected for relevance/);
   });
 
   it('bounds the scope honestly to agent sessions only', () => {

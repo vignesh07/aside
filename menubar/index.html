@@ -2,117 +2,571 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
-    <title>aside</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Aside</title>
     <style>
       :root {
-        --bg: #1a1a22;
-        --panel: #22222c;
-        --border: #3a3a4a;
-        --text: #e0e0e0;
-        --dim: #8a8a9a;
-        --accent: #4ecdc4;
-        --you: #4ecdc4;
-        --aside: #c084fc;
-        --error: #ff6b6b;
+        --window: #ffffff;
+        --sidebar: #f5f5f5;
+        --surface: #f7f7f7;
+        --surface-hover: #ededed;
+        --selection: #e7e7e7;
+        --line: rgba(0, 0, 0, .09);
+        --line-strong: rgba(0, 0, 0, .16);
+        --text: #1d1d1f;
+        --secondary: #6e6e73;
+        --tertiary: #9a9a9f;
+        --accent: #007aff;
+        --attention: #c66a00;
+        --danger: #d70015;
+        --overlay: rgba(0, 0, 0, .22);
+        --shadow: 0 20px 70px rgba(0, 0, 0, .22);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --window: #1c1c1e;
+          --sidebar: #171719;
+          --surface: #262628;
+          --surface-hover: #2b2b2e;
+          --selection: #303033;
+          --line: rgba(255, 255, 255, .085);
+          --line-strong: rgba(255, 255, 255, .16);
+          --text: #f2f2f2;
+          --secondary: #98989f;
+          --tertiary: #696970;
+          --accent: #0a84ff;
+          --attention: #ff9f0a;
+          --danger: #ff453a;
+          --overlay: rgba(0, 0, 0, .5);
+          --shadow: 0 24px 80px rgba(0, 0, 0, .55);
+        }
       }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
+      html, body { width: 100%; height: 100%; }
       body {
         margin: 0;
-        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: var(--bg);
+        overflow: hidden;
         color: var(--text);
-        height: 100vh;
+        background: var(--window);
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+      button, input, select { font: inherit; }
+      button { color: inherit; }
+      .workspace {
+        height: 100%;
+        display: grid;
+        grid-template-columns: 232px minmax(0, 1fr);
+      }
+
+      /* Sidebar */
+      .sidebar {
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
         display: flex;
         flex-direction: column;
+        background: var(--sidebar);
+        border-right: 1px solid var(--line);
       }
-      header {
+      .sidebar-head {
+        height: 52px;
+        flex: none;
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 8px 10px;
-        border-bottom: 1px solid var(--border);
+        padding: 0 13px;
+        -webkit-app-region: drag;
       }
-      header .brand { font-weight: 600; color: var(--accent); }
-      header select {
-        background: var(--panel);
+      .app-mark {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
         color: var(--text);
-        border: 1px solid var(--border);
+        border: 1px solid var(--line-strong);
         border-radius: 6px;
-        padding: 3px 6px;
-        min-width: 0;
-        max-width: 190px;
+        font-size: 12px;
       }
-      header #sessions { margin-left: auto; }
-      /* The model picker is secondary chrome — small, and it must never crowd
-         out the session picker on a 400px-wide dropdown. */
-      footer .meta {
+      .brand { font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+      .sidebar-section {
         display: flex;
         align-items: center;
-        gap: 6px;
-        margin-bottom: 6px;
+        padding: 8px 12px 5px;
+        color: var(--secondary);
+        font-size: 11px;
+        font-weight: 560;
       }
-      footer .meta label { color: var(--dim); font-size: 11px; }
-      footer .meta select {
-        flex: 1;
-        min-width: 0;
-        background: var(--panel);
+      #thread-count { margin-left: auto; color: var(--tertiary); font-weight: 400; }
+      .thread-search-wrap {
+        position: relative;
+        flex: none;
+        margin: 1px 9px 7px;
+      }
+      .thread-search-icon {
+        position: absolute;
+        top: 50%;
+        left: 8px;
+        width: 12px;
+        height: 12px;
+        color: var(--tertiary);
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+      .thread-search-icon svg { display: block; width: 100%; height: 100%; }
+      #thread-search {
+        width: 100%;
+        height: 27px;
+        padding: 0 24px 0 25px;
         color: var(--text);
-        border: 1px solid var(--border);
+        border: 1px solid transparent;
+        border-radius: 7px;
+        outline: 0;
+        background: var(--surface);
+        font-size: 11px;
+        user-select: text;
+        -webkit-app-region: no-drag;
+      }
+      #thread-search:focus {
+        border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+        background: var(--window);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+      }
+      #thread-search::placeholder { color: var(--tertiary); }
+      #thread-search::-webkit-search-cancel-button { opacity: .58; }
+      #threads {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+        padding: 0 7px 10px;
+      }
+      .thread-group {
+        width: 100%;
+        height: 27px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin: 3px 0 0;
+        padding: 0 7px;
+        color: var(--secondary);
+        border: 0;
         border-radius: 6px;
-        padding: 2px 5px;
+        background: transparent;
+        text-align: left;
+        cursor: default;
+      }
+      .thread-group:hover { color: var(--text); background: var(--surface-hover); }
+      .thread-group .disclosure {
+        width: 9px;
+        color: var(--tertiary);
+        font-size: 9px;
+        transform: translateY(-.5px);
+      }
+      .thread-group .group-name {
+        min-width: 0;
+        overflow: hidden;
+        flex: 1;
+        font-size: 10px;
+        font-weight: 570;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .thread-group .group-count {
+        color: var(--tertiary);
+        font-size: 9px;
+      }
+      .thread-group.older {
+        height: 31px;
+        margin-top: 7px;
+        border-top: 1px solid var(--line);
+        border-radius: 0;
+      }
+      .thread-group.older:hover { background: transparent; }
+      .thread-group.older .group-name { font-size: 11px; }
+      .no-thread-results {
+        padding: 13px 9px;
+        color: var(--secondary);
         font-size: 11px;
       }
-      footer .meta select:disabled { opacity: .5; }
-      #messages { flex: 1; overflow-y: auto; padding: 10px; }
-      .empty { color: var(--dim); }
-      .turn { margin-bottom: 10px; }
-      .turn .who { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-      .turn.user .who { color: var(--you); }
-      .turn.assistant .who { color: var(--aside); }
-      .turn .body { white-space: pre-wrap; }
-      .turn.error .body { color: var(--error); }
-      .thinking { color: var(--error); font-style: italic; }
-      footer { padding: 8px; border-top: 1px solid var(--border); }
-      #composer { display: flex; gap: 6px; }
-      #input {
+      .thread {
+        width: 100%;
+        min-height: 44px;
+        display: grid;
+        grid-template-columns: 22px minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 8px;
+        margin: 1px 0;
+        padding: 5px 7px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        text-align: left;
+        cursor: default;
+      }
+      .thread.nested {
+        padding-left: 17px;
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+      }
+      .thread:hover { background: var(--surface-hover); }
+      .thread.active { background: var(--selection); }
+      .source {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
+        color: var(--secondary);
+        border: 1px solid var(--line-strong);
+        border-radius: 50%;
+        font-size: 9px;
+        font-weight: 650;
+      }
+      .source.fleet { border: 0; font-size: 15px; }
+      .thread-copy { min-width: 0; display: flex; flex-direction: column; }
+      .thread-title, .thread-subtitle {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .thread-title { color: var(--text); font-size: 12px; font-weight: 530; }
+      .thread-subtitle { color: var(--secondary); font-size: 10px; }
+      .thread.needs-user .thread-subtitle { color: var(--attention); }
+      .attention-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--attention);
+        color: transparent;
+      }
+      .sidebar-foot {
+        flex: none;
+        display: flex;
+        align-items: center;
+        padding: 9px 10px;
+        border-top: 1px solid var(--line);
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .sidebar-foot .spacer { flex: 1; }
+      .icon-button {
+        width: 28px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--secondary);
+        cursor: default;
+        -webkit-app-region: no-drag;
+      }
+      .icon-button:hover { color: var(--text); background: var(--surface-hover); }
+
+      /* Conversation */
+      .chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+      .scope-header {
+        height: 52px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        -webkit-app-region: drag;
+      }
+      .scope-copy { min-width: 0; }
+      .scope-header h1 {
+        overflow: hidden;
+        margin: 0;
+        font-size: 13px;
+        font-weight: 620;
+        letter-spacing: -.01em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #scope-meta { color: var(--secondary); font-size: 10px; }
+      #needs-count {
+        margin-left: auto;
+        color: var(--attention);
+        font-size: 11px;
+        font-weight: 530;
+      }
+      #messages {
+        min-height: 0;
         flex: 1;
-        background: var(--panel);
+        overflow-y: auto;
+        padding: 24px max(28px, calc((100% - 620px) / 2));
+        user-select: text;
+      }
+      .empty {
+        max-width: 330px;
+        margin: 28vh auto 0;
+        text-align: center;
+      }
+      .empty strong { display: block; font-size: 14px; font-weight: 590; }
+      .empty p { margin: 5px 0 0; color: var(--secondary); font-size: 12px; }
+      .turn { max-width: 620px; margin: 0 auto 22px; }
+      .who {
+        margin-bottom: 5px;
+        color: var(--secondary);
+        font-size: 11px;
+        font-weight: 560;
+      }
+      .body { color: var(--text); white-space: pre-wrap; }
+      .turn.user .body {
+        width: fit-content;
+        max-width: min(86%, 520px);
+        margin-left: auto;
+        padding: 8px 11px;
+        border-radius: 11px;
+        background: var(--surface);
+      }
+      .turn.user .who { display: none; }
+      .turn.error .body { color: var(--danger); }
+      .thinking {
+        max-width: 620px;
+        margin: 0 auto;
+        color: var(--secondary);
+        font-size: 11px;
+      }
+      .thinking::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 7px;
+        border: 1px solid var(--tertiary);
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin .8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* Composer */
+      .composer-shell {
+        flex: none;
+        width: 100%;
+        max-width: 676px;
+        margin: 0 auto;
+        padding: 7px 18px 14px;
+      }
+      #privacy-banner {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 0 3px 8px;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      #privacy-banner strong { color: var(--secondary); font-weight: 560; }
+      #privacy-banner button {
+        margin-left: auto;
+        padding: 0;
+        color: var(--accent);
+        border: 0;
+        background: transparent;
+        white-space: nowrap;
+        cursor: default;
+      }
+      .composer-card {
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        background: var(--window);
+      }
+      #composer { display: flex; align-items: center; min-height: 45px; padding: 5px 6px 5px 11px; }
+      #input {
+        min-width: 0;
+        flex: 1;
+        padding: 6px 0;
         color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 6px 8px;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        user-select: text;
       }
-      #input:focus { outline: none; border-color: var(--accent); }
+      #input::placeholder { color: var(--tertiary); }
       #send {
-        background: var(--accent);
-        color: #10151a;
-        border: none;
-        border-radius: 6px;
-        padding: 0 12px;
-        font-weight: 600;
-        cursor: pointer;
+        width: 29px;
+        height: 29px;
+        display: grid;
+        place-items: center;
+        padding: 0 0 2px;
+        color: var(--window);
+        border: 0;
+        border-radius: 50%;
+        background: var(--text);
+        font-size: 16px;
+        line-height: 1;
+        cursor: default;
       }
-      #send:disabled { opacity: .5; cursor: default; }
+      #send:disabled { opacity: .26; }
+      .composer-meta {
+        min-height: 28px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 0 10px;
+        border-top: 1px solid var(--line);
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      #models {
+        min-width: 0;
+        max-width: 285px;
+        color: var(--secondary);
+        border: 0;
+        outline: 0;
+        background: transparent;
+        font-size: 10px;
+      }
+      .composer-meta .spacer { flex: 1; }
+
+      /* Settings sheet */
+      .settings-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+        background: var(--overlay);
+        backdrop-filter: blur(10px);
+      }
+      .settings-card {
+        width: min(460px, 100%);
+        max-height: 100%;
+        overflow-y: auto;
+        padding: 18px;
+        border: 1px solid var(--line-strong);
+        border-radius: 13px;
+        background: var(--window);
+        box-shadow: var(--shadow);
+      }
+      .settings-head { display: flex; align-items: center; }
+      .settings-head h2 { flex: 1; margin: 0; font-size: 14px; font-weight: 620; }
+      .settings-section { margin-top: 17px; }
+      .settings-section h3 { margin: 0 0 5px; font-size: 12px; font-weight: 590; }
+      .settings-section p { margin: 4px 0; color: var(--secondary); font-size: 11px; }
+      .path {
+        display: block;
+        overflow: hidden;
+        margin-top: 7px;
+        padding: 7px 8px;
+        color: var(--secondary);
+        border-radius: 6px;
+        background: var(--surface);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        user-select: text;
+      }
+      .settings-actions { display: flex; gap: 8px; margin-top: 18px; }
+      .secondary, .danger {
+        padding: 6px 10px;
+        border: 1px solid var(--line-strong);
+        border-radius: 7px;
+        background: var(--surface);
+        cursor: default;
+      }
+      .secondary:hover { background: var(--surface-hover); }
+      .danger { margin-left: auto; color: var(--danger); }
     </style>
   </head>
   <body>
-    <header>
-      <span class="brand">aside</span>
-      <span class="dim" style="color: var(--dim)">read-only</span>
-      <select id="sessions" title="focus a session for more detail"></select>
-    </header>
-    <div id="messages"></div>
-    <footer>
-      <div class="meta">
-        <label for="models">observer</label>
-        <select id="models" title="which model answers your questions"></select>
-      </div>
-      <form id="composer">
-        <input id="input" placeholder="ask about your agents…" autocomplete="off" />
-        <button id="send" type="submit">ask</button>
-      </form>
-    </footer>
+    <main class="workspace">
+      <aside class="sidebar">
+        <header class="sidebar-head">
+          <span class="app-mark">a</span>
+          <span class="brand">Aside</span>
+        </header>
+        <div class="sidebar-section">
+          <span>Threads</span>
+          <span id="thread-count">1</span>
+        </div>
+        <div class="thread-search-wrap">
+          <span class="thread-search-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"></circle>
+              <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+            </svg>
+          </span>
+          <input
+            id="thread-search"
+            type="search"
+            placeholder="Search all threads"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Search all threads"
+          />
+        </div>
+        <div id="threads"></div>
+        <footer class="sidebar-foot">
+          <span>Read-only observer</span>
+          <span class="spacer"></span>
+          <button id="settings-button" class="icon-button" type="button" aria-label="Privacy and diagnostics">•••</button>
+        </footer>
+      </aside>
+
+      <section class="chat">
+        <header class="scope-header">
+          <div class="scope-copy">
+            <h1 id="scope-title">All agents</h1>
+            <div id="scope-meta">Fleet conversation</div>
+          </div>
+          <span id="needs-count" hidden></span>
+        </header>
+        <div id="messages"></div>
+        <div class="composer-shell">
+          <div id="privacy-banner">
+            <span><strong>Private by default.</strong> Common secrets are redacted before cloud inference.</span>
+            <button id="privacy-dismiss" type="button">Dismiss</button>
+          </div>
+          <div class="composer-card">
+            <form id="composer">
+              <input id="input" placeholder="Ask across all agents…" autocomplete="off" />
+              <button id="send" type="submit" aria-label="Send">↑</button>
+            </form>
+            <div class="composer-meta">
+              <select id="models" title="Observer model for this thread"></select>
+              <span class="spacer"></span>
+              <span>Model for this thread</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="settings" class="settings-overlay" hidden>
+      <section class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="settings-head">
+          <h2 id="settings-title">Privacy & diagnostics</h2>
+          <button id="settings-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="settings-section">
+          <h3>Observer boundary</h3>
+          <p>Aside only reads local agent session logs. It never writes to an agent session or project.</p>
+          <p>Common credential patterns are redacted before scoped context reaches the selected observer. Choose Ollama to keep inference local.</p>
+        </div>
+        <div class="settings-section">
+          <h3>Persistent side chats</h3>
+          <p>Fleet and per-session conversations are stored locally with user-only permissions.</p>
+          <span id="storage-path" class="path"></span>
+        </div>
+        <div class="settings-section">
+          <h3>Diagnostics</h3>
+          <p id="diagnostics"></p>
+        </div>
+        <div class="settings-actions">
+          <button id="open-data" class="secondary" type="button">Show chat data</button>
+          <button id="quit" class="danger" type="button">Quit Aside</button>
+        </div>
+      </section>
+    </div>
     <script type="module" src="./build/renderer.js"></script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 {
   "name": "@vignesh07/aside",
   "version": "0.1.0",
-  "description": "A read-only bird's-eye chat for your AI coding agents. Watches every Claude Code, Codex, and Pi session on your machine and answers questions across all of them — without interrupting any of them.",
+  "description": "Persistent read-only side chats for every Claude Code, Codex, and Pi session on your machine, plus one fleet-wide thread.",
   "keywords": [
     "claude-code",
     "codex",
@@ -10,7 +10,8 @@
     "tui",
     "cli",
     "read-only",
-    "agent-monitoring"
+    "agent-monitoring",
+    "side-chat"
   ],
   "homepage": "https://github.com/vignesh07/aside#readme",
   "repository": {
@@ -21,6 +22,9 @@
     "url": "https://github.com/vignesh07/aside/issues"
   },
   "type": "module",
+  "workspaces": [
+    "distribution"
+  ],
   "bin": {
     "aside": "./dist/cli.js"
   },
@@ -32,13 +36,17 @@
   ],
   "scripts": {
     "prepack": "npm run build",
-    "build": "tsc",
+    "build": "node scripts/clean-build.mjs && tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "preview": "node scripts/preview.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "serve:releases": "npm --workspace @aside/release-distribution start",
+    "release:publish": "railway run --service aside npm --workspace @aside/release-distribution run publish",
+    "release:publish:dry": "npm --workspace @aside/release-distribution run publish -- --dry-run",
+    "test": "npm run build && vitest run",
+    "lint": "tsc --noEmit",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "chalk": "^5.4.1",

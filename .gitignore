@@ -3,6 +3,23 @@ dist/
 *.log
 .DS_Store
 
+# Local credentials and service state must never enter a public checkout.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+.railway/
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.cer
+*.crt
+*.mobileprovision
+*.provisionprofile
+
 # npm pack artifacts
 *.tgz
 

@@ -12,7 +12,7 @@ export function Footer({ provider, model, sessionCount }: FooterProps) {
   return (
     <Box justifyContent="space-between">
       <Text color={COLORS.textDim}>
-        {sessionCount} session{sessionCount === 1 ? '' : 's'} · m: model · i: ask · esc: unfocus · q: quit
+        {sessionCount} session{sessionCount === 1 ? '' : 's'} · a: fleet · m: thread model · i: ask · q: quit
       </Text>
       <Text color={COLORS.textDim}>
         {provider}/{model}

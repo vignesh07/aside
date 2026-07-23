@@ -41,9 +41,9 @@ export function scanAllSessions(filter: ScopeFilter): ScanResult {
     }
   }
 
-  // Sort: active first, then idle, then by last event time (newest first)
+  // Sort recent activity first, then searchable history, newest first per tier.
   sessions.sort((a, b) => {
-    const statusOrder = { active: 0, idle: 1, ended: 2 };
+    const statusOrder = { active: 0, idle: 1, history: 2 };
     const statusDiff = statusOrder[a.status] - statusOrder[b.status];
     if (statusDiff !== 0) return statusDiff;
     return b.lastEventTime.getTime() - a.lastEventTime.getTime();

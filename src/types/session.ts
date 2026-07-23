@@ -1,13 +1,26 @@
 export type SessionSource = 'claude' | 'codex' | 'pi';
 
-export type SessionStatus = 'active' | 'idle' | 'ended';
+/**
+ * Activity inferred from transcript modification time.
+ *
+ * "history" deliberately does not mean ended: transcript silence cannot tell
+ * us whether the user closed an agent window or simply left it waiting.
+ */
+export type SessionStatus = 'active' | 'idle' | 'history';
 
 export type ContextHealth = 'safe' | 'caution' | 'critical';
+
+export interface SessionAttention {
+  needsUser: boolean;
+  reason: string;
+}
 
 export interface TrackedSession {
   id: string;
   source: SessionSource;
   projectName: string;
+  /** Saved agent title, or a compact first-prompt fallback when available. */
+  title?: string;
   projectDir: string;
   jsonlPath: string;
   cwd: string;

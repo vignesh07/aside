@@ -77,22 +77,29 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
       const callId = (payload['call_id'] as string) || '';
       let target = '';
       try {
-        const parsedArgs = JSON.parse(args);
+        const parsedArgs = JSON.parse(args) as Record<string, unknown>;
+        if (isInputRequestTool(name)) {
+          target = extractInputRequest(parsedArgs);
+        }
         const command = parsedArgs['command'];
         const filePath = parsedArgs['file_path'];
         const query = parsedArgs['query'];
         const targetValue = Array.isArray(command)
           ? command.join(' ')
           : (command || filePath || query || args);
-        target = truncate(
-          String(targetValue),
-          60
-        );
+        if (!target) target = truncate(String(targetValue), TRUNCATE.target);
       } catch {
         target = truncate(args, TRUNCATE.target);
       }
       if (callId) {
         rememberCallTool(callId, name);
+      }
+      if (isInputRequestTool(name)) {
+        return {
+          kind: 'needs_input',
+          reason: target || 'The agent is waiting for your response.',
+          ts,
+        };
       }
       return { kind: 'tool_call', tool: name, target, ts };
     }
@@ -164,6 +171,22 @@ function resolveCallTool(callId: string): string {
   const tool = callIdToTool.get(callId) || 'tool';
   callIdToTool.delete(callId);
   return tool;
+}
+
+function isInputRequestTool(tool: string): boolean {
+  return ['AskUserQuestion', 'ask_user_question', 'request_user_input'].includes(tool);
+}
+
+function extractInputRequest(args: Record<string, unknown>): string {
+  const questions = args['questions'];
+  if (Array.isArray(questions)) {
+    const first = questions[0];
+    if (first && typeof first === 'object') {
+      const item = first as Record<string, unknown>;
+      return truncate(String(item['question'] || item['prompt'] || ''), TRUNCATE.prose);
+    }
+  }
+  return truncate(String(args['question'] || args['prompt'] || ''), TRUNCATE.prose);
 }
 
 function parseFunctionCallOutput(output: unknown): { text: string; isError: boolean } {

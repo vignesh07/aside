@@ -6,6 +6,7 @@ export type SessionEvent =
   | { kind: 'tool_result_ok'; tool: string; summary: string; ts: string }
   | { kind: 'tool_result_error'; tool: string; error: string; ts: string }
   | { kind: 'tool_rejected'; tool: string; ts: string }
+  | { kind: 'needs_input'; reason: string; ts: string }
   | { kind: 'bash_running'; command: string; elapsedSeconds: number; ts: string }
   | { kind: 'bash_complete'; command: string; exitCode: number; ts: string }
   | { kind: 'file_written'; path: string; ts: string }

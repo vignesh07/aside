@@ -11,10 +11,11 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getCurrentFuseWire, FuseV1Options } from '@electron/fuses';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appPath =
-  process.argv[2] ?? path.join(here, '..', 'release', 'mac-arm64', 'aside.app');
+  process.argv[2] ?? path.join(here, '..', 'release', 'mac-arm64', 'Aside.app');
 
 /**
  * Run a tool and capture stdout *and* stderr together.
@@ -96,6 +97,22 @@ check('notarization ticket stapled', staple.ok, staple.out.trim().split('\n').at
 // 6. What Gatekeeper will actually decide on first launch.
 const spctl = run('spctl', ['--assess', '--type', 'execute', '--verbose=2', appPath]);
 check('Gatekeeper accepts', spctl.ok, spctl.out.trim().split('\n').at(-1));
+
+// 7. Electron's alternate code-loading paths are fused off in the binary.
+const fuseWire = await getCurrentFuseWire(appPath);
+const fuseExpected = [
+  ['RunAsNode disabled', FuseV1Options.RunAsNode, false],
+  ['NODE_OPTIONS disabled', FuseV1Options.EnableNodeOptionsEnvironmentVariable, false],
+  ['Node inspector arguments disabled', FuseV1Options.EnableNodeCliInspectArguments, false],
+  ['ASAR integrity enabled', FuseV1Options.EnableEmbeddedAsarIntegrityValidation, true],
+  ['only signed app.asar loads', FuseV1Options.OnlyLoadAppFromAsar, true],
+  ['extra file:// privileges disabled', FuseV1Options.GrantFileProtocolExtraPrivileges, false],
+];
+for (const [name, option, enabled] of fuseExpected) {
+  const actual = fuseWire[option];
+  const expected = enabled ? '1'.charCodeAt(0) : '0'.charCodeAt(0);
+  check(`Electron fuse: ${name}`, actual === expected, `state=${String.fromCharCode(actual)}`);
+}
 
 let failed = 0;
 for (const c of checks) {

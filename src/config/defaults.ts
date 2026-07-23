@@ -7,7 +7,7 @@ export const COLORS = {
 
   sessionActive: '#00ff41',
   sessionIdle: '#888888',
-  sessionEnded: '#555555',
+  sessionHistory: '#555555',
 
   badgeClaude: '#c084fc',
   badgeCodex: '#00ff41',
@@ -43,7 +43,7 @@ export const TIMING = {
   activeThresholdMs: 30_000,
   idleThresholdMs: 300_000,
   tailPollMs: 1000,
-  seedLines: 20,
+  seedLines: 100,
   maxCommentaryLines: 200,
 } as const;
 

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { PI_DIR, TIMING } from '../config/defaults.js';
 import { extractProjectNameFromCwd } from '../utils/project-name.js';
+import { cleanThreadTitle } from '../utils/thread-title.js';
 import { scanJsonlPrefix } from './jsonl-prefix-reader.js';
 import type { TrackedSession } from '../types/session.js';
 
@@ -16,11 +17,23 @@ interface PiSessionMeta {
   projectName?: string;
   model?: string;
   version?: string;
+  title?: string;
 }
 
-export function scanPiSessions(): DiscoveredPiSession[] {
+interface PiScannerOptions {
+  sessionsDir?: string;
+  nowMs?: number;
+}
+
+const metadataCache = new Map<
+  string,
+  { mtimeMs: number; size: number; metadata: PiSessionMeta }
+>();
+
+export function scanPiSessions(options: PiScannerOptions = {}): DiscoveredPiSession[] {
   const results: DiscoveredPiSession[] = [];
-  const sessionsDir = path.join(PI_DIR, 'agent', 'sessions');
+  const sessionsDir = options.sessionsDir ?? path.join(PI_DIR, 'agent', 'sessions');
+  const nowMs = options.nowMs ?? Date.now();
 
   if (!fs.existsSync(sessionsDir)) return results;
 
@@ -55,15 +68,14 @@ export function scanPiSessions(): DiscoveredPiSession[] {
       }
 
       const mtime = stat.mtimeMs;
-      const age = Date.now() - mtime;
-      if (age > TIMING.idleThresholdMs) continue;
+      const age = Math.max(0, nowMs - mtime);
 
-      const metadata = readPiSessionMeta(jsonlPath);
+      const metadata = cachedMetadata(jsonlPath, stat);
       const sessionId = metadata.id || fallbackSessionId(file);
       const status =
         age < TIMING.activeThresholdMs ? 'active' as const :
         age < TIMING.idleThresholdMs ? 'idle' as const :
-        'ended' as const;
+        'history' as const;
 
       const projectName = metadata.projectName || inferProjectNameFromDir(projectDirName);
 
@@ -73,6 +85,7 @@ export function scanPiSessions(): DiscoveredPiSession[] {
           id: sessionId,
           source: 'pi',
           projectName,
+          title: metadata.title,
           projectDir: metadata.cwd || projectDirPath,
           jsonlPath,
           cwd: metadata.cwd || projectDirPath,
@@ -126,6 +139,18 @@ function readPiSessionMeta(jsonlPath: string): PiSessionMeta {
           if (typeof msg['model'] === 'string' && !meta.model) {
             meta.model = msg['model'];
           }
+          if (msg['role'] === 'user' && !meta.title) {
+            const content = msg['content'];
+            if (typeof content === 'string') meta.title = cleanThreadTitle(content);
+            else if (Array.isArray(content)) {
+              const text = content.find(
+                (part): part is Record<string, unknown> =>
+                  Boolean(part) && typeof part === 'object' &&
+                  (part as Record<string, unknown>)['type'] === 'text',
+              );
+              meta.title = cleanThreadTitle(text?.['text']);
+            }
+          }
         }
       }
 
@@ -152,4 +177,18 @@ function inferProjectNameFromDir(projectDirName: string): string {
   const normalized = projectDirName.replace(/^--/, '').replace(/--$/, '');
   const parts = normalized.split('-').filter(Boolean);
   return parts[parts.length - 1] || projectDirName;
+}
+
+function cachedMetadata(jsonlPath: string, stat: fs.Stats): PiSessionMeta {
+  const cached = metadataCache.get(jsonlPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.metadata;
+  }
+  const metadata = readPiSessionMeta(jsonlPath);
+  metadataCache.set(jsonlPath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    metadata,
+  });
+  return metadata;
 }

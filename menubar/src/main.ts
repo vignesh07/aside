@@ -1,7 +1,18 @@
 // Electron menubar shell. Thin: it owns the tray + dropdown window and bridges
 // IPC to MenubarBackend, which does the real work via the shared core.
 
-import { app, Tray, BrowserWindow, ipcMain, nativeImage, screen } from 'electron';
+import {
+  app,
+  Tray,
+  BrowserWindow,
+  ipcMain,
+  nativeImage,
+  screen,
+  Menu,
+  Notification,
+  shell,
+  protocol,
+} from 'electron';
 import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -10,8 +21,8 @@ import { importShellEnv, isMissingShellEnv } from './shell-env.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const WINDOW_WIDTH = 400;
-const WINDOW_HEIGHT = 560;
+const WINDOW_WIDTH = 760;
+const WINDOW_HEIGHT = 620;
 
 /**
  * Dev flag: pin the dropdown open at a fixed position instead of hanging it off
@@ -23,6 +34,18 @@ const WINDOW_HEIGHT = 560;
 const DEV_SHOW = process.argv.includes('--show');
 const DEV_SHOW_POSITION = { x: 80, y: 80 };
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'aside',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      codeCache: true,
+    },
+  },
+]);
+
 function flagValue(name: string): string | null {
   const i = process.argv.indexOf(name);
   return i === -1 ? null : (process.argv[i + 1] ?? null);
@@ -33,16 +56,24 @@ function flagValue(name: string): string | null {
  *
  *   --capture <png>   render, screenshot the window, quit
  *   --ask "<q>"       ask a real question first, so the shot shows an answer
+ *   --search "<q>"    filter the machine-wide thread list before capture
+ *   --older            expand and scroll to the 7d+ section before capture
  *
  * capturePage() photographs our own web contents, which — unlike the system
  * `screencapture` — needs no screen-recording permission.
  */
 const CAPTURE_PATH = flagValue('--capture');
 const CAPTURE_ASK = flagValue('--ask');
+const CAPTURE_THREAD = flagValue('--thread');
+const CAPTURE_SEARCH = flagValue('--search');
+const CAPTURE_OLDER = process.argv.includes('--older');
+const CAPTURE_SETTINGS = process.argv.includes('--settings');
 
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
+let lastNeedsUser = new Set<string>();
+let attentionInitialized = false;
 
 /**
  * The menubar icon.
@@ -70,14 +101,20 @@ function createWindow(): BrowserWindow {
     resizable: false,
     fullscreenable: false,
     skipTaskbar: true,
+    roundedCorners: true,
+    hasShadow: true,
+    backgroundColor: '#1c1c1e',
     webPreferences: {
       preload: path.join(here, '..', 'preload.cjs'),
       contextIsolation: true,
-      sandbox: false,
+      sandbox: true,
     },
   });
-  // index.html lives at the menubar package root (one level above dist/).
-  window.loadFile(path.join(here, '..', 'index.html'));
+  window.loadURL('aside://app/index.html');
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('aside://app/')) event.preventDefault();
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   if (!DEV_SHOW) window.on('blur', () => window.hide());
   return window;
 }
@@ -108,6 +145,45 @@ function toggleWindow(): void {
   win.webContents.send('aside:update', backend?.getState());
 }
 
+function showWindow(openSettings = false): void {
+  if (!win || !tray) return;
+  positionWindow(win, tray);
+  win.show();
+  win.focus();
+  win.webContents.send('aside:update', backend?.getState());
+  if (openSettings) win.webContents.send('aside:show-settings');
+}
+
+function handleBackendUpdate(state: MenubarState): void {
+  if (win && !win.isDestroyed()) win.webContents.send('aside:update', state);
+  if (tray) {
+    tray.setToolTip(
+      state.needsUserCount > 0
+        ? `aside — ${state.needsUserCount} session${state.needsUserCount === 1 ? '' : 's'} need you`
+        : 'aside — your agent threads, one side chat away',
+    );
+  }
+
+  const next = new Set(state.sessions.filter((session) => session.needsUser).map((session) => session.id));
+  if (attentionInitialized && Notification.isSupported()) {
+    for (const session of state.sessions) {
+      if (!session.needsUser || lastNeedsUser.has(session.id)) continue;
+      const notification = new Notification({
+        title: `${session.projectName} needs you`,
+        body: session.attentionReason || 'This agent is waiting for your input.',
+        silent: false,
+      });
+      notification.on('click', () => {
+        backend?.selectThread(session.threadId);
+        showWindow();
+      });
+      notification.show();
+    }
+  }
+  attentionInitialized = true;
+  lastNeedsUser = next;
+}
+
 app.whenReady().then(() => {
   // Menubar-only app: no dock icon.
   app.dock?.hide();
@@ -126,29 +202,84 @@ app.whenReady().then(() => {
     else if (error) console.warn(`  • shell env import failed: ${error}`);
   }
 
+  const appRoot = path.resolve(here, '..');
+  protocol.handle('aside', (request) => {
+    try {
+      const url = new URL(request.url);
+      if (url.host !== 'app') return new Response('Not found', { status: 404 });
+      const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+      const filePath = path.resolve(appRoot, relative || 'index.html');
+      if (filePath !== appRoot && !filePath.startsWith(`${appRoot}${path.sep}`)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const contentType = new Map([
+        ['.html', 'text/html; charset=utf-8'],
+        ['.js', 'text/javascript; charset=utf-8'],
+        ['.png', 'image/png'],
+      ]).get(path.extname(filePath));
+      return new Response(new Uint8Array(fs.readFileSync(filePath)), {
+        headers: contentType ? { 'content-type': contentType } : undefined,
+      });
+    } catch {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+
   win = createWindow();
 
   backend = new MenubarBackend(
     { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
-    (state: MenubarState) => {
-      if (win && !win.isDestroyed()) win.webContents.send('aside:update', state);
-    },
+    handleBackendUpdate,
   );
   backend.start();
 
   ipcMain.handle('aside:get-state', () => backend?.getState());
-  ipcMain.handle('aside:select', (_e, id: string) => backend?.selectSession(id));
-  ipcMain.handle('aside:ask', (_e, question: string) => backend?.ask(question));
+  ipcMain.handle('aside:select-thread', (_e, threadId: unknown) => {
+    if (typeof threadId === 'string' && threadId.length <= 500) {
+      backend?.selectThread(threadId);
+    }
+  });
+  ipcMain.handle('aside:ask', (_e, question: unknown) => {
+    if (typeof question === 'string' && question.length <= 20_000) {
+      return backend?.ask(question);
+    }
+  });
   ipcMain.handle('aside:set-model', (_e, provider: string, model: string) =>
-    backend?.setModel(provider, model),
+    typeof provider === 'string' &&
+    typeof model === 'string' &&
+    provider.length <= 100 &&
+    model.length <= 300
+      ? backend?.setModel(provider, model)
+      : undefined,
   );
+  ipcMain.handle('aside:open-data', () => {
+    const storagePath = backend?.getState().storagePath;
+    if (!storagePath) return;
+    if (fs.existsSync(storagePath)) {
+      shell.showItemInFolder(storagePath);
+      return;
+    }
+    const dir = path.dirname(storagePath);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    void shell.openPath(dir);
+  });
+  ipcMain.handle('aside:quit', () => app.quit());
 
   const icon = trayImage();
   tray = new Tray(icon);
   // Without an icon there'd be nothing to click, so label it instead.
-  if (icon.isEmpty()) tray.setTitle('aside');
-  tray.setToolTip("aside — read-only bird's-eye chat for your agents");
+  if (icon.isEmpty()) tray.setTitle('Aside');
+  tray.setToolTip('aside — your agent threads, one side chat away');
   tray.on('click', toggleWindow);
+  tray.on('right-click', () => {
+    const menu = Menu.buildFromTemplate([
+      { label: 'Open aside', click: () => showWindow() },
+      { label: 'Privacy & diagnostics…', click: () => showWindow(true) },
+      { type: 'separator' },
+      { label: 'Quit aside', role: 'quit' },
+    ]);
+    tray?.popUpContextMenu(menu);
+  });
 
   if (DEV_SHOW || CAPTURE_PATH) {
     win.setPosition(DEV_SHOW_POSITION.x, DEV_SHOW_POSITION.y, false);
@@ -158,13 +289,31 @@ app.whenReady().then(() => {
     });
   }
 
-  if (CAPTURE_PATH) void captureAndQuit(win, CAPTURE_PATH, CAPTURE_ASK);
+  if (CAPTURE_PATH) {
+    void captureAndQuit(
+      win,
+      CAPTURE_PATH,
+      CAPTURE_ASK,
+      CAPTURE_THREAD,
+      CAPTURE_SEARCH,
+      CAPTURE_OLDER,
+      CAPTURE_SETTINGS,
+    );
+  }
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Render, optionally ask a real question, screenshot the window, and quit. */
-async function captureAndQuit(window: BrowserWindow, target: string, question: string | null) {
+async function captureAndQuit(
+  window: BrowserWindow,
+  target: string,
+  question: string | null,
+  thread: string | null,
+  search: string | null,
+  showOlder: boolean,
+  showSettings: boolean,
+) {
   try {
     await new Promise<void>((resolve) => {
       if (!window.webContents.isLoading()) return resolve();
@@ -172,6 +321,53 @@ async function captureAndQuit(window: BrowserWindow, target: string, question: s
     });
     // Let the first session scan land and paint.
     await sleep(1500);
+
+    if (search) {
+      await window.webContents.executeJavaScript(`
+        (() => {
+          const input = document.getElementById('thread-search');
+          input.value = ${JSON.stringify(search)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()
+      `);
+      await sleep(250);
+    }
+
+    if (showOlder) {
+      await window.webContents.executeJavaScript(`
+        (() => {
+          let button = document.querySelector('.thread-group.older');
+          if (button?.getAttribute('aria-expanded') === 'false') {
+            button.click();
+            button = document.querySelector('.thread-group.older');
+          }
+          button?.scrollIntoView({ block: 'start' });
+        })()
+      `);
+      await sleep(250);
+    }
+
+    if (thread) {
+      await window.webContents.executeJavaScript(`
+        (() => {
+          const requested = ${JSON.stringify(thread)};
+          const button = requested === 'first'
+            ? document.querySelector('.thread[data-thread-id^="session:"]')
+            : document.querySelector(
+                '.thread[data-thread-id="' + CSS.escape(requested) + '"]',
+              );
+          button?.click();
+        })()
+      `);
+      await sleep(250);
+    }
+
+    if (showSettings) {
+      await window.webContents.executeJavaScript(
+        `document.getElementById('settings-button')?.click()`,
+      );
+      await sleep(250);
+    }
 
     if (question) {
       await window.webContents.executeJavaScript(`

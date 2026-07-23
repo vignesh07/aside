@@ -1,22 +1,27 @@
 import type { ChatTurn } from '../types/chat.js';
+import type { ChatThreadScope } from '../types/chat.js';
 import type { WorldSnapshot } from '../types/world.js';
 import { complete, getProvider } from './providers/index.js';
 import { renderWorld, renderHistory, TRANSCRIPT_BUDGET_CHARS } from './world-view.js';
+import { redactSensitiveText } from './redact-sensitive.js';
 
 /**
- * The side chat is a *read-only observer* with a bird's-eye view: it sees every
- * agent session aside can discover, not just one. It has no tools and cannot act
- * on any session, the filesystem, or anything else — so the user can ask "why did
- * it pick that path?" or "is anything stuck?" without touching the main threads.
+ * The side chat is a *read-only observer*. The fleet thread sees every recent
+ * session plus a query-relevant slice of searchable history; a session thread
+ * sees exactly one. It cannot act on sessions or the filesystem.
  */
-const SYSTEM_PROMPT = `You are "aside" — a read-only observer with a bird's-eye view of the AI coding-agent sessions running on this user's machine.
+const SYSTEM_PROMPT = `You are "aside" — a read-only observer for local AI coding-agent threads.
 
-You are given, for every session you can see: a roster line (project, branch, source, status, how long it has been quiet, context usage, last observed activity), and — for the sessions most worth the detail — a recent transcript of prompts, agent replies, tool calls, file edits, and command output.
+The user can chat in two kinds of persistent thread:
+- Fleet thread: you receive every recent session plus history selected for relevance to the user's question. The roster states how many total threads were discovered.
+- Session side thread: you receive exactly one selected session and stay focused on that agent's work.
 
-The user chats with YOU on the side. They are asking about their agents WITHOUT interrupting or steering them.
+For each session in scope you receive a roster line (project, branch, source, status, how long it has been quiet, context usage, last observed activity) and recent transcript detail.
+
+The user chats with YOU on the side. They are asking about their agents WITHOUT interrupting or steering them. Their thread with you persists separately from the agent session.
 
 Your job:
-- Answer questions across all sessions: what each agent is doing right now, why it went the way it did, what it will likely do next.
+- Answer questions across recent and historical sessions: what each agent is doing, why it went the way it did, and what it will likely do next.
 - Compare and connect sessions when it helps ("both are editing the same file", "this one has been stuck for 20 minutes while that one finished").
 - Notice things worth flagging: a session quiet far longer than its work suggests it should be, repeated failing commands, a session burning context, an agent that looks off-track.
 - Be concise and direct. This is a side panel, not an essay.
@@ -28,6 +33,7 @@ Formatting:
 Reading the data:
 - "Current time" and each session's "quiet for" are computed for you. Use them for anything about idleness or how long something has taken — you cannot infer elapsed time from the transcript alone, because a session that does nothing writes nothing.
 - A session being quiet is not automatically a problem. An agent waiting on the user, or finished, is quiet and fine. Say what the quiet most likely means given its last activity, and distinguish "waiting for input" from "stalled mid-task".
+- HISTORY means the transcript has not changed recently. It does not prove the agent window was closed or the task ended.
 - Transcript prose is truncated, so an agent's reasoning may be cut off mid-thought. Don't mistake a truncation for the agent stopping.
 
 Hard constraints:
@@ -50,10 +56,16 @@ export interface AskParams {
   history: ChatTurn[];
   /** The new question the user is asking. */
   question: string;
+  /** Durable side-thread identity; keeps provider-side conversations isolated. */
+  threadId: string;
+  scope: ChatThreadScope;
+  /** Model selection belongs to the thread, not the whole application. */
+  provider: string;
+  model: string;
 }
 
 /**
- * Answers questions about every watched session.
+ * Answers questions about the selected side-thread scope.
  *
  * The prompt is rebuilt on every ask, so the observer always reasons over
  * current state rather than a snapshot taken when the chat opened.
@@ -69,22 +81,44 @@ export class SideChatEngine {
     this.config = { ...this.config, provider, model };
   }
 
-  async ask({ world, history, question }: AskParams): Promise<string> {
-    const provider = getProvider(this.config.provider);
+  async ask({
+    world,
+    history,
+    question,
+    threadId,
+    scope,
+    provider: providerId,
+    model,
+  }: AskParams): Promise<string> {
+    const provider = getProvider(providerId || this.config.provider);
     if (!provider) {
-      throw new Error(`Unknown provider: ${this.config.provider}`);
+      throw new Error(`Unknown provider: ${providerId || this.config.provider}`);
     }
 
+    const scopeInstruction =
+      scope.kind === 'fleet'
+        ? 'Current side-thread scope: FLEET. Answer across the listed recent and query-relevant historical sessions, and respect the stated total discovered count.'
+        : `Current side-thread scope: SESSION ${scope.sessionId}. Stay focused on this selected session.`;
+    const context = redactSensitiveText(
+      `${scopeInstruction}\n\n${renderWorld(
+        world,
+        this.config.transcriptBudget ?? TRANSCRIPT_BUDGET_CHARS,
+      )}`,
+    );
+    const renderedHistory = redactSensitiveText(renderHistory(history));
+    const redactedQuestion = redactSensitiveText(question);
+
     // Handed over in pieces rather than pre-mixed, because the provider decides
-    // what it needs. A stateless HTTP API takes all three every call; the
-    // persistent CLI session fixes its role at spawn and already remembers its
-    // own history, so only the world and the question change per turn.
+    // what it needs. A stateless HTTP API takes all three every call. A warm CLI
+    // session remembers history; after restart it uses the durable copy to
+    // restore continuity once.
     return complete(provider.id, {
-      model: this.config.model,
+      model: model || this.config.model,
       systemPrompt: SYSTEM_PROMPT,
-      context: renderWorld(world, this.config.transcriptBudget ?? TRANSCRIPT_BUDGET_CHARS),
-      history: renderHistory(history),
-      question,
+      context,
+      history: renderedHistory,
+      question: redactedQuestion,
+      conversationId: threadId,
     });
   }
 }

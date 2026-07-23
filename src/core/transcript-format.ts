@@ -22,6 +22,8 @@ export function formatEvent(event: SessionEvent): string {
       return `[tool ERROR] ${event.tool}: ${event.error}`;
     case 'tool_rejected':
       return `[tool rejected by user] ${event.tool}`;
+    case 'needs_input':
+      return `[NEEDS USER] ${event.reason}`;
     case 'bash_running':
       return `[bash running ${event.elapsedSeconds}s] ${event.command}`;
     case 'bash_complete':

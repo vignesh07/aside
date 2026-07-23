@@ -60,6 +60,13 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
         const toolName = (block['name'] as string) || 'unknown';
         const input = block['input'] as Record<string, unknown> | undefined;
         const target = extractToolTarget(toolName, input);
+        if (isInputRequestTool(toolName)) {
+          return {
+            kind: 'needs_input',
+            reason: target || 'The agent is waiting for your response.',
+            ts,
+          };
+        }
         return { kind: 'tool_call', tool: toolName, target, ts };
       }
     }
@@ -118,9 +125,23 @@ function extractToolTarget(tool: string, input?: Record<string, unknown>): strin
       return truncate((input['query'] as string) || '', TRUNCATE.target);
     case 'Task':
       return truncate((input['description'] as string) || '', TRUNCATE.target);
+    case 'AskUserQuestion':
+    case 'ask_user_question':
+    case 'request_user_input': {
+      const questions = input['questions'];
+      if (Array.isArray(questions)) {
+        const first = questions[0] as Record<string, unknown> | undefined;
+        return truncate(String(first?.['question'] || first?.['prompt'] || ''), TRUNCATE.prose);
+      }
+      return truncate(String(input['question'] || input['prompt'] || ''), TRUNCATE.prose);
+    }
     default:
       return '';
   }
+}
+
+function isInputRequestTool(tool: string): boolean {
+  return ['AskUserQuestion', 'ask_user_question', 'request_user_input'].includes(tool);
 }
 
 function truncate(s: string, max: number): string {

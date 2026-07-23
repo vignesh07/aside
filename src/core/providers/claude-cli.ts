@@ -3,14 +3,16 @@ import type { CompletionRequest, Provider } from './types.js';
 
 export { OBSERVER_CWD, OBSERVER_PROJECT_MARKER } from './claude-session.js';
 
-/**
- * One session for the process's lifetime.
- *
- * Module-level because the conversation *is* the state: aside has one chat, so
- * it has one session. A fresh session per question would be the per-spawn design
- * this replaced — slow, and amnesiac.
- */
-const session = new ClaudeSession();
+/** One warm Claude process per durable side-chat thread. */
+const sessions = new Map<string, ClaudeSession>();
+
+function sessionFor(id: string): ClaudeSession {
+  const existing = sessions.get(id);
+  if (existing) return existing;
+  const created = new ClaudeSession();
+  sessions.set(id, created);
+  return created;
+}
 
 /**
  * Ask the user's own Claude Code CLI, over its existing login.
@@ -35,19 +37,38 @@ export const claudeCli: Provider = {
     { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
   ],
 
-  complete({ model, systemPrompt, context, question }: CompletionRequest) {
-    // `history` is deliberately unused: the session already lived through it.
-    // Re-sending it would duplicate the conversation inside its own context.
-    return session.ask(model, systemPrompt, context, question);
+  complete({
+    model,
+    systemPrompt,
+    context,
+    history,
+    question,
+    conversationId,
+  }: CompletionRequest) {
+    // A warm process already lived through the history. ClaudeSession only
+    // injects the durable copy when it has to start a new process.
+    return sessionFor(conversationId ?? 'fleet').ask(
+      model,
+      systemPrompt,
+      context,
+      question,
+      history,
+    );
   },
 };
 
-/** Stop the background session. Safe to call when none is running. */
-export function disposeClaudeSession(): void {
-  session.dispose();
+/** Stop one background side thread, or every one when omitted. */
+export function disposeClaudeSession(conversationId?: string): void {
+  if (conversationId) {
+    sessions.get(conversationId)?.dispose();
+    sessions.delete(conversationId);
+    return;
+  }
+  for (const session of sessions.values()) session.dispose();
+  sessions.clear();
 }
 
-/** True while a conversation is live (i.e. a warm process is waiting). */
+/** True while any side conversation has a warm process waiting. */
 export function isClaudeSessionRunning(): boolean {
-  return session.isRunning;
+  return [...sessions.values()].some((session) => session.isRunning);
 }

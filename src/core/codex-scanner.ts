@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CODEX_DIR, TIMING } from '../config/defaults.js';
 import { extractProjectNameFromCwd } from '../utils/project-name.js';
+import { cleanThreadTitle } from '../utils/thread-title.js';
 import { scanJsonlPrefix } from './jsonl-prefix-reader.js';
 import type { TrackedSession } from '../types/session.js';
 
@@ -10,81 +11,101 @@ interface DiscoveredCodexSession {
   jsonlPath: string;
 }
 
-export function scanCodexSessions(): DiscoveredCodexSession[] {
+interface CodexScannerOptions {
+  sessionsDir?: string;
+  nowMs?: number;
+}
+
+const metadataCache = new Map<
+  string,
+  { mtimeMs: number; size: number; metadata: CodexSessionMeta }
+>();
+
+export function scanCodexSessions(options: CodexScannerOptions = {}): DiscoveredCodexSession[] {
   const results: DiscoveredCodexSession[] = [];
-  const sessionsDir = path.join(CODEX_DIR, 'sessions');
+  const sessionsDir = options.sessionsDir ?? path.join(CODEX_DIR, 'sessions');
+  const nowMs = options.nowMs ?? Date.now();
 
   if (!fs.existsSync(sessionsDir)) return results;
 
-  // Scan today's and yesterday's date directories
-  const now = new Date();
-  const dateDirs = [dateDir(now), dateDir(new Date(now.getTime() - 86400_000))];
-
-  for (const dateDir of dateDirs) {
-    const fullDir = path.join(sessionsDir, dateDir);
-    if (!fs.existsSync(fullDir)) continue;
-
-    let files: string[];
+  for (const jsonlPath of listJsonlFiles(sessionsDir)) {
+    const file = path.basename(jsonlPath);
+    let stat: fs.Stats;
     try {
-      files = fs.readdirSync(fullDir).filter((f) => f.endsWith('.jsonl'));
+      stat = fs.statSync(jsonlPath);
     } catch {
       continue;
     }
 
-    for (const file of files) {
-      const jsonlPath = path.join(fullDir, file);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(jsonlPath);
-      } catch {
-        continue;
-      }
+    const mtime = stat.mtimeMs;
+    const age = Math.max(0, nowMs - mtime);
 
-      const mtime = stat.mtimeMs;
-      const age = Date.now() - mtime;
+    const metadata = cachedMetadata(jsonlPath, stat);
+    // Forked/resumed Codex rollouts can retain the ancestor session_meta.id.
+    // The rollout filename is the identity Codex gives this concrete thread;
+    // using the copied metadata id collapses many distinct histories into one
+    // sidebar row and one side chat.
+    const sessionId =
+      sessionIdFromRolloutFile(file) ||
+      metadata.id ||
+      file.replace('.jsonl', '');
 
-      if (age > TIMING.idleThresholdMs) continue;
+    const status =
+      age < TIMING.activeThresholdMs ? 'active' as const :
+      age < TIMING.idleThresholdMs ? 'idle' as const :
+      'history' as const;
 
-      const metadata = readCodexSessionMeta(jsonlPath);
-      const sessionId = metadata.id || file.replace('.jsonl', '');
-
-      const status =
-        age < TIMING.activeThresholdMs ? 'active' as const :
-        age < TIMING.idleThresholdMs ? 'idle' as const :
-        'ended' as const;
-
-      results.push({
-        jsonlPath,
-        session: {
-          id: sessionId,
+    results.push({
+      jsonlPath,
+      session: {
+        id: sessionId,
           source: 'codex',
           projectName: metadata.projectName || 'unknown',
-          projectDir: metadata.cwd || fullDir,
-          jsonlPath,
-          cwd: metadata.cwd || '',
-          gitBranch: metadata.gitBranch || 'unknown',
-          slug: sessionId.slice(0, 8),
-          model: metadata.model || 'unknown',
-          version: metadata.cliVersion || '',
-          usedPercent: 0,
-          contextStatus: 'safe',
-          status,
-          lastEventTime: new Date(mtime),
-          eventCount: 0,
-          currentActivity: '',
-        },
-      });
-    }
+          title: metadata.title,
+        projectDir: metadata.cwd || path.dirname(jsonlPath),
+        jsonlPath,
+        cwd: metadata.cwd || '',
+        gitBranch: metadata.gitBranch || 'unknown',
+        slug: sessionId.slice(0, 8),
+        model: metadata.model || 'unknown',
+        version: metadata.cliVersion || '',
+        usedPercent: 0,
+        contextStatus: 'safe',
+        status,
+        lastEventTime: new Date(mtime),
+        eventCount: 0,
+        currentActivity: '',
+      },
+    });
   }
 
   return results;
 }
 
-function dateDir(d: Date): string {
-  const y = d.getFullYear().toString();
-  const m = (d.getMonth() + 1).toString().padStart(2, '0');
-  const day = d.getDate().toString().padStart(2, '0');
-  return path.join(y, m, day);
+function sessionIdFromRolloutFile(fileName: string): string {
+  return fileName.match(
+    /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
+  )?.[1] ?? '';
+}
+
+function listJsonlFiles(root: string): string[] {
+  const files: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const dir = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) pending.push(fullPath);
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(fullPath);
+    }
+  }
+  return files;
 }
 
 interface CodexSessionMeta {
@@ -94,6 +115,7 @@ interface CodexSessionMeta {
   projectName?: string;
   model?: string;
   cliVersion?: string;
+  title?: string;
 }
 
 function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
@@ -116,7 +138,15 @@ function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
         meta.model = parsed.payload.model;
       }
 
-      if (meta.id && meta.cwd && meta.model && meta.gitBranch) return true;
+      if (
+        parsed.type === 'event_msg' &&
+        parsed.payload?.type === 'user_message' &&
+        !meta.title
+      ) {
+        meta.title = cleanThreadTitle(parsed.payload.message);
+      }
+
+      if (meta.id && meta.cwd && meta.model && meta.gitBranch && meta.title) return true;
     } catch {
       // Skip malformed lines
     }
@@ -124,4 +154,18 @@ function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
   }, { maxBytes: 512 * 1024, maxLines: 400 });
 
   return meta;
+}
+
+function cachedMetadata(jsonlPath: string, stat: fs.Stats): CodexSessionMeta {
+  const cached = metadataCache.get(jsonlPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.metadata;
+  }
+  const metadata = readCodexSessionMeta(jsonlPath);
+  metadataCache.set(jsonlPath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    metadata,
+  });
+  return metadata;
 }

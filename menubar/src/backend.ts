@@ -8,8 +8,10 @@
 import { scanAllSessions } from '../../dist/core/session-scanner.js';
 import { SideChatService } from '../../dist/core/side-chat-service.js';
 import { SideChatEngine } from '../../dist/core/side-chat-engine.js';
+import { FileThreadStore } from '../../dist/core/thread-store.js';
 import { TIMING } from '../../dist/config/defaults.js';
 import { flattenModelCatalog } from '../../dist/config/model-catalog.js';
+import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
@@ -18,22 +20,32 @@ export interface SessionSummary {
   id: string;
   source: string;
   projectName: string;
+  /** Actual working folder when the transcript records one. */
+  projectPath: string;
+  title: string;
   status: string;
   currentActivity: string;
   /** Milliseconds since this session's last observed event. */
   idleForMs: number;
+  threadId: string;
+  needsUser: boolean;
+  attentionReason: string;
 }
 
 /** Everything the renderer needs to draw the dropdown. */
 export interface MenubarState {
   sessions: SessionSummary[];
-  /** Focused session — deepens its transcript in the prompt; never scopes the chat. */
-  focusId: string | null;
-  /** The single bird's-eye conversation, spanning every session. */
+  /** Fleet or one session-specific durable side conversation. */
+  activeThreadId: string;
   messages: ChatTurn[];
   thinking: boolean;
   provider: string;
   model: string;
+  needsUserCount: number;
+  /** Threads whose transcript changed within the recent-activity window. */
+  recentSessionCount: number;
+  /** Where aside's own durable chats live. Agent/project files remain untouched. */
+  storagePath: string;
   /** Every provider/model the observer can run on, for the picker. */
   models: ModelOption[];
 }
@@ -55,8 +67,8 @@ export class MenubarBackend {
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
   /** Catalogued once: it's a static registry, not live state. */
   private readonly models: ModelOption[];
+  private readonly storagePath: string;
   private sessions: TrackedSession[] = [];
-  private focusId: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -66,20 +78,30 @@ export class MenubarBackend {
   ) {
     this.scan = deps.scan ?? (() => scanAllSessions({}));
     this.models = (deps.models ?? flattenModelCatalog)();
+    const store = new FileThreadStore();
+    this.storagePath = store.location;
     this.service =
       deps.service ??
-      new SideChatService(new SideChatEngine(config), {
-        onChat: () => this.emit(),
-        onThinking: () => this.emit(),
-        onActivity: (id, activity) => {
-          const s = this.sessions.find((x) => x.id === id);
-          if (s) {
-            s.currentActivity = activity;
-            s.status = 'active';
-          }
-          this.emit();
+      new SideChatService(
+        new SideChatEngine(config),
+        {
+          onChat: () => this.emit(),
+          onThinking: () => this.emit(),
+          onTranscript: () => this.emit(),
+          onAttention: () => this.emit(),
+          onThread: () => this.emit(),
+          onActivity: (id, activity) => {
+            const s = this.sessions.find((x) => x.id === id);
+            if (s) {
+              s.currentActivity = activity;
+              s.status = 'active';
+            }
+            this.emit();
+          },
         },
-      });
+        () => new Date(),
+        { ...config, store },
+      );
   }
 
   start(): void {
@@ -93,56 +115,83 @@ export class MenubarBackend {
     this.service.dispose();
   }
 
-  /** Focus a session (or null for none) to deepen its transcript in the prompt. */
-  selectSession(id: string | null): void {
-    this.focusId = id;
-    this.service.setFocus(id);
+  /** Open the fleet conversation or one durable session side thread. */
+  selectThread(threadId: string): void {
+    const valid =
+      threadId === FLEET_THREAD_ID ||
+      this.sessions.some((session) => sessionThreadId(session.id) === threadId);
+    this.service.selectThread(valid ? threadId : FLEET_THREAD_ID);
     this.emit();
   }
 
   setModel(provider: string, model: string): void {
-    this.config = { ...this.config, provider, model };
+    if (!this.models.some((option) => option.provider === provider && option.model === model)) {
+      return;
+    }
     this.service.setModel(provider, model);
     this.emit();
   }
 
-  /** Ask about the whole world. No session selection required. */
+  /** Ask inside the currently selected durable thread. */
   ask(question: string): Promise<void> {
     return this.service.ask(question);
   }
 
   getState(): MenubarState {
     const now = Date.now();
-    return {
-      sessions: this.sessions.map((s) => ({
+    const active = this.service.getActiveThread();
+    const sessions = this.sessions.map((s) => {
+      const attention = this.service.getSessionAttention(s.id);
+      return {
         id: s.id,
         source: s.source,
         projectName: s.projectName,
+        projectPath: s.cwd || s.projectDir,
+        title: s.title ?? '',
         status: s.status,
         currentActivity: s.currentActivity,
         idleForMs: Math.max(0, now - s.lastEventTime.getTime()),
-      })),
-      focusId: this.focusId,
-      messages: this.service.getChat(),
-      thinking: this.service.isThinking(),
-      provider: this.config.provider,
-      model: this.config.model,
+        threadId: sessionThreadId(s.id),
+        needsUser: attention.needsUser,
+        attentionReason: attention.reason,
+      };
+    });
+    return {
+      sessions,
+      activeThreadId: active.id,
+      messages: active.turns,
+      thinking: active.thinking,
+      provider: active.provider,
+      model: active.model,
+      needsUserCount: sessions.filter((session) => session.needsUser).length,
+      recentSessionCount: sessions.filter(
+        (session) => session.status === 'active' || session.status === 'idle',
+      ).length,
+      storagePath: this.storagePath,
       models: this.models,
     };
   }
 
-  /** Rescan sessions, keep the focus valid, and re-sync the tailer. */
+  /** Rescan sessions, keep the selected thread valid, and re-sync the tailer. */
   refresh(): void {
     const { sessions, jsonlPaths } = this.scan();
-    this.sessions = sessions;
-    // Focus defaults to the top-ranked session for transcript depth, but the
-    // chat works regardless — an invalid focus degrades to "no focus", not to a
-    // broken chat.
-    if (!this.focusId || !sessions.some((s) => s.id === this.focusId)) {
-      this.focusId = sessions[0]?.id ?? null;
-      this.service.setFocus(this.focusId);
+    const previous = new Map(this.sessions.map((session) => [session.id, session]));
+    this.sessions = sessions.map((session) => {
+      const prior = previous.get(session.id);
+      return prior?.currentActivity
+        ? { ...session, currentActivity: prior.currentActivity }
+        : session;
+    });
+    this.service.syncSessions(this.sessions, jsonlPaths);
+    const active = this.service.getActiveThread();
+    const activeSessionId =
+      active.scope.kind === 'session' ? active.scope.sessionId : null;
+    if (
+      activeSessionId !== null &&
+      !sessions.some((session) => session.id === activeSessionId)
+    ) {
+      this.service.selectThread(FLEET_THREAD_ID);
     }
-    this.service.syncSessions(sessions, jsonlPaths);
     this.emit();
   }
 

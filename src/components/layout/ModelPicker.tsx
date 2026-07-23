@@ -41,7 +41,7 @@ export function ModelPicker({
   if (options.length === 0) {
     return (
       <RetroBox title="MODEL PICKER" titleColor={COLORS.header1}>
-        <Text color={COLORS.textDim}>No models available from pi-ai.</Text>
+        <Text color={COLORS.textDim}>No observer models are configured.</Text>
       </RetroBox>
     );
   }

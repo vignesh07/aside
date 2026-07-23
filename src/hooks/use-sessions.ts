@@ -6,7 +6,8 @@ import type { TrackedSession, ScopeFilter } from '../types/session.js';
 interface UseSessionsResult {
   sessions: TrackedSession[];
   selectedId: string | null;
-  selectSession: (id: string) => void;
+  /** null selects the fleet thread. */
+  selectSession: (id: string | null) => void;
   selectNext: () => void;
   selectPrev: () => void;
   setSessionActivity: (sessionId: string, activity: string) => void;
@@ -34,15 +35,11 @@ export function useSessions(scopeFilter: ScopeFilter): UseSessionsResult {
     });
     jsonlPathsRef.current = result.jsonlPaths;
 
-    // Auto-select first session if nothing selected or selection disappeared
-    if (result.sessions.length > 0) {
-      setSelectedId((prev) => {
-        if (prev && result.sessions.some((s) => s.id === prev)) return prev;
-        return result.sessions[0]!.id;
-      });
-    } else {
-      setSelectedId(null);
-    }
+    // Fleet is a real thread, represented by null. If a selected session
+    // disappears, return to fleet rather than silently opening another chat.
+    setSelectedId((prev) =>
+      prev && result.sessions.some((session) => session.id === prev) ? prev : null,
+    );
   }, [scopeFilter]);
 
   useEffect(() => {
@@ -53,21 +50,21 @@ export function useSessions(scopeFilter: ScopeFilter): UseSessionsResult {
 
   const selectNext = useCallback(() => {
     setSelectedId((prev) => {
-      if (sessions.length === 0) return prev;
+      if (sessions.length === 0) return null;
+      if (prev === null) return sessions[0]!.id;
       const idx = sessions.findIndex((s) => s.id === prev);
-      const nextIdx = idx < 0 ? 0 : (idx + 1) % sessions.length;
-      return sessions[nextIdx]!.id;
+      if (idx < 0 || idx === sessions.length - 1) return null;
+      return sessions[idx + 1]!.id;
     });
   }, [sessions]);
 
   const selectPrev = useCallback(() => {
     setSelectedId((prev) => {
-      if (sessions.length === 0) return prev;
+      if (sessions.length === 0) return null;
+      if (prev === null) return sessions.at(-1)!.id;
       const idx = sessions.findIndex((s) => s.id === prev);
-      const prevIdx = idx < 0
-        ? 0
-        : (idx - 1 + sessions.length) % sessions.length;
-      return sessions[prevIdx]!.id;
+      if (idx <= 0) return null;
+      return sessions[idx - 1]!.id;
     });
   }, [sessions]);
 

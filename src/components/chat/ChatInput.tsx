@@ -8,9 +8,10 @@ interface ChatInputProps {
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   focused: boolean;
+  scopeLabel: string;
 }
 
-export function ChatInput({ value, onChange, onSubmit, focused }: ChatInputProps) {
+export function ChatInput({ value, onChange, onSubmit, focused, scopeLabel }: ChatInputProps) {
   return (
     <Box borderStyle="single" borderColor={focused ? COLORS.header2 : COLORS.border} paddingX={1}>
       <Text color={focused ? COLORS.header2 : COLORS.textDim}>{'› '}</Text>
@@ -21,10 +22,10 @@ export function ChatInput({ value, onChange, onSubmit, focused }: ChatInputProps
           value={value}
           onChange={onChange}
           onSubmit={onSubmit}
-          placeholder="ask about your agents…"
+          placeholder={`ask about ${scopeLabel}…`}
         />
       ) : (
-        <Text color={COLORS.textDim}>press i to ask · tab to focus a session · q to quit</Text>
+        <Text color={COLORS.textDim}>press i to ask · tab to switch threads · a for fleet · q to quit</Text>
       )}
     </Box>
   );

@@ -45,7 +45,16 @@ export function classifyPiLine(raw: string): SessionEvent | null {
       const item = block as Record<string, unknown>;
       if (item['type'] === 'toolCall') {
         const tool = (item['name'] as string) || 'tool';
-        const target = extractToolTarget(item['arguments']);
+        const target = isInputRequestTool(tool)
+          ? extractInputRequest(item['arguments'])
+          : extractToolTarget(item['arguments']);
+        if (isInputRequestTool(tool)) {
+          return {
+            kind: 'needs_input',
+            reason: target || 'The agent is waiting for your response.',
+            ts,
+          };
+        }
         return { kind: 'tool_call', tool, target, ts };
       }
     }
@@ -133,6 +142,24 @@ function extractToolTarget(rawArguments: unknown): string {
   }
 
   return truncate(String(target), TRUNCATE.target);
+}
+
+function isInputRequestTool(tool: string): boolean {
+  return ['AskUserQuestion', 'ask_user_question', 'request_user_input'].includes(tool);
+}
+
+function extractInputRequest(rawArguments: unknown): string {
+  if (!rawArguments || typeof rawArguments !== 'object') return '';
+  const args = rawArguments as Record<string, unknown>;
+  const questions = args['questions'];
+  if (Array.isArray(questions)) {
+    const first = questions[0];
+    if (first && typeof first === 'object') {
+      const item = first as Record<string, unknown>;
+      return truncate(String(item['question'] || item['prompt'] || ''), TRUNCATE.prose);
+    }
+  }
+  return truncate(String(args['question'] || args['prompt'] || ''), TRUNCATE.prose);
 }
 
 function truncate(s: string, max: number): string {

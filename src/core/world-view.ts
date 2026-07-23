@@ -1,17 +1,14 @@
 // Turns a WorldSnapshot into the text the observer model reads.
 //
-// The hard problem here is budget. A bird's-eye view means every session is in
-// scope, but "every session x 150 events" neither fits in a prompt nor produces
-// good answers — burying the one relevant session in ten irrelevant ones makes
-// the model worse, not better. So the rendering is two-tier:
+// The hard problem here is budget. Hundreds of historical sessions do not fit
+// in one useful prompt. The service first selects recent and query-relevant
+// sessions; this renderer then applies two tiers inside that bounded set:
 //
-//   roster  — every session, one line, always. Cheap, and it's what answers
-//             "what's running?" and "has anything stalled?".
+//   roster  — every selected session, one line, plus the full discovered count.
 //   detail  — recent transcript, only for sessions worth spending tokens on,
 //             ranked by focus and liveness under a fixed character budget.
 //
-// Anything dropped from the detail tier is still in the roster, and the omission
-// is stated in the prompt rather than left implicit.
+// Omissions at either tier are explicit instead of reading like nonexistence.
 
 import { formatEvent } from './transcript-format.js';
 import type { SessionEvent } from '../types/events.js';
@@ -29,13 +26,13 @@ export const TRANSCRIPT_BUDGET_CHARS = 24_000;
 export const MIN_DETAIL_CHARS = 400;
 
 /** Ranking weights for the detail tier. Focus outranks liveness; liveness outranks history. */
-const WEIGHTS = { focus: 6, active: 3, idle: 1.5, ended: 0.5 } as const;
+const WEIGHTS = { focus: 6, active: 3, idle: 1.5, history: 0.5 } as const;
 
 function weightFor(session: SessionSnapshot, focusId: string | null): number {
   if (session.id === focusId) return WEIGHTS.focus;
   if (session.status === 'active') return WEIGHTS.active;
   if (session.status === 'idle') return WEIGHTS.idle;
-  return WEIGHTS.ended;
+  return WEIGHTS.history;
 }
 
 export interface BudgetAllocation {
@@ -124,8 +121,8 @@ export function formatDuration(ms: number): string {
  * model cannot derive from a transcript, because silence writes nothing.
  */
 export function renderRoster(world: WorldSnapshot): string {
-  if (world.sessions.length === 0) {
-    return 'No agent sessions are running. Nothing to observe right now.';
+  if (world.totalSessionCount === 0) {
+    return 'No Claude Code, Codex, or Pi threads were discovered on this machine.';
   }
   const lines = world.sessions.map((s) => {
     const focus = s.id === world.focusId ? ' <- user is focused here' : '';
@@ -133,9 +130,20 @@ export function renderRoster(world: WorldSnapshot): string {
     const quiet = `quiet for ${formatDuration(s.idleForMs)}`;
     const activity = s.currentActivity ? ` | last seen: ${s.currentActivity}` : '';
     const ctx = s.contextUsedPercent > 0 ? ` | context ${s.contextUsedPercent}% (${s.contextStatus})` : '';
-    return `- [${s.id}] ${s.source} · ${s.projectName}${branch} | ${s.status.toUpperCase()}, ${quiet}${ctx}${activity}${focus}`;
+    const title = s.title && s.title.toLowerCase() !== s.projectName.toLowerCase()
+      ? ` — ${s.title}`
+      : '';
+    return `- [${s.id}] ${s.source} · ${s.projectName}${branch}${title} | ${s.status.toUpperCase()}, ${quiet}${ctx}${activity}${focus}`;
   });
-  return `=== Agent sessions aside can see (${world.sessions.length}) ===\n${lines.join('\n')}`;
+  const count =
+    world.sessions.length === world.totalSessionCount
+      ? `${world.totalSessionCount}`
+      : `${world.sessions.length} relevant of ${world.totalSessionCount} discovered`;
+  const omitted =
+    world.sessions.length < world.totalSessionCount
+      ? '\n(Other historical threads remain searchable and selectable in Aside; they were omitted from this prompt for context size.)'
+      : '';
+  return `=== Agent threads in this context (${count}) ===\n${lines.join('\n')}${omitted}`;
 }
 
 /** Budgeted per-session transcript blocks, deepest for focus and live sessions. */

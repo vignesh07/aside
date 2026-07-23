@@ -1,313 +1,276 @@
-# aside
+# Aside
 
-A **read-only bird's-eye chat** for your AI coding agents — **across vendors**.
+**Persistent side chats for every AI coding-agent session on your machine.**
 
-`aside` watches every Claude Code, Codex, and Pi session on your machine at once
-and answers questions about all of them in a single chat, without interrupting
-or branching any of them.
+Aside discovers Claude Code, Codex, and Pi sessions without hooks. It gives you
+one fleet-wide conversation plus a separate, durable conversation for each
+session—answered by a model you choose, without adding noise to the agent's own
+context.
 
-> "why did it edit that file?" · "what's running right now?" · "has anything
-> been stuck for a while?" — ask `aside`, not the agent.
+Ask the fleet:
 
-```
-you › what is each of my agents doing, and is anything stuck?
+> What needs me? Is anything stuck? What changed while I was away?
 
-aside › fold (codex): Running isolation checks on the Electron app. Lint,
-        typecheck and build passed; pnpm test:e2e just exited 1. Not stuck —
-        actively diagnosing.
+Or open one session:
 
-        aside (claude): Building both frontends. Quiet for 7s, but a build is
-        still in progress. Not stuck — mid-build.
+> Why did it choose this implementation? Catch me up. What does it need next?
 
-        Nothing looks stuck. Both are active and on track.
-```
+The selected session is the chat scope, not merely a dashboard filter. Its side
+thread, history, and observer model remain independent from every other thread.
 
-## Why
+## The product
 
-Two reasons.
+- **Fleet thread.** Ask across recent agents and query-relevant history.
+- **Machine-wide thread search.** Browse and filter every discovered Claude
+  Code, Codex, and Pi transcript, including older threads with no recent writes.
+- **Project hierarchy.** Threads are grouped by their working folder. Anything
+  quiet for seven days or more sits under a collapsed **Older Threads** section
+  but remains searchable.
+- **Session side threads.** Select an agent and keep a persistent conversation
+  about exactly that session.
+- **Needs-you inbox.** Explicit input-request tools and likely direct questions
+  surface in the thread list. The Mac app can notify when a session starts
+  waiting for you.
+- **Cross-vendor.** Claude Code, Codex CLI/Desktop, and Pi appear in one place.
+- **Bring your observer.** Use an existing Claude or Codex login, an API-backed
+  Anthropic/OpenAI model, or local Ollama. Model choice persists per thread.
+- **Read-only.** Aside has no agent tools. It never sends messages into an agent,
+  edits a project, or runs a command on the agent's behalf.
 
-**Asking costs you.** When you interrupt an agent to ask a clarifying question,
-the question and its answer land in the main context — burning tokens and
-sometimes steering the agent off course. `aside` decouples them: it observes
-read-only and answers in a chat your agents never see.
+The distinction is deliberate: agent dashboards show state; Aside gives you a
+second conversational context about the work, without steering the worker.
 
-**Nobody watches across vendors.** Claude Code's own agent view covers Claude
-Code. Your Codex sessions are invisible to it, and always will be. `aside` reads
-all of them through one mechanism, so "which of my agents is actually making
-progress?" is a question you can ask once and have answered about everything.
+## What it can see
 
-It's one chat over every session, not one chat per session.
+Aside reads the session logs these tools already keep on disk:
 
-## What it can and can't see
+- Claude Code: `~/.claude/projects/**/*.jsonl` and the desktop session store
+- Codex CLI/Desktop: `~/.codex/sessions/**/rollout-*.jsonl`
+- Pi: `~/.pi/agent/sessions/**/*.jsonl`
 
-**Can:** every agent session it can discover on disk — what each is doing, why
-it went that way, how long it's been quiet, how much context it's burned.
+It can explain observed prompts, model prose, tool calls, tool results, recent
+activity, idle time, and context pressure.
 
-**Can't:** anything else on your machine. Not your builds, containers, other
-terminals, or browser tabs. It reads agent transcripts; that's the whole
-mechanism. Ask it about a running `docker compose` and it will tell you that's
-outside its view rather than guess.
+It cannot see unrelated terminals, builds, containers, browser tabs, or anything
+else on the machine. If the transcripts do not answer a question, the observer is
+instructed to say so rather than guess.
 
-## How it compares
+## Privacy boundary
 
-There are good tools adjacent to this. They mostly *display state*; `aside`
-*reasons about it*, and it does so across vendors.
+Aside is read-only, but an observer model still needs context to answer.
 
-| | scope | what it gives you |
-|---|---|---|
-| Claude Code agent view (`claude agents`) | Claude Code only | A live list of your sessions and which need input. Native, and better at this than any third party. |
-| Observability dashboards (e.g. agents-observe, ai-observer) | varies; some cross-tool | Hook/OTel event streams, token and cost metrics, replay. |
-| **aside** | **Claude Code + Codex + Pi, together** | **A chat. Ask "why did it pick that path?", "is that quiet a stall or is it waiting on me?", "which of these is actually progressing?"** |
+- Only the active scope is sent: recent sessions plus a bounded,
+  query-relevant history slice for the fleet thread, or exactly one session for
+  a session side thread. The full local catalog is never stuffed into a prompt.
+- Common credential forms—private keys, provider/GitHub/Slack tokens, AWS access
+  keys, JWTs, authorization headers, and generic secret assignments—are redacted
+  immediately before a provider call.
+- Redaction is a safety net, not a proof that arbitrary sensitive prose can
+  always be recognized. Do not use a cloud observer on transcripts you are not
+  comfortable sending to that provider.
+- Choose `ollama` when transcript context must stay on the machine.
+- Aside's own side-chat history is stored at `~/.aside/threads.json`. The
+  directory is mode `0700` and the file is mode `0600`. The TUI and Mac app
+  merge writes so they can run together without erasing each other's threads.
+- Aside never reads or reuses OAuth tokens from Claude Code, Codex, Keychain, or
+  their auth files.
 
-If you only run Claude Code, use agent view — it's native and it's good. `aside`
-earns its place when you run **more than one vendor** and want one thing that
-understands all of them, or when you want the *why* rather than the *what*.
+The Mac app shows this boundary on first run and keeps it available under
+**Privacy & diagnostics**.
 
 ## How it works
 
-```
-provider adapters → discover + tail every session's JSONL → normalize to events
-                                                        ↓
-                              roster (all sessions) + budgeted transcript detail
-                                                        ↓
-                          read-only context for an observer LLM (any provider)
-                                                        ↓
-                                            TUI  ·  macOS menubar
+```text
+local transcript adapters
+        │
+        ▼
+discover + tail Claude / Codex / Pi sessions
+        │
+        ├── normalized activity + needs-user signals ──► thread sidebar
+        │
+        ▼
+fleet scope or one selected session
+        │
+        ▼
+bounded context + secret redaction + durable thread history
+        │
+        ▼
+observer model ──► TUI or macOS menubar app
 ```
 
-- **Watches** the same on-disk transcripts the agents already write:
-  - Claude Code — `~/.claude/projects/**/*.jsonl` (+ the desktop app's store)
-  - Codex CLI **and** Codex Desktop — `~/.codex/sessions/**/rollout-*.jsonl`
-  - Pi — `~/.pi/agent/sessions/**/*.jsonl`
-- **Read-only.** It opens transcripts for reading only and has no tools — it
-  can never write to your sessions, files, or shell.
-- **Two-tier context.** Every session gets a roster line (status, idle time,
-  context usage) — cheap, and it's what answers "what's running?". Transcript
-  detail is then allocated under a fixed character budget, ranked by focus and
-  liveness, so ten sessions don't blow up (or dilute) the prompt. Anything
-  dropped is stated in the prompt, never silently implied to be idle.
-- **Idle is computed, not observed.** A session that does nothing writes nothing,
-  so elapsed time can't come from a transcript. `aside` derives it from a real
-  clock and hands it to the model explicitly.
-- **Any provider** for the chat itself (via [`@mariozechner/pi-ai`]). Defaults
-  to Claude.
-
-The session scanning, tailing, classification, session picker, and model picker
-are reused from [`talkatui`](https://github.com/) — `aside` swaps the
-auto-commentary engine for an interactive, read-only Q&A engine.
+Prompts have fixed roster and transcript bounds. Recent sessions stay in fleet
+context; historical metadata and transcript tails are ranked against the
+question. A session thread contains only its selected session. Idle time comes
+from the clock rather than guessed transcript timestamps. “History” only means
+the transcript is quiet—it does not claim the agent window was closed.
 
 ## Install
+
+### macOS app
+
+Download the current signed, notarized, and stapled preview:
+
+| Mac | Download |
+|---|---|
+| Apple silicon (M1 or newer) | [Aside for Apple silicon](https://aside-production-fd82.up.railway.app/download/mac-arm64) |
+| Intel | [Aside for Intel](https://aside-production-fd82.up.railway.app/download/mac-intel) |
+
+Open the DMG, drag **Aside** to **Applications**, and launch it. Aside is a
+menubar app, so it appears in the macOS menu bar rather than the Dock.
+
+The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
+contains the current version, filenames, byte sizes, and SHA-256 checksums.
+
+### TUI from source
+
+The npm package is not published yet. To run the TUI from source:
+
+```bash
+git clone https://github.com/vignesh07/aside.git
+cd aside
+npm install
+npm run check
+npm start
+```
+
+Node.js 20 or newer is required.
+
+When the npm release is live, installation will be:
 
 ```bash
 npm install -g @vignesh07/aside
 aside
 ```
 
-No API key needed — it uses the Claude Code login you already have. See
-[Auth](#auth-no-api-key).
-
-Or from source:
+## TUI usage
 
 ```bash
-git clone https://github.com/vignesh07/aside.git
-cd aside && npm install && npm run build
-npm start
+aside
+aside --source codex
+aside --project myrepo
+
+# Observer options
+aside --provider codex-cli
+aside --provider ollama --model llama3.2
+aside --provider openai --model gpt-4o-mini
 ```
 
-### Auth: no API key
+The default observer delegates to your installed `claude` CLI with all tools
+disabled. Claude Code retains responsibility for authentication and token
+refresh. `codex-cli` similarly delegates to your installed Codex client.
 
-`aside` uses the Claude Code login you already have. It doesn't ask for a key,
-and it never reads your tokens.
+API-backed providers use their normal environment variables:
 
-The trick is delegation, not credential-borrowing: to answer a question, aside
-runs your own `claude` CLI (`claude -p`, with **all tools disabled**) and reads
-what it prints. Claude Code owns authentication and token refresh — exactly as
-if you'd typed the command. This is the same shape as
-[CodexBar](https://gordonbeeming.com/projects/codex-bar), which delegates to
-`codex app-server` rather than touching `~/.codex/`.
+| provider | credential |
+|---|---|
+| `claude-cli` | existing Claude Code login |
+| `codex-cli` | existing Codex login |
+| `ollama` | none; local inference |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
 
-It works because of aside's own premise: if you're watching Claude Code
-sessions, you already have Claude Code installed and signed in.
+### TUI keys
 
-Other options, if you want them:
+| key | action |
+|---|---|
+| `i` or `/` | focus the side-chat input |
+| `enter` | send |
+| `esc` | leave the input/model picker |
+| `tab`, `j`, `k` | move between fleet and session threads |
+| `a` | return to the fleet thread |
+| `m` | choose the observer model for this thread |
+| `q` | quit |
 
-| provider | credential | notes |
-|---|---|---|
-| `claude-cli` *(default)* | **none** — your existing login | delegates to your `claude` CLI |
-| `ollama` | **none** — runs locally | transcripts never leave the machine |
-| `anthropic` | `ANTHROPIC_API_KEY` | separate, API-billed |
-| `openai` | `OPENAI_API_KEY` | separate, API-billed |
-
-**What aside will never do:** lift OAuth tokens out of `~/.claude`, your
-Keychain, or `~/.codex/auth.json`. Those tokens are issued to *those* clients;
-using them from aside would mean presenting aside to the vendor as Claude Code
-or Codex. That's client impersonation, and the account at risk would be yours.
-
-Reading your agents' transcripts needs no credential at all — that's just files
-on disk. Credentials only ever matter for the observer's own answers.
-
-## Usage
+### Dock beside an agent
 
 ```bash
-aside                       # watch everything (uses your Claude Code login)
-aside --source codex        # watch only Codex sessions
-aside --project myrepo      # scope to one project
-
-# the observer can run anywhere:
-aside --provider ollama --model llama3.2      # local, private, no key
-aside --provider openai --model gpt-4o-mini   # if you'd rather use a key
+aside dock
+aside dock --side bottom
+aside install --write
 ```
 
-### Docked side chat (the "chat bar in the same window" feel)
+`aside dock` opens a tmux or iTerm2 split. `aside install --write` adds a tmux
+binding at `<prefix> C-a`.
 
-`aside` can't draw inside another app's terminal UI, so the docked feel is a
-terminal split:
+## macOS menubar app
 
-```bash
-aside dock                 # open aside in a split pane (tmux or iTerm2)
-aside dock --side bottom   # dock below instead of to the right
-aside install --write      # bind <prefix> C-a in tmux to summon it hands-free
-```
-
-In tmux this is the real win: bind a key once with `aside install`, then summon
-the side chat without ever leaving the agent in the other pane.
-
-### macOS menubar (for the Codex / Claude desktop apps)
-
-For the GUI agents, a TUI split doesn't fit — so there's an Electron menubar app
-that reuses the **same** TS core (scanners, tailer, `SideChatService`).
+The Mac app is a two-pane thread control room: sessions and attention states on
+the left, the selected persistent conversation on the right.
 
 Run it from source:
 
 ```bash
-npm run build                       # build the shared core first
-cd menubar && npm install && npm start
+npm run build
+cd menubar
+npm install
+npm start
 ```
 
-Build a real `aside.app`:
+Building the Mac app requires Node.js 22.12 or newer.
+
+Useful development commands:
 
 ```bash
 cd menubar
-npm run icons     # regenerate tray/app icons from the SVG sources (rarely needed)
-npm run pack      # unpacked .app -> release/mac-arm64/aside.app
-npm run release   # dist + sign/notarize/staple the DMGs -> release/
+npm run bundle
+npx electron build/main.js --show
+npx electron build/main.js --capture /tmp/aside.png
 ```
 
-`npm run release` is the one to use for anything you hand to another person. Plain
-`npm run dist` signs and notarizes the **app** but leaves the **DMG** unsigned —
-and the DMG is what someone downloads. An unsigned container gives Gatekeeper no
-signature to anchor the notarization ticket to, so the download is refused before
-the (perfectly notarized) app inside is ever reached. Verifying the `.app` hides
-this entirely; only `spctl` on the DMG catches it.
+Build packages:
 
-It's a menubar-only app (`LSUIElement`) — no dock icon, no Cmd-Tab entry. Click
-the bubble in the menubar to drop the chat down.
+```bash
+cd menubar
+npm run pack       # unpacked arm64 .app
+npm run pack:x64   # unpacked x64 .app
+npm run release    # signed/notarized/stapled arm64 + x64 DMGs and ZIPs
+npm run verify:signing
+```
+
+The app is menubar-only (`LSUIElement`), with no Dock or Cmd-Tab entry. Click the
+tray icon to open it; right-click for Privacy & diagnostics or Quit.
 
 ### Signing and notarization
 
-Builds are signed with a Developer ID Application certificate and notarized, so
-the app opens on other machines without a Gatekeeper warning.
-
-**Credentials never live in this repo.** They're stored once in the macOS
-keychain and referenced by profile name:
+Release builds use a Developer ID Application certificate and the `aside-notary`
+Keychain profile. Credentials never live in the repository.
 
 ```bash
-# One time. Use an app-specific password from appleid.apple.com
-# (Sign-In and Security -> App-Specific Passwords) — NOT your Apple ID password.
 xcrun notarytool store-credentials "aside-notary" \
-  --apple-id "<your-apple-id>" \
+  --apple-id "<apple-id>" \
   --team-id 8ZS766K9K4 \
   --password "<app-specific-password>"
 ```
 
-Then `npm run dist` signs, notarizes and staples. Without that profile the build
-still succeeds — it just warns loudly and produces a signed-but-not-notarized
-app, which will be blocked on any machine but yours.
+`npm run release` signs and notarizes the app, then signs and staples the DMGs.
+`npm run verify:signing` checks the deep signature, hardened runtime,
+entitlements, stapled tickets, and Gatekeeper verdict.
 
-Check what you actually built:
-
-```bash
-npm run verify:signing
-```
-
-It asserts the things Gatekeeper checks — deep signature validity, Developer ID
-authority, hardened runtime, the JIT entitlements, a stapled ticket, and the
-final `spctl` verdict. "It launched on my Mac" proves none of these: an
-un-notarized app runs fine on the machine that signed it.
-
-> **Why Electron apps break when you sign them.** Notarization requires the
-> hardened runtime; the hardened runtime blocks JIT; V8 *is* a JIT. So a signed
-> Electron app without `com.apple.security.cs.allow-jit` and
-> `com.apple.security.cs.allow-unsigned-executable-memory` signs perfectly and
-> then dies instantly on launch. That's what `entitlements.mac.plist` is for, and
-> why `verify:signing` checks for those two by name.
-
-A dropdown hangs off the menubar with a session picker and the side chat. The
-Electron main process drives `MenubarBackend` (a thin, Electron-free wrapper over
-the core), so there's no duplicated logic between the TUI and the menubar.
-
-To inspect it without clicking a tray icon (it hides on blur, so it can't be
-screenshotted normally):
+## Verification
 
 ```bash
-npx electron dist/main.js --show                        # pin it open
-npx electron dist/main.js --capture /tmp/shot.png \
-  --ask "is anything stuck?"                            # render, ask, screenshot, quit
+npm run check                    # typecheck + clean-build test suite
+npm audit --omit=dev             # production dependency audit
+npm pack --dry-run               # inspect the npm artifact
+node scripts/smoke.mjs           # real scanner/prompt/provider smoke path
+node scripts/preview.mjs         # headless render of the actual TUI
 ```
 
-### Keys
+GitHub Actions runs the clean test suite, production audits, npm pack dry run,
+and both menubar TypeScript/bundle builds from a fresh checkout.
 
-| key | action |
-|---|---|
-| `i` or `/` | focus the chat input |
-| `esc` | unfocus |
-| `enter` | send |
-| `m` | model picker |
-| `tab` / `j` / `k` | focus a session (deepens its detail; never scopes the chat) |
-| `q` | quit |
+## Current status
 
-Selecting a session is never required — the chat always spans every session.
-Focus just buys the highlighted one a bigger share of the transcript budget.
+The product path is implemented: discover and tail sessions, flag likely
+attention requests, switch between fleet and per-session durable chats, keep a
+different observer model per thread, and use the same core in TUI and Mac app.
 
-## Status
+The preview DMGs are distributed from a private Railway Bucket through stable
+public download routes. Authentication onboarding is still pre-launch work:
+today the CLI-backed observers use the existing login owned by the installed
+Claude or Codex client, while direct API providers use their standard
+environment variable only when selected.
 
-Working vertical slice: discover every session → live tail → ask one question
-across all of them → answer, over Claude/Codex/Pi. Verify headlessly with:
+## License
 
-```bash
-node scripts/smoke.mjs
-```
-
-which prints the roster the model sees, the budgeted prompt size, and a real
-cross-session answer.
-
-To see the TUI itself without an interactive terminal — in a pipe, a CI log, or
-an agent session with no TTY — render real frames with:
-
-```bash
-node scripts/preview.mjs                       # launch frame
-node scripts/preview.mjs m                     # model picker open
-node scripts/preview.mjs i "is it stuck?" ENTER --wait 25   # a real Q&A
-```
-
-This mounts the actual `<App/>` against your real sessions, so it catches
-layout bugs that only appear at a given terminal size.
-
-### Roadmap
-
-- [x] launcher that opens the TUI as a docked tmux/iTerm split, with a tmux
-      keybinding to summon it hands-free (`aside dock` / `aside install`)
-- [x] shared, framework-agnostic `SideChatService` so every frontend reuses one
-      implementation
-- [x] bird's-eye view: one chat across every session, with a roster, derived idle
-      time, and a budgeted two-tier prompt
-- [x] macOS menubar frontend (`menubar/`), packaged as a real menubar-only
-      `aside.app` with a tray icon — DMG/zip for arm64 + x64
-- [x] Developer ID signing + hardened runtime + notarization, with a
-      `verify:signing` check that asserts what Gatekeeper actually enforces
-- [x] model picker in both frontends — the observer runs on any pi-ai provider
-- [ ] richer transcript view (live feed of what the agents are doing) alongside chat
-- [ ] proactive nudges ("session X has been stuck 20m") rather than only
-      answering when asked
-
-[`@mariozechner/pi-ai`]: https://www.npmjs.com/package/@mariozechner/pi-ai
+MIT

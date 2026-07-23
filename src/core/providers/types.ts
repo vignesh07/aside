@@ -39,6 +39,8 @@ export interface CompletionRequest {
   /** Prior turns, pre-rendered. Session providers ignore it: they have their own. */
   history: string;
   question: string;
+  /** Durable side-chat thread identity for providers that keep live sessions. */
+  conversationId?: string;
   /** Omitted for providers that need no credential (e.g. a local runtime). */
   apiKey?: string;
   signal?: AbortSignal;

@@ -50,42 +50,46 @@ function makeBackend(sessions: TrackedSession[]) {
 }
 
 describe('MenubarBackend', () => {
-  it('focuses the first session on refresh', () => {
+  it('opens on the fleet thread and exposes session thread ids', () => {
     const { backend } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    expect(backend.getState().focusId).toBe('a');
+    expect(backend.getState().activeThreadId).toBe('fleet');
     expect(backend.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
+    expect(backend.getState().sessions.map((s) => s.threadId)).toEqual([
+      'session:a',
+      'session:b',
+    ]);
   });
 
-  it('keeps an existing valid focus across refreshes', () => {
+  it('keeps an existing valid session thread across refreshes', () => {
     const { backend } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectSession('b');
+    backend.selectThread('session:b');
     backend.refresh();
-    expect(backend.getState().focusId).toBe('b');
+    expect(backend.getState().activeThreadId).toBe('session:b');
   });
 
-  it('re-focuses when the focused session disappears', () => {
+  it('returns to fleet when the selected session disappears', () => {
     const sessions = [fakeSession('a'), fakeSession('b')];
     const { backend } = makeBackend(sessions);
     backend.refresh();
-    backend.selectSession('b');
+    backend.selectThread('session:b');
     sessions.pop(); // 'b' vanishes
     backend.refresh();
-    expect(backend.getState().focusId).toBe('a');
+    expect(backend.getState().activeThreadId).toBe('fleet');
   });
 
-  it('propagates focus to the service so the prompt deepens that transcript', () => {
+  it('propagates thread selection to the scoped service conversation', () => {
     const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectSession('b');
+    backend.selectThread('session:b');
     expect(service.getFocus()).toBe('b');
   });
 
   it('answers with no sessions at all — "nothing is running" is a valid answer', async () => {
     const { backend } = makeBackend([]);
     backend.refresh();
-    expect(backend.getState().focusId).toBeNull();
+    expect(backend.getState().activeThreadId).toBe('fleet');
     await backend.ask('what is running?');
     expect(backend.getState().messages.map((m) => m.role)).toEqual(['user', 'assistant']);
   });
@@ -114,6 +118,14 @@ describe('MenubarBackend', () => {
     expect(setModelCalls).toEqual([['openai', 'gpt-4o-mini']]);
     expect(backend.getState().provider).toBe('openai');
     expect(backend.getState().model).toBe('gpt-4o-mini');
+  });
+
+  it('rejects a model outside the catalog', () => {
+    const { backend, setModelCalls } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    backend.setModel('unknown', '--malicious');
+    expect(setModelCalls).toEqual([]);
+    expect(backend.getState().provider).toBe('claude-cli');
   });
 
   it('reports idle time per session for the roster', () => {

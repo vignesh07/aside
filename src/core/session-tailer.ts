@@ -25,25 +25,8 @@ export class SessionTailer extends EventEmitter {
     let offset: number;
     try {
       const stat = fs.statSync(jsonlPath);
-      // Seed: read last chunk of file
-      const seedBytes = Math.min(stat.size, 32768); // ~32KB
-      offset = stat.size - seedBytes;
-      if (seedBytes > 0) {
-        const fd = fs.openSync(jsonlPath, 'r');
-        const buf = Buffer.alloc(seedBytes);
-        fs.readSync(fd, buf, 0, seedBytes, offset);
-        fs.closeSync(fd);
-
-        const text = buf.toString('utf-8');
-        // Find the first complete line (skip partial first line)
-        const firstNewline = offset > 0 ? text.indexOf('\n') + 1 : 0;
-        const lines = text.slice(firstNewline).split('\n').filter(Boolean);
-
-        // Emit the last N seed lines
-        const seedLines = lines.slice(-TIMING.seedLines);
-        for (const line of seedLines) {
-          this.emit('line', { sessionId, line, isSeed: true } satisfies TailEvent);
-        }
+      for (const line of readJsonlTailLines(jsonlPath, TIMING.seedLines)) {
+        this.emit('line', { sessionId, line, isSeed: true } satisfies TailEvent);
       }
       // Set offset to end of file for tailing
       offset = stat.size;
@@ -121,6 +104,46 @@ export class SessionTailer extends EventEmitter {
       }
     } catch {
       // File read error - skip this round
+    }
+  }
+}
+
+/**
+ * Read complete JSONL records from the end of a transcript without loading the
+ * entire file. Exported so selecting a historical thread can hydrate context
+ * without permanently watching hundreds of old files.
+ */
+export function readJsonlTailLines(
+  jsonlPath: string,
+  maxLines: number,
+  maxBytes = 512 * 1024,
+): string[] {
+  let fd: number | undefined;
+  try {
+    const stat = fs.statSync(jsonlPath);
+    const bytes = Math.min(stat.size, maxBytes);
+    if (bytes <= 0 || maxLines <= 0) return [];
+    const offset = stat.size - bytes;
+    fd = fs.openSync(jsonlPath, 'r');
+    const buf = Buffer.alloc(bytes);
+    fs.readSync(fd, buf, 0, bytes, offset);
+    const text = buf.toString('utf-8');
+    const firstComplete = offset > 0
+      ? (() => {
+          const newline = text.indexOf('\n');
+          return newline === -1 ? text.length : newline + 1;
+        })()
+      : 0;
+    return text
+      .slice(firstComplete)
+      .split('\n')
+      .filter(Boolean)
+      .slice(-maxLines);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
     }
   }
 }

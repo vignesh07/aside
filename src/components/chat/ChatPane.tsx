@@ -10,6 +10,8 @@ interface ChatPaneProps {
   isThinking: boolean;
   /** Scope line: how many sessions the observer can see, and which is focused. */
   watching: string | null;
+  /** Scope-specific guidance shown before this durable thread has messages. */
+  emptyHint?: string;
   /** Column width available for text, borders and padding already subtracted. */
   width: number;
   /** Rows available for the conversation. Content is clipped to the newest. */
@@ -23,10 +25,6 @@ interface Line {
   bold?: boolean;
 }
 
-const EMPTY_HINT =
-  'Ask about any of your agents — "what\'s running?", "why did it edit that file?", ' +
-  '"is anything stuck?". One chat, all sessions. It only observes; your agents never see this.';
-
 /**
  * The conversation, clipped to the newest `maxRows` rows.
  *
@@ -35,12 +33,19 @@ const EMPTY_HINT =
  * through the borders and the input below. Counting rows requires wrapping the
  * text ourselves (see {@link wrapText}) — Ink wraps too late for us to measure.
  */
-export function ChatPane({ messages, isThinking, watching, width, maxRows }: ChatPaneProps) {
+export function ChatPane({
+  messages,
+  isThinking,
+  watching,
+  emptyHint = 'Ask what\'s running, what needs you, or select a session to open its persistent side chat.',
+  width,
+  maxRows,
+}: ChatPaneProps) {
   const textWidth = Math.max(1, width);
   const lines: Line[] = [];
 
   if (messages.length === 0 && !isThinking) {
-    for (const [i, text] of wrapText(EMPTY_HINT, textWidth).entries()) {
+    for (const [i, text] of wrapText(emptyHint, textWidth).entries()) {
       lines.push({ key: `hint-${i}`, text, color: COLORS.textDim });
     }
   }

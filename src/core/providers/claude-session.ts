@@ -48,6 +48,21 @@ interface PendingAsk {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export function composeClaudeTurnContent(
+  context: string,
+  question: string,
+  persistedHistory: string,
+  starting: boolean,
+): string {
+  const restoredContext =
+    starting && persistedHistory
+      ? [context, persistedHistory].filter(Boolean).join('\n\n')
+      : context;
+  return restoredContext
+    ? `${restoredContext}\n\n---\n\nQuestion: ${question}`
+    : question;
+}
+
 /**
  * One continuous conversation with the user's own Claude Code CLI.
  *
@@ -71,8 +86,14 @@ export class ClaudeSession {
    * `context`, sent with each question, because it changes between turns and a
    * system prompt cannot be revised once the session is live.
    */
-  ask(model: string, systemPrompt: string, context: string, question: string): Promise<string> {
-    const run = () => this.askOne(model, systemPrompt, context, question);
+  ask(
+    model: string,
+    systemPrompt: string,
+    context: string,
+    question: string,
+    persistedHistory = '',
+  ): Promise<string> {
+    const run = () => this.askOne(model, systemPrompt, context, question, persistedHistory);
     // Chain onto the tail so asks never interleave, and so one failure doesn't
     // poison the queue for the next question.
     const result = this.tail.then(run, run);
@@ -85,6 +106,7 @@ export class ClaudeSession {
     systemPrompt: string,
     context: string,
     question: string,
+    persistedHistory: string,
   ): Promise<string> {
     // The system prompt and model are baked in at spawn, so a change to either
     // means a new conversation. Restarting loses history — but the alternative
@@ -94,6 +116,7 @@ export class ClaudeSession {
       (this.startedWith.model !== model || this.startedWith.systemPrompt !== systemPrompt);
     if (changed) this.dispose();
 
+    const starting = this.child === null || this.child.killed;
     const child = this.ensureStarted(model, systemPrompt);
 
     return new Promise<string>((resolve, reject) => {
@@ -107,7 +130,15 @@ export class ClaudeSession {
 
       this.pending = { resolve, reject, timer };
 
-      const content = context ? `${context}\n\n---\n\nQuestion: ${question}` : question;
+      // A warm CLI process remembers prior turns. A new process does not, so
+      // restore the durable local history exactly once after app restart,
+      // provider failure, or a model change.
+      const content = composeClaudeTurnContent(
+        context,
+        question,
+        persistedHistory,
+        starting,
+      );
       try {
         child.stdin.write(
           `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`,

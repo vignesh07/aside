@@ -7,11 +7,7 @@
 // handles badly), esbuild inlines the core into the app bundle. The core is a
 // few small modules with no runtime deps of its own, so this is cheap.
 //
-// Externals:
-//   electron            — provided by the runtime, never bundle it
-//   @mariozechner/pi-ai — a real dependency, shipped in node_modules. It's
-//                         loaded via dynamic import and pulls in provider SDKs;
-//                         bundling it invites resolution bugs for no gain.
+// Electron is provided by the runtime and is never bundled.
 
 import * as esbuild from 'esbuild';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +33,7 @@ await esbuild.build({
   entryPoints: [path.join(root, 'src', 'main.ts')],
   outfile: path.join(root, 'build', 'main.js'),
   platform: 'node',
-  external: ['electron', '@mariozechner/pi-ai'],
+  external: ['electron'],
 });
 
 // Renderer. Runs in the browser context and touches only the window.aside

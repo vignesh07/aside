@@ -49,6 +49,8 @@ function describeEvent(event: SessionEvent): string {
       return `${event.tool || 'Tool'} FAILED`;
     case 'tool_rejected':
       return `${event.tool} rejected`;
+    case 'needs_input':
+      return `Needs you: ${event.reason}`;
     case 'bash_running':
       return `Running: ${event.command}`;
     case 'bash_complete':

@@ -13,10 +13,9 @@ const cli = meow(
     $ aside dock [options]       Open the side chat in a docked split (tmux / iTerm2)
     $ aside install [--write]    Add a tmux key (<prefix> C-a) to summon the dock
 
-  A read-only bird's-eye chat for your AI coding agents. Watches every Claude
-  Code, Codex and Pi session on this machine and answers questions across all
-  of them — "what's running?", "why did it pick that path?", "is anything
-  stuck?" — without interrupting or branching any of them.
+  Persistent read-only side chats for your AI coding agents. Open one fleet
+  thread across every Claude Code, Codex and Pi session, or select a session
+  and keep a separate conversation about only that work.
 
   It only ever reads. It has no tools and cannot touch your sessions.
 
@@ -49,8 +48,9 @@ const cli = meow(
     esc      Unfocus the chat input
     enter    Send your question
     m        Open model picker
-    tab / j  Focus next session (deepens its detail; the chat spans them all)
-    k        Focus previous session
+    tab / j  Open the next agent thread
+    k        Open the previous agent thread
+    a        Return to the fleet thread
     q        Quit
 
   Examples

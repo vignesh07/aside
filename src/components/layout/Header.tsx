@@ -8,7 +8,7 @@ export function Header() {
       <Text color={COLORS.header2} bold>
         aside
       </Text>
-      <Text color={COLORS.textDim}> — read-only bird's-eye chat for your agents</Text>
+      <Text color={COLORS.textDim}> — persistent side threads for your agents</Text>
     </Box>
   );
 }

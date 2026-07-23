@@ -21,6 +21,7 @@ function snap(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
     id: 'a',
     source: 'claude',
     projectName: 'proj',
+    title: '',
     gitBranch: 'main',
     model: 'claude-opus-4-8',
     status: 'active',
@@ -34,7 +35,7 @@ function snap(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
 }
 
 function world(sessions: SessionSnapshot[], focusId: string | null = null): WorldSnapshot {
-  return { now: NOW, sessions, focusId };
+  return { now: NOW, totalSessionCount: sessions.length, sessions, focusId };
 }
 
 /** n events, each rendering to a line of roughly `chars` characters. */
@@ -65,8 +66,8 @@ describe('formatDuration', () => {
 });
 
 describe('renderRoster', () => {
-  it('says plainly when there is nothing running', () => {
-    expect(renderRoster(world([]))).toMatch(/No agent sessions are running/);
+  it('says plainly when no agent threads were discovered', () => {
+    expect(renderRoster(world([]))).toMatch(/No Claude Code, Codex, or Pi threads/);
   });
 
   it('lists every session, including ones with no transcript detail', () => {
@@ -111,15 +112,15 @@ describe('allocateTranscriptBudget', () => {
     expect(perSession.get('a')!).toBeGreaterThan(perSession.get('b')!);
   });
 
-  it('ranks live sessions above idle ones, and idle above ended', () => {
+  it('ranks live sessions above idle ones, and idle above history', () => {
     const sessions = [
       snap({ id: 'active', status: 'active', transcript: bulkTranscript(20) }),
       snap({ id: 'idle', status: 'idle', transcript: bulkTranscript(20) }),
-      snap({ id: 'ended', status: 'ended', transcript: bulkTranscript(20) }),
+      snap({ id: 'history', status: 'history', transcript: bulkTranscript(20) }),
     ];
     const { perSession } = allocateTranscriptBudget(sessions, null, 30_000);
     expect(perSession.get('active')!).toBeGreaterThan(perSession.get('idle')!);
-    expect(perSession.get('idle')!).toBeGreaterThan(perSession.get('ended')!);
+    expect(perSession.get('idle')!).toBeGreaterThan(perSession.get('history')!);
   });
 
   it('never exceeds the total budget', () => {
@@ -244,6 +245,16 @@ describe('renderWorld', () => {
     const out = renderWorld(world([snap({ id: 'a', idleForMs: 60_000 })]));
     expect(out).toContain('[a]');
     expect(out).toMatch(/quiet for 1m/);
+  });
+
+  it('states when the prompt contains only a relevant subset of discovered history', () => {
+    const partial = {
+      ...world([snap({ id: 'a' })]),
+      totalSessionCount: 344,
+    };
+    const out = renderWorld(partial);
+    expect(out).toContain('1 relevant of 344 discovered');
+    expect(out).toMatch(/remain searchable and selectable/);
   });
 
   it('puts the roster before the detail', () => {

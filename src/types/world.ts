@@ -14,6 +14,7 @@ export interface SessionSnapshot {
   id: string;
   source: SessionSource;
   projectName: string;
+  title?: string;
   gitBranch: string;
   model: string;
   status: SessionStatus;
@@ -37,6 +38,11 @@ export interface SessionSnapshot {
 export interface WorldSnapshot {
   /** The instant this snapshot describes; all idle math is relative to it. */
   now: Date;
+  /**
+   * Total threads discoverable in this scope. Fleet prompts may include a
+   * relevant subset in `sessions`; the complete catalog remains in the UI.
+   */
+  totalSessionCount: number;
   sessions: SessionSnapshot[];
   /**
    * Session the user has focused, if any. Focus only buys a deeper transcript

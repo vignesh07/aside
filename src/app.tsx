@@ -32,11 +32,9 @@ export function App({ provider, model, scopeFilter }: AppProps) {
   const columns = Math.max((stdout?.columns ?? 80) - 1, 40);
   const rows = Math.max((stdout?.rows ?? 24) - 1, 12);
 
-  const { sessions, selectedId, selectNext, selectPrev, setSessionActivity, jsonlPaths } =
+  const { sessions, selectedId, selectSession, selectNext, selectPrev, setSessionActivity, jsonlPaths } =
     useSessions(scopeFilter);
 
-  const [currentProvider, setCurrentProvider] = useState(provider);
-  const [currentModel, setCurrentModel] = useState(model);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const modelOptionsRef = useRef(flattenModelCatalog());
   const [modelPickerIndex, setModelPickerIndex] = useState(() =>
@@ -46,23 +44,41 @@ export function App({ provider, model, scopeFilter }: AppProps) {
   const [inputFocused, setInputFocused] = useState(false);
   const [inputValue, setInputValue] = useState('');
 
-  // `selectedId` is a *focus lens*, not a chat scope: it buys the highlighted
-  // session more transcript depth in the prompt. The chat always spans them all.
-  const { messages, isThinking, ask } = useSideChat({
-    sessions,
-    jsonlPaths,
-    focusId: selectedId,
+  const {
+    messages,
+    isThinking,
     provider: currentProvider,
     model: currentModel,
+    attentionBySession,
+    ask,
+    setModel,
+  } = useSideChat({
+    sessions,
+    jsonlPaths,
+    selectedSessionId: selectedId,
+    defaultProvider: provider,
+    defaultModel: model,
     onSessionActivity: setSessionActivity,
   });
 
   const focusedSession = sessions.find((s) => s.id === selectedId) ?? null;
+  const needsUserCount = sessions.filter(
+    (session) => attentionBySession.get(session.id)?.needsUser,
+  ).length;
+  const recentSessionCount = sessions.filter(
+    (session) => session.status === 'active' || session.status === 'idle',
+  ).length;
   const scopeLine =
-    sessions.length === 0
-      ? 'no agent sessions found'
-      : `${sessions.length} session${sessions.length === 1 ? '' : 's'}` +
-        (focusedSession ? ` · focused: ${focusedSession.projectName}` : '');
+    focusedSession
+      ? `${focusedSession.source}/${focusedSession.projectName} · persistent session thread`
+      : sessions.length === 0
+        ? 'fleet thread · no agent sessions found'
+        : `fleet thread · ${recentSessionCount} recent · ${sessions.length} total` +
+          (needsUserCount > 0 ? ` · ${needsUserCount} need${needsUserCount === 1 ? 's' : ''} you` : '');
+  const chatTitle = focusedSession ? `${focusedSession.projectName} · side chat` : 'fleet chat';
+  const emptyHint = focusedSession
+    ? `Ask about this ${focusedSession.source} session — what it changed, why it made a decision, or what it needs next. This thread stays with the session.`
+    : 'Ask across recent agents or search historical work. Select a session to open its persistent side chat.';
 
   const handleSubmit = (value: string) => {
     const trimmed = value.trim();
@@ -90,8 +106,7 @@ export function App({ provider, model, scopeFilter }: AppProps) {
       if (key.return) {
         const picked = modelOptionsRef.current[modelPickerIndex];
         if (picked) {
-          setCurrentProvider(picked.provider);
-          setCurrentModel(picked.model);
+          setModel(picked.provider, picked.model);
         }
         setModelPickerOpen(false);
       }
@@ -115,6 +130,10 @@ export function App({ provider, model, scopeFilter }: AppProps) {
     }
     if (input === 'i' || input === '/') {
       setInputFocused(true);
+      return;
+    }
+    if (input === 'a') {
+      selectSession(null);
       return;
     }
     if (key.tab || key.downArrow || input === 'j') {
@@ -141,7 +160,13 @@ export function App({ provider, model, scopeFilter }: AppProps) {
   const pickerRows = modelPickerOpen ? pickerOptionRows + MODEL_PICKER_CHROME_ROWS : 0;
 
   const contentRows = Math.max(available - pickerRows, 4);
-  const maxCards = Math.max(1, Math.floor((contentRows - SESSION_LIST_CHROME_ROWS) / SESSION_CARD_ROWS));
+  const FLEET_THREAD_ROWS = 3;
+  const maxCards = Math.max(
+    1,
+    Math.floor(
+      (contentRows - SESSION_LIST_CHROME_ROWS - FLEET_THREAD_ROWS) / SESSION_CARD_ROWS,
+    ),
+  );
 
   // Chat pane: RetroBox border (2) + title (1) + the "watching" line and its
   // margin (2). What's left is what the conversation may paint into.
@@ -168,14 +193,20 @@ export function App({ provider, model, scopeFilter }: AppProps) {
 
       <Box flexDirection="row" height={contentRows}>
         <Box width="35%" minWidth={0}>
-          <SessionList sessions={sessions} selectedId={selectedId} maxCards={maxCards} />
+          <SessionList
+            sessions={sessions}
+            selectedId={selectedId}
+            attentionBySession={attentionBySession}
+            maxCards={maxCards}
+          />
         </Box>
         <Box width="65%" minWidth={0}>
-          <RetroBox title="side chat" height={contentRows}>
+          <RetroBox title={chatTitle} height={contentRows}>
             <ChatPane
               messages={messages}
               isThinking={isThinking}
               watching={scopeLine}
+              emptyHint={emptyHint}
               width={chatWidth}
               maxRows={chatRows}
             />
@@ -188,6 +219,7 @@ export function App({ provider, model, scopeFilter }: AppProps) {
         onChange={setInputValue}
         onSubmit={handleSubmit}
         focused={inputFocused}
+        scopeLabel={focusedSession?.projectName ?? 'all agents'}
       />
 
       <Footer provider={currentProvider} model={currentModel} sessionCount={sessions.length} />
