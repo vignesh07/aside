@@ -45,7 +45,11 @@ test("server-renders the finished Aside landing page", async () => {
     html,
     /https:\/\/aside-production-fd82\.up\.railway\.app\/download\/mac-intel/,
   );
-  assert.match(html, /https:\/\/aside\.example\/og\.png/);
+  assert.match(html, /https:\/\/aside\.vgnsh\.xyz\/og\.png/);
+  assert.match(
+    html,
+    /<link rel="canonical" href="https:\/\/aside\.vgnsh\.xyz\/"\/>/,
+  );
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 

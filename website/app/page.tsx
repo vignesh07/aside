@@ -273,7 +273,7 @@ export default function Home() {
         </a>
       </nav>
 
-      <section className="hero section-shell">
+      <section className="hero section-shell" id="download">
         <div className="hero-copy">
           <p className="eyebrow hero-rise">A side chat for your coding agents</p>
           <h1 className="hero-rise hero-delay-1">

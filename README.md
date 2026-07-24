@@ -7,6 +7,8 @@ one fleet-wide conversation plus a separate, durable conversation for each
 session—answered by a model you choose, without adding noise to the agent's own
 context.
 
+[Website](https://aside.vgnsh.xyz) · [Download for macOS](https://aside.vgnsh.xyz#download)
+
 Ask the fleet:
 
 > What needs me? Is anything stuck? What changed while I was away?

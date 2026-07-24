@@ -2,6 +2,8 @@
 
 The public landing page and Mac download surface for Aside.
 
+Production: [aside.vgnsh.xyz](https://aside.vgnsh.xyz)
+
 Aside gives every discovered Codex, Claude Code, and Pi session a persistent,
 read-only side chat. The site explains that boundary, demonstrates the
 needs-you workflow, and links to the signed installers published through the
