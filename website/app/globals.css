@@ -110,15 +110,21 @@ button {
   color: var(--ink);
 }
 
-.nav-download {
+.nav-actions {
   justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-github,
+.nav-download {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   padding: 10px 15px;
   border: 1px solid var(--line-strong);
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.4);
   font-size: 14px;
   font-weight: 570;
   transition:
@@ -127,10 +133,24 @@ button {
     background 180ms ease;
 }
 
+.nav-github {
+  color: var(--muted);
+  background: transparent;
+}
+
+.nav-download {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.nav-github:hover,
 .nav-download:hover {
   transform: translateY(-1px);
   border-color: rgba(24, 24, 23, 0.42);
   background: rgba(255, 255, 255, 0.75);
+}
+
+.nav-github:hover {
+  color: var(--ink);
 }
 
 .hero {
@@ -1263,6 +1283,55 @@ button {
   font-size: 11px;
 }
 
+.open-source {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.82fr);
+  gap: clamp(60px, 10vw, 140px);
+  padding: clamp(96px, 12vw, 150px) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.open-source h2 {
+  max-width: 620px;
+  margin: 0;
+  font-size: clamp(46px, 6.5vw, 76px);
+  font-weight: 590;
+  letter-spacing: -0.06em;
+  line-height: 0.98;
+}
+
+.open-source-copy {
+  align-self: end;
+  padding-bottom: 5px;
+}
+
+.open-source-copy > p {
+  max-width: 510px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.github-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 28px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 14px;
+  font-weight: 620;
+  transition:
+    gap 180ms ease,
+    border-color 180ms ease;
+}
+
+.github-cta:hover {
+  gap: 16px;
+  border-color: var(--ink);
+}
+
 .faq {
   padding: clamp(110px, 13vw, 168px) 0;
 }
@@ -1828,6 +1897,15 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .open-source {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+
+  .open-source-copy {
+    padding: 0;
+  }
+
   .install-card {
     min-height: 420px;
   }
@@ -1861,6 +1939,14 @@ button {
 
   .nav-download {
     padding: 8px 12px;
+  }
+
+  .nav-github {
+    padding: 8px 10px;
+  }
+
+  .nav-actions {
+    gap: 6px;
   }
 
   .hero {

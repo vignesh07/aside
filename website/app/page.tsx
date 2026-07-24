@@ -7,6 +7,7 @@ const APPLE_SILICON_DOWNLOAD =
   "https://aside.vgnsh.xyz/download/mac-arm64";
 const INTEL_DOWNLOAD =
   "https://aside.vgnsh.xyz/download/mac-intel";
+const GITHUB_REPOSITORY = "https://github.com/vignesh07/aside";
 
 const demoSteps = [
   {
@@ -268,9 +269,19 @@ export default function Home() {
           <a href="#privacy">Privacy</a>
           <a href="#faq">FAQ</a>
         </div>
-        <a className="nav-download" href={APPLE_SILICON_DOWNLOAD}>
-          Download <span aria-hidden="true">↓</span>
-        </a>
+        <div className="nav-actions">
+          <a
+            className="nav-github"
+            href={GITHUB_REPOSITORY}
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub <Arrow />
+          </a>
+          <a className="nav-download" href={APPLE_SILICON_DOWNLOAD}>
+            Download <span aria-hidden="true">↓</span>
+          </a>
+        </div>
       </nav>
 
       <section className="hero section-shell" id="download">
@@ -514,6 +525,28 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="open-source section-shell" id="open-source">
+        <div className="open-source-title reveal">
+          <p className="eyebrow">Open source · MIT</p>
+          <h2>Aside is open source.</h2>
+        </div>
+        <div className="open-source-copy reveal">
+          <p>
+            Aside reads local agent transcripts, so the code that does it is
+            public. Read the source, build the app yourself, report an issue, or
+            send a patch.
+          </p>
+          <a
+            className="github-cta"
+            href={GITHUB_REPOSITORY}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View the source on GitHub <Arrow />
+          </a>
+        </div>
+      </section>
+
       <section className="faq section-shell" id="faq">
         <div className="section-heading reveal">
           <p className="eyebrow">Before you install</p>
@@ -586,7 +619,7 @@ export default function Home() {
           <Brand />
           <p>Read-only side chats for coding agents.</p>
           <div>
-            <span>macOS preview · v0.1.5</span>
+            <span>macOS preview · v0.1.6</span>
             <a href="#privacy">Privacy</a>
             <a href="#top">Back to top ↑</a>
           </div>

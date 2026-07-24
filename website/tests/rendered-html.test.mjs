@@ -49,6 +49,11 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Codex and Claude\s+Code subagents fold beneath/);
   assert.match(html, /Search queries never leave your machine\./);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
+  assert.match(html, /Open source · MIT/);
+  assert.match(html, /Aside is open source\./);
+  assert.match(html, /View the source on GitHub/);
+  assert.match(html, /https:\/\/github\.com\/vignesh07\/aside/);
+  assert.match(html, /macOS preview · v0\.1\.6/);
   assert.match(
     html,
     /https:\/\/aside\.vgnsh\.xyz\/download\/mac-arm64/,
