@@ -1,4 +1,4 @@
-export const RELEASE_ORIGIN = 'https://aside-production-fd82.up.railway.app';
+export const RELEASE_ORIGIN = 'https://aside.vgnsh.xyz';
 
 const DOWNLOAD_ROUTES = {
   arm64: `${RELEASE_ORIGIN}/download/mac-arm64`,

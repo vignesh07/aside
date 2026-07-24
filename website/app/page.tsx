@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import Image from "next/image";
 
 const APPLE_SILICON_DOWNLOAD =
-  "https://aside-production-fd82.up.railway.app/download/mac-arm64";
+  "https://aside.vgnsh.xyz/download/mac-arm64";
 const INTEL_DOWNLOAD =
-  "https://aside-production-fd82.up.railway.app/download/mac-intel";
+  "https://aside.vgnsh.xyz/download/mac-intel";
 
 const demoSteps = [
   {
@@ -324,8 +324,9 @@ export default function Home() {
                 older work. The index stays on your Mac.
               </p>
               <p className="feature-note">
-                <strong>Coming next:</strong> Codex subagents, folded beneath
-                the task that spawned them.
+                <strong>Subagent work stays attached:</strong> Codex and Claude
+                Code subagents fold beneath the task that spawned them, with a
+                transcript and side chat of their own.
               </p>
             </div>
             <div className="feature-visual project-visual" aria-hidden="true">

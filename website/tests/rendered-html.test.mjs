@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-async function render(pathname = "/") {
+async function render(pathname = "/", method = "GET") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
     new Request(`https://aside.example${pathname}`, {
+      method,
       headers: {
         accept: "text/html",
         "x-forwarded-host": "aside.example",
@@ -38,17 +39,17 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Dashboards show status\. Aside lets you ask why\./);
   assert.match(html, /Search the work, not just the title/);
   assert.match(html, /Find the thread from what happened inside it\./);
-  assert.match(html, /Coming next:/);
-  assert.match(html, /Codex subagents, folded beneath/);
+  assert.match(html, /Subagent work stays attached:/);
+  assert.match(html, /Codex and Claude\s+Code subagents fold beneath/);
   assert.match(html, /Search queries never leave your machine\./);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
   assert.match(
     html,
-    /https:\/\/aside-production-fd82\.up\.railway\.app\/download\/mac-arm64/,
+    /https:\/\/aside\.vgnsh\.xyz\/download\/mac-arm64/,
   );
   assert.match(
     html,
-    /https:\/\/aside-production-fd82\.up\.railway\.app\/download\/mac-intel/,
+    /https:\/\/aside\.vgnsh\.xyz\/download\/mac-intel/,
   );
   assert.match(html, /https:\/\/aside\.vgnsh\.xyz\/og\.png/);
   assert.match(
@@ -57,6 +58,27 @@ test("server-renders the finished Aside landing page", async () => {
   );
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
+
+for (const [path, upstream] of [
+  [
+    "/download/mac-arm64",
+    "https://aside-production-fd82.up.railway.app/download/mac-arm64",
+  ],
+  [
+    "/download/mac-intel",
+    "https://aside-production-fd82.up.railway.app/download/mac-intel",
+  ],
+]) {
+  test(`${path} redirects to the stable release service`, async () => {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await render(path, method);
+      assert.equal(response.status, 307);
+      assert.equal(response.headers.get("location"), upstream);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(await response.text(), "");
+    }
+  });
+}
 
 test("serves a no-store health endpoint", async () => {
   const response = await render("/health");

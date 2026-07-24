@@ -44,10 +44,10 @@ function controller(
 describe('app update routes', () => {
   it('keeps the manual recovery download on Aside-owned fixed routes', () => {
     expect(downloadUrlForArch('arm64')).toBe(
-      'https://aside-production-fd82.up.railway.app/download/mac-arm64',
+      'https://aside.vgnsh.xyz/download/mac-arm64',
     );
     expect(downloadUrlForArch('x64')).toBe(
-      'https://aside-production-fd82.up.railway.app/download/mac-intel',
+      'https://aside.vgnsh.xyz/download/mac-intel',
     );
   });
 });
@@ -174,7 +174,7 @@ describe('AppUpdateController', () => {
       phase: 'error',
       error: 'Automatic update failed. Try again, or use the signed installer.',
       manualDownloadUrl:
-        'https://aside-production-fd82.up.railway.app/download/mac-arm64',
+        'https://aside.vgnsh.xyz/download/mac-arm64',
     });
   });
 

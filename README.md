@@ -117,8 +117,8 @@ Download the current signed, notarized, and stapled preview:
 
 | Mac | Download |
 |---|---|
-| Apple silicon (M1 or newer) | [Aside for Apple silicon](https://aside-production-fd82.up.railway.app/download/mac-arm64) |
-| Intel | [Aside for Intel](https://aside-production-fd82.up.railway.app/download/mac-intel) |
+| Apple silicon (M1 or newer) | [Aside for Apple silicon](https://aside.vgnsh.xyz/download/mac-arm64) |
+| Intel | [Aside for Intel](https://aside.vgnsh.xyz/download/mac-intel) |
 
 Open the DMG, drag **Aside** to **Applications**, and launch it. Aside is a
 menubar app, so it appears in the macOS menu bar rather than the Dock.
