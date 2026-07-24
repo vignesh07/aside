@@ -1,6 +1,6 @@
 {
   "name": "@vignesh07/aside",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Persistent read-only side chats for every Claude Code, Codex, and Pi session on your machine, plus one fleet-wide thread.",
   "keywords": [
     "claude-code",

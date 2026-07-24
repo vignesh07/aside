@@ -1,6 +1,6 @@
 {
   "name": "@aside/menubar",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "macOS menubar frontend for aside — reuses the same TS core as the TUI.",
   "author": "Vignesh Natarajan",

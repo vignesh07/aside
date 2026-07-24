@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { WindowRecoveryController } from '../menubar/src/window-recovery.js';
+import {
+  makeAvailableOnCurrentSpace,
+  WindowRecoveryController,
+} from '../menubar/src/window-recovery.js';
 
 describe('WindowRecoveryController', () => {
   it('defers a LaunchServices reopen until the window is ready', () => {
@@ -32,5 +35,19 @@ describe('WindowRecoveryController', () => {
     recovery.request();
     expect(recovery.flush()).toBe(false);
     expect(recovery.hasPendingRequest).toBe(true);
+  });
+});
+
+describe('makeAvailableOnCurrentSpace', () => {
+  it('lets the menu window follow the active Space, including fullscreen Spaces', () => {
+    const setVisibleOnAllWorkspaces = vi.fn();
+
+    makeAvailableOnCurrentSpace({ setVisibleOnAllWorkspaces });
+
+    expect(setVisibleOnAllWorkspaces).toHaveBeenCalledOnce();
+    expect(setVisibleOnAllWorkspaces).toHaveBeenCalledWith(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: true,
+    });
   });
 });

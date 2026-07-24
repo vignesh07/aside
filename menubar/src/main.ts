@@ -45,7 +45,10 @@ import {
   downloadUrlForArch,
 } from './app-update.js';
 import { shouldNotifyForAttention } from './attention-notification.js';
-import { WindowRecoveryController } from './window-recovery.js';
+import {
+  makeAvailableOnCurrentSpace,
+  WindowRecoveryController,
+} from './window-recovery.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -157,6 +160,10 @@ function createWindow(): BrowserWindow {
       sandbox: true,
     },
   });
+  // A menu-bar dropdown should open on the Space where it was invoked. Without
+  // this, focusing the reused BrowserWindow makes macOS jump back to the Space
+  // where the window was first shown.
+  makeAvailableOnCurrentSpace(window);
   window.loadURL('aside://app/index.html');
   window.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('aside://app/')) event.preventDefault();
