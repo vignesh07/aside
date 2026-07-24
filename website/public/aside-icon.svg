@@ -1,0 +1,19 @@
+<!-- Aside app icon source, shared with the native Mac app. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2a36" />
+      <stop offset="1" stop-color="#16161d" />
+    </linearGradient>
+  </defs>
+  <rect x="102" y="102" width="820" height="820" rx="184" ry="184" fill="url(#plate)" />
+  <rect x="102" y="102" width="820" height="820" rx="184" ry="184" fill="none" stroke="#3a3a4a" stroke-width="4" />
+  <g transform="translate(160, 176) scale(22)">
+    <path d="M 6 4 H 26 A 4 4 0 0 1 30 8 V 18 A 4 4 0 0 1 26 22 H 15 L 8 28 V 22 H 6 A 4 4 0 0 1 2 18 V 8 A 4 4 0 0 1 6 4 Z" fill="none" stroke="#4ecdc4" stroke-width="2.2" stroke-linejoin="round" />
+    <g fill="#4ecdc4">
+      <circle cx="10.5" cy="13" r="1.7" />
+      <circle cx="16" cy="13" r="1.7" />
+      <circle cx="21.5" cy="13" r="1.7" />
+    </g>
+  </g>
+</svg>

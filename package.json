@@ -45,7 +45,7 @@
     "serve:releases": "npm --workspace @aside/release-distribution start",
     "release:publish": "railway run --service aside npm --workspace @aside/release-distribution run publish",
     "release:publish:dry": "npm --workspace @aside/release-distribution run publish -- --dry-run",
-    "test": "npm run build && vitest run",
+    "test": "npm run build && vitest run --exclude 'website/**'",
     "lint": "tsc --noEmit",
     "check": "npm run lint && npm test"
   },
