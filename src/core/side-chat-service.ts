@@ -163,6 +163,35 @@ export class SideChatService {
     this.handlers.onThread?.(thread.id);
   }
 
+  /**
+   * Change the model assigned to future threads and untouched threads that
+   * still carry the prior default. Existing conversations and explicit model
+   * choices stay pinned.
+   */
+  setDefaultModel(provider: string, model: string): void {
+    const previous = { ...this.defaults };
+    this.defaults.provider = provider;
+    this.defaults.model = model;
+
+    const changed: string[] = [];
+    for (const thread of this.threads.values()) {
+      if (
+        thread.turns.length === 0 &&
+        thread.provider === previous.provider &&
+        thread.model === previous.model
+      ) {
+        thread.provider = provider;
+        thread.model = model;
+        thread.updatedAt = this.now();
+        changed.push(thread.id);
+      }
+    }
+
+    this.engine.setModel(provider, model);
+    if (changed.length > 0) this.persist();
+    for (const threadId of changed) this.handlers.onThread?.(threadId);
+  }
+
   getTranscript(sessionId: string): SessionEvent[] {
     return this.transcripts.get(sessionId) ?? [];
   }

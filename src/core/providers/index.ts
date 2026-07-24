@@ -9,6 +9,7 @@ import type { CompletionRequest, Provider } from './types.js';
 export { ProviderError } from './types.js';
 export type { CompletionRequest, ModelSpec, Provider } from './types.js';
 export { listInstalledModels } from './ollama.js';
+export { createVendorCliEnv } from './vendor-cli-env.js';
 export {
   OBSERVER_CWD,
   OBSERVER_PROJECT_MARKER,

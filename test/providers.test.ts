@@ -17,6 +17,8 @@ import { assembleSystemPrompt } from '../src/core/providers/types.js';
 import { isObserverSession } from '../src/core/session-scanner.js';
 import { DEFAULT_PROVIDER } from '../src/config/defaults.js';
 import { composeClaudeTurnContent } from '../src/core/providers/claude-session.js';
+import { claudeObserverArgs } from '../src/core/providers/claude-session.js';
+import { codexObserverArgs } from '../src/core/providers/codex-cli.js';
 import type { TrackedSession } from '../src/types/session.js';
 
 const originalFetch = globalThis.fetch;
@@ -194,6 +196,36 @@ describe('Claude CLI durable continuity', () => {
     expect(composeClaudeTurnContent('WORLD', 'next', 'OLD CHAT', false)).toBe(
       'WORLD\n\n---\n\nQuestion: next',
     );
+  });
+
+  it('starts the delegated client with customizations and tools disabled', () => {
+    const args = claudeObserverArgs('claude-model', 'observer role');
+    expect(args).toContain('--safe-mode');
+    expect(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 2)).toEqual([
+      '--tools',
+      '',
+    ]);
+    expect(args).toContain('--append-system-prompt');
+  });
+});
+
+describe('Codex CLI observer isolation', () => {
+  it('keeps account auth while disabling config, rules, persistence, MCP, and shell tools', () => {
+    const args = codexObserverArgs('gpt-model', '/tmp/answer', 'question');
+    expect(args.slice(0, 4)).toEqual([
+      'exec',
+      '--ignore-user-config',
+      '--ignore-rules',
+      '--ephemeral',
+    ]);
+    expect(args).toContain('--skip-git-repo-check');
+    expect(args).toContain('mcp_servers={}');
+    expect(args).toContain('--sandbox');
+    expect(args).toContain('read-only');
+    expect(args.filter((value) => value === '--disable')).toHaveLength(2);
+    expect(args).toContain('shell_tool');
+    expect(args).toContain('unified_exec');
+    expect(args.at(-1)).toBe('question');
   });
 });
 

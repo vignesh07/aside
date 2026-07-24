@@ -16,6 +16,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createVendorCliEnv } from './vendor-cli-env.js';
 
 /**
  * Sessions the observer itself creates land here.
@@ -31,16 +32,6 @@ export const OBSERVER_PROJECT_MARKER = 'aside-observer';
 
 /** Per-answer ceiling. A wedged CLI must not hang the chat forever. */
 const ANSWER_TIMEOUT_MS = 180_000;
-
-/**
- * Credential variables that would override the user's subscription login.
- *
- * Claude Code prefers an API key when one is present ("takes precedence over
- * your claude.ai login"). This session exists specifically to use the login the
- * user already pays for, so the key is stripped from the child — leaving it set
- * would silently bill their API account instead.
- */
-const OVERRIDING_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
 interface PendingAsk {
   resolve: (text: string) => void;
@@ -61,6 +52,32 @@ export function composeClaudeTurnContent(
   return restoredContext
     ? `${restoredContext}\n\n---\n\nQuestion: ${question}`
     : question;
+}
+
+export function claudeObserverArgs(
+  model: string,
+  systemPrompt: string,
+): string[] {
+  return [
+    '-p',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    // stream-json output requires --verbose; without it the CLI refuses.
+    '--verbose',
+    // Disable CLAUDE.md, skills, plugins, hooks, MCP servers, custom agents,
+    // output styles, and every other user/project customization. Authentication
+    // remains owned by Claude Code.
+    '--safe-mode',
+    // An observer receives all context in the prompt and needs no agent tools.
+    '--tools',
+    '',
+    '--append-system-prompt',
+    systemPrompt,
+    '--model',
+    model,
+  ];
 }
 
 /**
@@ -155,33 +172,17 @@ export class ClaudeSession {
     if (this.child && !this.child.killed) return this.child;
 
     fs.mkdirSync(OBSERVER_CWD, { recursive: true });
-    const env = { ...process.env };
-    for (const key of OVERRIDING_VARS) delete env[key];
 
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(
         'claude',
-        [
-          '-p',
-          '--input-format',
-          'stream-json',
-          '--output-format',
-          'stream-json',
-          // stream-json output requires --verbose; without it the CLI refuses.
-          '--verbose',
-          // "" disables every built-in tool. Claude Code ships with Write/Edit/
-          // Bash enabled — telling a model it has no tools is not the same as it
-          // having none. This is what makes aside's read-only promise mechanical
-          // rather than aspirational.
-          '--tools',
-          '',
-          '--append-system-prompt',
-          systemPrompt,
-          '--model',
-          model,
-        ],
-        { cwd: OBSERVER_CWD, env, stdio: ['pipe', 'pipe', 'pipe'] },
+        claudeObserverArgs(model, systemPrompt),
+        {
+          cwd: OBSERVER_CWD,
+          env: createVendorCliEnv(),
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
       );
     } catch (err) {
       throw explain(err);

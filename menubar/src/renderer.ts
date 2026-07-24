@@ -8,15 +8,33 @@ import {
   splitThreadsByAge,
   type ProjectGroup,
 } from './thread-groups.js';
+import type {
+  ProviderAuthId,
+  ProviderAuthStatus,
+} from './provider-auth.js';
+import {
+  canDisconnectProvider,
+  canAskWithProvider,
+  isProviderUsable,
+  providerDisplayName,
+  providerStatusText,
+  shouldShowFirstRun,
+  visibleModels,
+} from './auth-ui.js';
 
 interface AsideBridge {
   getState(): Promise<MenubarState>;
   selectThread(threadId: string): Promise<void>;
   ask(question: string): Promise<void>;
   setModel(provider: string, model: string): Promise<void>;
+  getProviderAuth(): Promise<ProviderAuthStatus[]>;
+  refreshProviderAuth(): Promise<ProviderAuthStatus[]>;
+  connectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
+  disconnectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
   openDataFolder(): Promise<void>;
   quit(): Promise<void>;
   onUpdate(callback: (state: MenubarState) => void): () => void;
+  onProviderAuthUpdate(callback: (state: ProviderAuthStatus[]) => void): () => void;
   onShowSettings(callback: () => void): () => void;
 }
 
@@ -31,9 +49,14 @@ const threadsEl = document.getElementById('threads') as HTMLDivElement;
 const searchEl = document.getElementById('thread-search') as HTMLInputElement;
 const modelsEl = document.getElementById('models') as HTMLSelectElement;
 const messagesEl = document.getElementById('messages') as HTMLDivElement;
+const onboardingEl = document.getElementById('onboarding') as HTMLDivElement;
+const onboardingProvidersEl = document.getElementById('onboarding-providers') as HTMLDivElement;
 const formEl = document.getElementById('composer') as HTMLFormElement;
 const inputEl = document.getElementById('input') as HTMLInputElement;
 const sendEl = document.getElementById('send') as HTMLButtonElement;
+const providerLockEl = document.getElementById('provider-lock') as HTMLDivElement;
+const providerLockCopyEl = document.getElementById('provider-lock-copy') as HTMLSpanElement;
+const providerLockActionEl = document.getElementById('provider-lock-action') as HTMLButtonElement;
 const scopeTitleEl = document.getElementById('scope-title') as HTMLHeadingElement;
 const scopeMetaEl = document.getElementById('scope-meta') as HTMLDivElement;
 const needsCountEl = document.getElementById('needs-count') as HTMLSpanElement;
@@ -41,12 +64,24 @@ const threadCountEl = document.getElementById('thread-count') as HTMLSpanElement
 const settingsEl = document.getElementById('settings') as HTMLDivElement;
 const settingsButtonEl = document.getElementById('settings-button') as HTMLButtonElement;
 const settingsCloseEl = document.getElementById('settings-close') as HTMLButtonElement;
+const settingsProvidersEl = document.getElementById('settings-providers') as HTMLDivElement;
 const openDataEl = document.getElementById('open-data') as HTMLButtonElement;
 const quitEl = document.getElementById('quit') as HTMLButtonElement;
 const storagePathEl = document.getElementById('storage-path') as HTMLSpanElement;
 const diagnosticsEl = document.getElementById('diagnostics') as HTMLDivElement;
 const privacyBannerEl = document.getElementById('privacy-banner') as HTMLDivElement;
 const privacyDismissEl = document.getElementById('privacy-dismiss') as HTMLButtonElement;
+const accountsButtonEl = document.getElementById('accounts-button') as HTMLButtonElement;
+const observerLabelEl = document.getElementById('observer-label') as HTMLSpanElement;
+const accountSummaryEl = document.getElementById('account-summary') as HTMLSpanElement;
+const accountInlineEl = document.getElementById('account-inline') as HTMLButtonElement;
+const accountsPopoverEl = document.getElementById('accounts-popover') as HTMLElement;
+const accountsCloseEl = document.getElementById('accounts-close') as HTMLButtonElement;
+const accountsProvidersEl = document.getElementById('accounts-providers') as HTMLDivElement;
+const accountsErrorEl = document.getElementById('accounts-error') as HTMLDivElement;
+const onboardingErrorEl = document.getElementById('onboarding-error') as HTMLDivElement;
+const settingsErrorEl = document.getElementById('settings-error') as HTMLDivElement;
+const accountsSettingsEl = document.getElementById('accounts-settings') as HTMLButtonElement;
 
 let latestState: MenubarState | null = null;
 let lastRenderedThread = '';
@@ -55,6 +90,12 @@ let searchQuery = '';
 let olderCollapsed = true;
 const collapsedProjects = new Set<string>();
 const expandedOlderProjects = new Set<string>();
+let providerAuth: ProviderAuthStatus[] = [];
+let authPhase: 'loading' | 'ready' | 'error' = 'loading';
+let authError: string | null = null;
+let busyProviderId: ProviderAuthId | null = null;
+let pendingDisconnectId: ProviderAuthId | null = null;
+let lastProviderSurfaceKey = '';
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
@@ -76,6 +117,221 @@ function sourceGlyph(source: string): string {
 
 function activeSession(state: MenubarState): SessionSummary | undefined {
   return state.sessions.find((session) => session.threadId === state.activeThreadId);
+}
+
+function providerMark(provider: ProviderAuthId): string {
+  if (provider === 'codex-cli') return 'G';
+  if (provider === 'claude-cli') return 'C';
+  return 'O';
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Error invoking remote method '[^']+':\s*/i, '').slice(0, 180);
+}
+
+function updateProviderAuth(statuses: ProviderAuthStatus[]): void {
+  providerAuth = statuses;
+  authPhase = 'ready';
+  authError = null;
+  if (statuses.some(isProviderUsable)) {
+    localStorage.setItem('aside:onboarding:v1', '1');
+  }
+  lastProviderSurfaceKey = '';
+  if (latestState) render(latestState);
+}
+
+async function refreshProviderAuth(): Promise<void> {
+  try {
+    updateProviderAuth(await window.aside.refreshProviderAuth());
+  } catch (error) {
+    authPhase = 'error';
+    authError = safeErrorMessage(error);
+    lastProviderSurfaceKey = '';
+    if (latestState) render(latestState);
+  }
+}
+
+async function connectProvider(provider: ProviderAuthId): Promise<void> {
+  if (busyProviderId) return;
+  busyProviderId = provider;
+  pendingDisconnectId = null;
+  authError = null;
+  lastProviderSurfaceKey = '';
+  if (latestState) render(latestState);
+  try {
+    const statuses = await window.aside.connectProvider(provider);
+    updateProviderAuth(statuses);
+    inputEl.focus();
+  } catch (error) {
+    authError = safeErrorMessage(error);
+  } finally {
+    busyProviderId = null;
+    lastProviderSurfaceKey = '';
+    if (latestState) render(latestState);
+  }
+}
+
+async function disconnectProvider(provider: ProviderAuthId): Promise<void> {
+  if (busyProviderId) return;
+  busyProviderId = provider;
+  authError = null;
+  lastProviderSurfaceKey = '';
+  if (latestState) render(latestState);
+  try {
+    updateProviderAuth(await window.aside.disconnectProvider(provider));
+    pendingDisconnectId = null;
+  } catch (error) {
+    authError = safeErrorMessage(error);
+  } finally {
+    busyProviderId = null;
+    lastProviderSurfaceKey = '';
+    if (latestState) render(latestState);
+  }
+}
+
+function providerActionLabel(status: ProviderAuthStatus): string {
+  if (busyProviderId === status.provider) {
+    return status.state === 'signed_out' ? 'Waiting…' : 'Working…';
+  }
+  if (canDisconnectProvider(status)) return 'Disconnect';
+  if (status.state === 'signed_in') return `Use ${providerDisplayName(status.provider)}`;
+  if (status.state === 'local_ready') return 'Use Ollama';
+  if (status.state === 'signed_out') return 'Sign in';
+  if (status.reason === 'no_models') return 'No models';
+  if (status.state === 'error') return 'Try Again';
+  return 'Unavailable';
+}
+
+function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = `provider-row${isProviderUsable(status) ? ' usable' : ''}`;
+
+  const mark = document.createElement('span');
+  mark.className = 'provider-mark';
+  mark.textContent = providerMark(status.provider);
+
+  const copy = document.createElement('span');
+  copy.className = 'provider-copy';
+  const name = document.createElement('span');
+  name.className = 'provider-name';
+  name.textContent = providerDisplayName(status.provider);
+  const detail = document.createElement('span');
+  detail.className = 'provider-detail';
+  detail.textContent =
+    pendingDisconnectId === status.provider
+      ? `Only disconnect from Aside. ${providerDisplayName(status.provider)} stays signed in.`
+      : busyProviderId === status.provider
+        ? status.state === 'signed_out'
+          ? 'Waiting for sign-in in your browser…'
+          : 'Updating Aside…'
+        : providerStatusText(status);
+  copy.append(name, detail);
+
+  row.append(mark, copy);
+  if (pendingDisconnectId === status.provider) {
+    row.classList.add('confirming');
+    const actions = document.createElement('span');
+    actions.className = 'disconnect-actions';
+    const cancel = document.createElement('button');
+    cancel.className = 'provider-cancel';
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => {
+      pendingDisconnectId = null;
+      lastProviderSurfaceKey = '';
+      if (latestState) render(latestState);
+    });
+    const confirm = document.createElement('button');
+    confirm.className = 'provider-confirm';
+    confirm.type = 'button';
+    confirm.textContent = 'Disconnect';
+    confirm.addEventListener('click', () => void disconnectProvider(status.provider));
+    actions.append(cancel, confirm);
+    row.append(actions);
+    return row;
+  }
+
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = `provider-action${
+    !status.enabled && (status.state === 'signed_in' || status.state === 'local_ready')
+      ? ' primary'
+      : ''
+  }`;
+  action.textContent = providerActionLabel(status);
+  action.disabled =
+    Boolean(busyProviderId) ||
+    (!status.enabled &&
+      (status.state === 'missing' || status.reason === 'no_models'));
+  action.addEventListener('click', () => {
+    if (canDisconnectProvider(status)) {
+      pendingDisconnectId = status.provider;
+      lastProviderSurfaceKey = '';
+      if (latestState) render(latestState);
+      return;
+    }
+    if (status.state === 'error') {
+      void refreshProviderAuth();
+      return;
+    }
+    void connectProvider(status.provider);
+  });
+  row.append(action);
+  return row;
+}
+
+function fillProviderList(container: HTMLElement): void {
+  container.innerHTML = '';
+  for (const status of providerAuth) {
+    container.appendChild(makeProviderRow(status));
+  }
+}
+
+function renderProviderSurfaces(): void {
+  const key = JSON.stringify({
+    providerAuth,
+    authPhase,
+    authError,
+    busyProviderId,
+    pendingDisconnectId,
+  });
+  if (key === lastProviderSurfaceKey) return;
+  lastProviderSurfaceKey = key;
+  fillProviderList(onboardingProvidersEl);
+  fillProviderList(accountsProvidersEl);
+  fillProviderList(settingsProvidersEl);
+  accountsErrorEl.hidden = !authError;
+  accountsErrorEl.textContent = authError ?? '';
+  onboardingErrorEl.hidden = !authError;
+  onboardingErrorEl.textContent = authError ?? '';
+  settingsErrorEl.hidden = !authError;
+  settingsErrorEl.textContent = authError ?? '';
+}
+
+function showAccounts(): void {
+  const onboardingCompleted = localStorage.getItem('aside:onboarding:v1') === '1';
+  if (
+    !settingsEl.hidden ||
+    (authPhase === 'ready' && shouldShowFirstRun(providerAuth, onboardingCompleted))
+  ) {
+    return;
+  }
+  accountsPopoverEl.hidden = false;
+  accountsButtonEl.setAttribute('aria-expanded', 'true');
+  pendingDisconnectId = null;
+  lastProviderSurfaceKey = '';
+  renderProviderSurfaces();
+  accountsCloseEl.focus();
+  void refreshProviderAuth();
+}
+
+function hideAccounts(): void {
+  accountsPopoverEl.hidden = true;
+  accountsButtonEl.setAttribute('aria-expanded', 'false');
+  pendingDisconnectId = null;
+  lastProviderSurfaceKey = '';
+  accountsButtonEl.focus();
 }
 
 function makeThreadButton(
@@ -277,19 +533,49 @@ function renderThreads(state: MenubarState): void {
 }
 
 function renderModels(state: MenubarState): void {
-  const modelsKey = state.models.map((model) => modelKey(model.provider, model.model)).join('|');
+  const available = authPhase === 'ready'
+    ? visibleModels(state.models, providerAuth)
+    : [];
+  const activeKey = modelKey(state.provider, state.model);
+  const activeAvailable = available.some(
+    (model) => modelKey(model.provider, model.model) === activeKey,
+  );
+  const activeProvider = providerAuth.find(
+    (status) => status.provider === state.provider,
+  );
+  const activeProviderLabel = activeProvider
+    ? providerDisplayName(activeProvider.provider)
+    : state.provider;
+  const modelsKey = [
+    activeKey,
+    activeProviderLabel,
+    activeAvailable ? 'active' : 'locked',
+    ...available.map((model) => modelKey(model.provider, model.model)),
+  ].join('|');
   if (modelsEl.dataset['key'] !== modelsKey) {
     modelsEl.dataset['key'] = modelsKey;
     modelsEl.innerHTML = '';
-    const byProvider = new Map<string, typeof state.models>();
-    for (const model of state.models) {
+    if (!activeAvailable) {
+      const locked = document.createElement('option');
+      locked.value = activeKey;
+      locked.textContent = `${activeProviderLabel} · disconnected`;
+      locked.disabled = true;
+      modelsEl.appendChild(locked);
+    }
+    const byProvider = new Map<string, typeof available>();
+    for (const model of available) {
       const list = byProvider.get(model.provider) ?? [];
       list.push(model);
       byProvider.set(model.provider, list);
     }
     for (const [provider, list] of byProvider) {
       const group = document.createElement('optgroup');
-      group.label = provider;
+      const knownProvider = providerAuth.find(
+        (status) => status.provider === provider,
+      );
+      group.label = knownProvider
+        ? providerDisplayName(knownProvider.provider)
+        : provider;
       for (const model of list) {
         const option = document.createElement('option');
         option.value = modelKey(model.provider, model.model);
@@ -299,9 +585,15 @@ function renderModels(state: MenubarState): void {
       }
       modelsEl.appendChild(group);
     }
+    const connect = document.createElement('option');
+    connect.value = '__connect__';
+    connect.textContent = available.length > 0
+      ? 'Connect another provider…'
+      : 'Connect an account…';
+    modelsEl.appendChild(connect);
   }
-  modelsEl.value = modelKey(state.provider, state.model);
-  modelsEl.disabled = state.thinking;
+  modelsEl.value = activeKey;
+  modelsEl.disabled = state.thinking || authPhase === 'loading';
 }
 
 function renderMessages(state: MenubarState): void {
@@ -363,24 +655,94 @@ function render(state: MenubarState): void {
       ? `${state.needsUserCount} need${state.needsUserCount === 1 ? 's' : ''} you`
       : '';
   needsCountEl.hidden = state.needsUserCount === 0;
-  threadCountEl.textContent = String(state.sessions.length + 1);
-  inputEl.placeholder = session ? `Ask about ${session.projectName}…` : 'Ask across all agents…';
-  inputEl.disabled = false;
-  sendEl.disabled = state.thinking;
+  threadCountEl.textContent = String(state.sessions.length);
+  const activeAuth = providerAuth.find((status) => status.provider === state.provider);
+  const activeProviderLabel = activeAuth
+    ? providerDisplayName(activeAuth.provider)
+    : state.provider;
+  const canAsk =
+    authPhase === 'ready' &&
+    canAskWithProvider(providerAuth, state.provider);
+  const onboardingCompleted = localStorage.getItem('aside:onboarding:v1') === '1';
+  const firstRun =
+    authPhase === 'ready' &&
+    shouldShowFirstRun(providerAuth, onboardingCompleted);
+  onboardingEl.hidden = !firstRun;
+  messagesEl.hidden = firstRun;
+  accountsButtonEl.hidden = firstRun;
+  observerLabelEl.hidden = !firstRun;
+  accountInlineEl.hidden = firstRun;
+  if (firstRun && !accountsPopoverEl.hidden) {
+    accountsPopoverEl.hidden = true;
+    accountsButtonEl.setAttribute('aria-expanded', 'false');
+    pendingDisconnectId = null;
+    lastProviderSurfaceKey = '';
+  }
+
+  inputEl.placeholder = canAsk
+    ? session
+      ? `Ask about ${session.projectName}…`
+      : 'Ask across all agents…'
+      : authPhase === 'loading'
+        ? 'Checking account status…'
+        : firstRun
+          ? 'Choose an account above to chat…'
+          : activeAuth
+            ? `${activeAuth.enabled ? 'Reconnect' : 'Connect'} ${activeProviderLabel} to chat…`
+            : 'Connect an account to chat…';
+  inputEl.disabled = state.thinking || !canAsk;
+  sendEl.disabled = state.thinking || !canAsk;
+  providerLockEl.hidden = canAsk;
+  providerLockActionEl.hidden = firstRun;
+  providerLockCopyEl.textContent =
+    authPhase === 'loading'
+      ? 'Checking account status…'
+      : firstRun
+        ? 'Choose a model account above to unlock this side chat.'
+        : activeAuth
+          ? `This thread uses ${activeProviderLabel}. ${
+              activeAuth.enabled ? 'Reconnect it' : 'Connect it'
+            } or choose a connected model.`
+          : 'Connect an account before sending transcript context to a model.';
+  providerLockActionEl.textContent = activeAuth?.enabled ? 'Reconnect…' : 'Connect…';
+
+  const usable = providerAuth.filter(isProviderUsable);
+  accountsButtonEl.classList.toggle('connected', usable.length > 0);
+  accountSummaryEl.textContent =
+    authPhase === 'loading'
+      ? 'Checking accounts…'
+      : usable.length === 0
+        ? 'Connect an account'
+        : usable.length === 1
+          ? providerDisplayName(usable[0]!.provider)
+          : `${usable.length} accounts`;
+  accountInlineEl.textContent =
+    usable.length === 0
+      ? 'Connect an account'
+      : `${usable.length} account${usable.length === 1 ? '' : 's'}`;
   storagePathEl.textContent = state.storagePath;
   diagnosticsEl.textContent =
     `${state.sessions.length} detected threads · ${state.recentSessionCount} recent · ` +
     `${state.needsUserCount} need you · ` +
-    `${state.provider}/${state.model}`;
+    `${state.provider}/${state.model} · ` +
+    `${usable.length} connected`;
 
   renderThreads(state);
   renderModels(state);
+  if (firstRun) modelsEl.disabled = true;
   renderMessages(state);
+  renderProviderSurfaces();
 }
 
 function showSettings(): void {
+  if (!accountsPopoverEl.hidden) {
+    accountsPopoverEl.hidden = true;
+    accountsButtonEl.setAttribute('aria-expanded', 'false');
+    pendingDisconnectId = null;
+    lastProviderSurfaceKey = '';
+  }
   settingsEl.hidden = false;
-  settingsCloseEl.focus();
+  void refreshProviderAuth();
 }
 
 function hideSettings(): void {
@@ -390,28 +752,70 @@ function hideSettings(): void {
 
 modelsEl.addEventListener('change', () => {
   const raw = modelsEl.value;
+  if (raw === '__connect__') {
+    showAccounts();
+    if (latestState) modelsEl.value = modelKey(latestState.provider, latestState.model);
+    return;
+  }
   const separator = raw.indexOf(':');
   if (separator === -1) return;
-  void window.aside.setModel(raw.slice(0, separator), raw.slice(separator + 1));
+  void window.aside
+    .setModel(raw.slice(0, separator), raw.slice(separator + 1))
+    .catch(() => void refreshProviderAuth());
 });
 
 formEl.addEventListener('submit', (event) => {
   event.preventDefault();
   const question = inputEl.value.trim();
-  if (!question || latestState?.thinking) return;
+  if (
+    !question ||
+    !latestState ||
+    latestState.thinking ||
+    !canAskWithProvider(providerAuth, latestState.provider)
+  ) {
+    return;
+  }
   inputEl.value = '';
-  void window.aside.ask(question);
+  void window.aside.ask(question).catch(() => void refreshProviderAuth());
 });
 
-settingsButtonEl.addEventListener('click', showSettings);
-settingsCloseEl.addEventListener('click', hideSettings);
-settingsEl.addEventListener('click', (event) => {
-  if (event.target === settingsEl) hideSettings();
+accountsButtonEl.addEventListener('click', () => {
+  if (accountsPopoverEl.hidden) showAccounts();
+  else hideAccounts();
 });
+accountsCloseEl.addEventListener('click', hideAccounts);
+accountInlineEl.addEventListener('click', showAccounts);
+providerLockActionEl.addEventListener('click', showAccounts);
+accountsSettingsEl.addEventListener('click', () => {
+  hideAccounts();
+  showSettings();
+});
+settingsButtonEl.addEventListener('click', () => {
+  if (!accountsPopoverEl.hidden) hideAccounts();
+  showSettings();
+});
+settingsCloseEl.addEventListener('click', hideSettings);
 openDataEl.addEventListener('click', () => void window.aside.openDataFolder());
 quitEl.addEventListener('click', () => void window.aside.quit());
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !settingsEl.hidden) hideSettings();
+  if (event.key !== 'Escape') return;
+  if (!accountsPopoverEl.hidden) {
+    hideAccounts();
+    return;
+  }
+  if (!settingsEl.hidden) hideSettings();
+});
+document.addEventListener('mousedown', (event) => {
+  if (
+    accountsPopoverEl.hidden ||
+    accountsPopoverEl.contains(event.target as Node) ||
+    accountsButtonEl.contains(event.target as Node) ||
+    accountInlineEl.contains(event.target as Node) ||
+    providerLockActionEl.contains(event.target as Node)
+  ) {
+    return;
+  }
+  hideAccounts();
 });
 
 if (localStorage.getItem('aside:privacy-seen') === '1') {
@@ -437,5 +841,15 @@ searchEl.addEventListener('keydown', (event) => {
 });
 
 window.aside.onUpdate(render);
+window.aside.onProviderAuthUpdate(updateProviderAuth);
 window.aside.onShowSettings(showSettings);
 void window.aside.getState().then(render);
+void window.aside
+  .getProviderAuth()
+  .then(updateProviderAuth)
+  .catch((error) => {
+    authPhase = 'error';
+    authError = safeErrorMessage(error);
+    lastProviderSurfaceKey = '';
+    if (latestState) render(latestState);
+  });

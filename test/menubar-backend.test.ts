@@ -32,8 +32,12 @@ const FAKE_MODELS = [
 
 function makeBackend(sessions: TrackedSession[]) {
   const setModelCalls: Array<[string, string]> = [];
+  const askCalls: AskParams[] = [];
   const service = new SideChatService({
-    ask: async (_p: AskParams) => 'answer',
+    ask: async (params: AskParams) => {
+      askCalls.push(params);
+      return 'answer';
+    },
     setModel: (p: string, m: string) => setModelCalls.push([p, m]),
   });
   const states: number[] = [];
@@ -46,7 +50,7 @@ function makeBackend(sessions: TrackedSession[]) {
       models: () => FAKE_MODELS,
     },
   );
-  return { backend, service, setModelCalls };
+  return { backend, service, setModelCalls, askCalls };
 }
 
 describe('MenubarBackend', () => {
@@ -103,6 +107,41 @@ describe('MenubarBackend', () => {
     expect(msgs[1]!.content).toBe('answer');
   });
 
+  it('keeps an authorized ask bound to its originating thread', async () => {
+    const { backend, askCalls } = makeBackend([fakeSession('a'), fakeSession('b')]);
+    backend.refresh();
+    backend.selectThread('session:a');
+    const state = backend.getState();
+    const target = {
+      threadId: state.activeThreadId,
+      provider: state.provider,
+      model: state.model,
+    };
+
+    backend.selectThread('session:b');
+    await backend.ask('still about a', target);
+
+    expect(askCalls[0]?.threadId).toBe('session:a');
+    expect(backend.getState().activeThreadId).toBe('session:b');
+  });
+
+  it('rejects a captured ask if that thread changed provider meanwhile', async () => {
+    const { backend, askCalls } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    const state = backend.getState();
+    const target = {
+      threadId: state.activeThreadId,
+      provider: state.provider,
+      model: state.model,
+    };
+    backend.setModel('openai', 'gpt-4o-mini');
+
+    await expect(backend.ask('stale authorization', target)).rejects.toThrow(
+      'thread changed',
+    );
+    expect(askCalls).toHaveLength(0);
+  });
+
   it('offers the model catalog so the menubar can switch provider', () => {
     const { backend } = makeBackend([fakeSession('a')]);
     backend.refresh();
@@ -118,6 +157,49 @@ describe('MenubarBackend', () => {
     expect(setModelCalls).toEqual([['openai', 'gpt-4o-mini']]);
     expect(backend.getState().provider).toBe('openai');
     expect(backend.getState().model).toBe('gpt-4o-mini');
+  });
+
+  it('retargets untouched threads when the connected-account default changes', () => {
+    const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
+    backend.refresh();
+
+    backend.setDefaultModel('openai', 'gpt-4o-mini');
+
+    expect(service.getThread('fleet').provider).toBe('openai');
+    expect(service.getThread('session:a').provider).toBe('openai');
+    expect(service.getThread('session:b').provider).toBe('openai');
+    expect(service.getThread('session:b').model).toBe('gpt-4o-mini');
+  });
+
+  it('keeps an existing conversation pinned when the default changes', async () => {
+    const { backend, service } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    await backend.ask('keep this conversation');
+
+    backend.setDefaultModel('openai', 'gpt-4o-mini');
+
+    expect(service.getThread('fleet').provider).toBe('claude-cli');
+    expect(service.getThread('fleet').turns).toHaveLength(2);
+    expect(service.getThread('session:a').provider).toBe('openai');
+  });
+
+  it('applies an authorized model switch only to its originating thread', () => {
+    const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
+    backend.refresh();
+    backend.selectThread('session:a');
+    const state = backend.getState();
+    const target = {
+      threadId: state.activeThreadId,
+      provider: state.provider,
+      model: state.model,
+    };
+
+    backend.selectThread('session:b');
+    backend.setModel('openai', 'gpt-4o-mini', target);
+
+    expect(service.getThread('session:a').provider).toBe('openai');
+    expect(service.getThread('session:b').provider).toBe('claude-cli');
+    expect(backend.getState().activeThreadId).toBe('session:b');
   });
 
   it('rejects a model outside the catalog', () => {

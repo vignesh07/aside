@@ -10,7 +10,10 @@ import { SideChatService } from '../../dist/core/side-chat-service.js';
 import { SideChatEngine } from '../../dist/core/side-chat-engine.js';
 import { FileThreadStore } from '../../dist/core/thread-store.js';
 import { TIMING } from '../../dist/config/defaults.js';
-import { flattenModelCatalog } from '../../dist/config/model-catalog.js';
+import {
+  flattenModelCatalog,
+  flattenModelCatalogWithLocal,
+} from '../../dist/config/model-catalog.js';
 import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
@@ -55,6 +58,12 @@ export interface BackendConfig {
   model: string;
 }
 
+export interface MenubarThreadTarget {
+  threadId: string;
+  provider: string;
+  model: string;
+}
+
 /** Injection seam for tests (defaults wire up the real core). */
 export interface BackendDeps {
   scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
@@ -66,7 +75,8 @@ export class MenubarBackend {
   private readonly service: SideChatService;
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
   /** Catalogued once: it's a static registry, not live state. */
-  private readonly models: ModelOption[];
+  private models: ModelOption[];
+  private readonly loadModels: (() => Promise<ModelOption[]>) | null;
   private readonly storagePath: string;
   private sessions: TrackedSession[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -78,6 +88,7 @@ export class MenubarBackend {
   ) {
     this.scan = deps.scan ?? (() => scanAllSessions({}));
     this.models = (deps.models ?? flattenModelCatalog)();
+    this.loadModels = deps.models ? null : flattenModelCatalogWithLocal;
     const store = new FileThreadStore();
     this.storagePath = store.location;
     this.service =
@@ -106,6 +117,7 @@ export class MenubarBackend {
 
   start(): void {
     this.refresh();
+    void this.refreshModels();
     this.timer = setInterval(() => this.refresh(), TIMING.scanIntervalMs);
   }
 
@@ -124,17 +136,49 @@ export class MenubarBackend {
     this.emit();
   }
 
-  setModel(provider: string, model: string): void {
+  setModel(
+    provider: string,
+    model: string,
+    target?: MenubarThreadTarget,
+  ): void {
     if (!this.models.some((option) => option.provider === provider && option.model === model)) {
       return;
     }
-    this.service.setModel(provider, model);
+    if (target && !this.threadStillMatches(target)) {
+      throw new Error('This thread changed before the model could be applied.');
+    }
+    this.service.setModel(provider, model, target?.threadId);
     this.emit();
   }
 
-  /** Ask inside the currently selected durable thread. */
-  ask(question: string): Promise<void> {
-    return this.service.ask(question);
+  /**
+   * Use a newly connected account for future and untouched conversations,
+   * without changing threads that already have history or a custom model.
+   */
+  setDefaultModel(provider: string, model: string): void {
+    if (!this.models.some((option) => option.provider === provider && option.model === model)) {
+      return;
+    }
+    this.service.setDefaultModel(provider, model);
+    this.emit();
+  }
+
+  /** Replace guessed Ollama entries with the models actually installed. */
+  async refreshModels(): Promise<void> {
+    if (!this.loadModels) return;
+    const next = await this.loadModels();
+    this.models = next;
+    this.emit();
+  }
+
+  /** Ask inside the captured durable thread, never whichever thread is active later. */
+  ask(question: string, target?: MenubarThreadTarget): Promise<void> {
+    if (target && !this.threadStillMatches(target)) {
+      return Promise.reject(
+        new Error('This thread changed before the message could be sent.'),
+      );
+    }
+    return this.service.ask(question, target?.threadId);
   }
 
   getState(): MenubarState {
@@ -197,5 +241,13 @@ export class MenubarBackend {
 
   private emit(): void {
     this.onUpdate(this.getState());
+  }
+
+  private threadStillMatches(target: MenubarThreadTarget): boolean {
+    const thread = this.service.getThread(target.threadId);
+    return (
+      thread.provider === target.provider &&
+      thread.model === target.model
+    );
   }
 }

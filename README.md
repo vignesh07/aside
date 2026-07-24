@@ -32,8 +32,9 @@ thread, history, and observer model remain independent from every other thread.
   surface in the thread list. The Mac app can notify when a session starts
   waiting for you.
 - **Cross-vendor.** Claude Code, Codex CLI/Desktop, and Pi appear in one place.
-- **Bring your observer.** Use an existing Claude or Codex login, an API-backed
-  Anthropic/OpenAI model, or local Ollama. Model choice persists per thread.
+- **Bring your observer.** In the Mac app, explicitly connect an existing
+  ChatGPT or Claude account sign-in, or use local Ollama. The TUI also supports
+  direct API providers. Model choice persists per thread.
 - **Read-only.** Aside has no agent tools. It never sends messages into an agent,
   edits a project, or runs a command on the agent's behalf.
 
@@ -72,11 +73,13 @@ Aside is read-only, but an observer model still needs context to answer.
 - Aside's own side-chat history is stored at `~/.aside/threads.json`. The
   directory is mode `0700` and the file is mode `0600`. The TUI and Mac app
   merge writes so they can run together without erasing each other's threads.
-- Aside never reads or reuses OAuth tokens from Claude Code, Codex, Keychain, or
-  their auth files.
+- Aside never reads or copies OAuth tokens from Claude Code, Codex, Keychain, or
+  their auth files. It delegates account-backed replies to the installed vendor
+  client in a sanitized child environment with API-key and token variables
+  removed.
 
 The Mac app shows this boundary on first run and keeps it available under
-**Privacy & diagnostics**.
+**Aside Settings**.
 
 ## How it works
 
@@ -117,6 +120,13 @@ Download the current signed, notarized, and stapled preview:
 
 Open the DMG, drag **Aside** to **Applications**, and launch it. Aside is a
 menubar app, so it appears in the macOS menu bar rather than the Dock.
+
+On first launch, Aside detects whether the installed Codex and Claude clients
+already have an account sign-in, but does not use either one automatically.
+Choose **Use ChatGPT** or **Use Claude** to allow that client for Aside side
+chats. **Disconnect** revokes only Aside's permission; it does not sign Codex,
+Claude Code, ChatGPT, or Claude out on the rest of the Mac. Aside stores only
+these allow/deny choices at `~/.aside/providers.json`, never a credential.
 
 The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
 contains the current version, filenames, byte sizes, and SHA-256 checksums.
@@ -228,7 +238,7 @@ npm run verify:signing
 ```
 
 The app is menubar-only (`LSUIElement`), with no Dock or Cmd-Tab entry. Click the
-tray icon to open it; right-click for Privacy & diagnostics or Quit.
+tray icon to open it; right-click for Aside Settings or Quit.
 
 ### Signing and notarization
 
@@ -266,10 +276,11 @@ attention requests, switch between fleet and per-session durable chats, keep a
 different observer model per thread, and use the same core in TUI and Mac app.
 
 The preview DMGs are distributed from a private Railway Bucket through stable
-public download routes. Authentication onboarding is still pre-launch work:
-today the CLI-backed observers use the existing login owned by the installed
-Claude or Codex client, while direct API providers use their standard
-environment variable only when selected.
+public download routes. The Mac app has explicit provider onboarding and
+revocation: it recognizes account-backed Codex and Claude client sessions,
+requires per-provider permission before any transcript context can be sent, and
+keeps API-key-backed sessions out of the account-login path. Direct API providers
+remain available only in the TUI.
 
 ## License
 

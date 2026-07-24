@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { assembleSystemPrompt } from './types.js';
 import type { CompletionRequest, Provider } from './types.js';
 import { OBSERVER_CWD } from './claude-session.js';
+import { createVendorCliEnv } from './vendor-cli-env.js';
 
 /**
  * Answer using the user's own Codex CLI, over its existing ChatGPT login.
@@ -23,6 +25,9 @@ import { OBSERVER_CWD } from './claude-session.js';
 /** Per-answer ceiling. Codex spawns a model turn; be generous but bounded. */
 const TIMEOUT_MS = 180_000;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+let cachedCodexResolution:
+  | { pathValue: string; homeValue: string; binary: string }
+  | null = null;
 
 /** Numeric sort key from a `codex-cli 0.144.5` version banner. */
 function versionRank(output: string): number {
@@ -47,8 +52,27 @@ function versionRank(output: string): number {
  * So probe every candidate and take the newest that responds — "first on PATH"
  * and "first that runs" both pick wrong on a machine with two installs.
  */
-export function resolveCodexBinary(): string | null {
-  const candidates = ['codex', '/opt/homebrew/bin/codex', '/usr/local/bin/codex'];
+export function resolveCodexBinary(
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const env = createVendorCliEnv(sourceEnv);
+  const pathValue = env['PATH'] ?? '';
+  const homeValue = env['HOME'] ?? '';
+  if (
+    cachedCodexResolution?.pathValue === pathValue &&
+    cachedCodexResolution.homeValue === homeValue
+  ) {
+    return cachedCodexResolution.binary;
+  }
+
+  const candidates = new Set<string>();
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (path.isAbsolute(dir)) candidates.add(path.join(dir, 'codex'));
+  }
+  candidates.add('/opt/homebrew/bin/codex');
+  candidates.add('/usr/local/bin/codex');
+  candidates.add(path.join(os.homedir(), '.npm-global', 'bin', 'codex'));
+
   let best: { path: string; rank: number } | null = null;
 
   for (const candidate of candidates) {
@@ -57,6 +81,7 @@ export function resolveCodexBinary(): string | null {
         encoding: 'utf-8',
         timeout: 10_000,
         stdio: ['ignore', 'pipe', 'ignore'],
+        env,
       });
       const rank = versionRank(out);
       if (!best || rank > best.rank) best = { path: candidate, rank };
@@ -64,7 +89,13 @@ export function resolveCodexBinary(): string | null {
       continue; // Present but unusable is the same as absent.
     }
   }
-  return best?.path ?? null;
+  if (!best) return null;
+  cachedCodexResolution = {
+    pathValue,
+    homeValue,
+    binary: best.path,
+  };
+  return best.path;
 }
 
 export const codexCli: Provider = {
@@ -83,6 +114,40 @@ export const codexCli: Provider = {
     return askCodex(req);
   },
 };
+
+export function codexObserverArgs(
+  model: string,
+  answerFile: string,
+  prompt: string,
+): string[] {
+  return [
+    'exec',
+    // Authentication still comes from CODEX_HOME, but no config, custom model
+    // provider, hook, plugin, instruction file, or project rule is loaded.
+    '--ignore-user-config',
+    '--ignore-rules',
+    '--ephemeral',
+    // The read-only sandbox prevents mutation as defense in depth. Disabling
+    // both execution engines is the stronger boundary: the observer has no
+    // shell tool with which to inspect unrelated files in the first place.
+    '--disable',
+    'shell_tool',
+    '--disable',
+    'unified_exec',
+    '--sandbox',
+    'read-only',
+    // The observer runs in a scratch dir, not a repo. Without this Codex refuses.
+    '--skip-git-repo-check',
+    // Explicitly remove MCP servers even though user config is ignored.
+    '-c',
+    'mcp_servers={}',
+    '--output-last-message',
+    answerFile,
+    '--model',
+    model,
+    prompt,
+  ];
+}
 
 async function askCodex(req: CompletionRequest): Promise<string> {
   const { model, question } = req;
@@ -107,30 +172,12 @@ async function askCodex(req: CompletionRequest): Promise<string> {
   // which would land in the chat panel.
   const answerFile = path.join(OBSERVER_CWD, `answer-${process.pid}-${Date.now()}.txt`);
 
-  const args = [
-    'exec',
-    // Read-only: the observer must not be able to mutate anything. Codex
-    // sandboxes model-generated shell commands; this is the strictest policy.
-    '--sandbox',
-    'read-only',
-    // The observer runs in a scratch dir, not a repo. Without this Codex refuses.
-    '--skip-git-repo-check',
-    // MCP servers are tools, and a read-only observer has no use for them. This
-    // also sidesteps a broken server entry in the user's config taking us down
-    // with it — their config is not ours to be fragile about.
-    '-c',
-    'mcp_servers={}',
-    '--output-last-message',
-    answerFile,
-    '--model',
-    model,
-  ];
-  args.push(prompt);
+  const args = codexObserverArgs(model, answerFile, prompt);
 
   return new Promise<string>((resolve, reject) => {
     const child = spawn(binary, args, {
       cwd: OBSERVER_CWD,
-      env: process.env,
+      env: createVendorCliEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

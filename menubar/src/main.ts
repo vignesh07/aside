@@ -16,8 +16,30 @@ import {
 import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { MenubarBackend, type MenubarState } from './backend.js';
+import {
+  MenubarBackend,
+  type MenubarState,
+  type MenubarThreadTarget,
+} from './backend.js';
 import { importShellEnv, isMissingShellEnv } from './shell-env.js';
+import {
+  ProviderAuthCoordinator,
+  ProviderAuthError,
+  type ProviderAuthId,
+  type ProviderAuthStatus,
+} from './provider-auth.js';
+import {
+  requireUsableProvider,
+  validatedProviderId,
+} from './auth-guard.js';
+import {
+  disposeClaudeSession,
+} from '../../dist/core/providers/index.js';
+import {
+  canAskWithProvider,
+  isProviderUsable,
+  recommendedModelForProvider,
+} from './auth-ui.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,8 +94,10 @@ const CAPTURE_SETTINGS = process.argv.includes('--settings');
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
+let providerAuth: ProviderAuthCoordinator | null = null;
 let lastNeedsUser = new Set<string>();
 let attentionInitialized = false;
+let authFlowActive = false;
 
 /**
  * The menubar icon.
@@ -115,7 +139,11 @@ function createWindow(): BrowserWindow {
     if (!url.startsWith('aside://app/')) event.preventDefault();
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  if (!DEV_SHOW) window.on('blur', () => window.hide());
+  if (!DEV_SHOW) {
+    window.on('blur', () => {
+      if (!authFlowActive) window.hide();
+    });
+  }
   return window;
 }
 
@@ -143,15 +171,50 @@ function toggleWindow(): void {
   win.show();
   win.focus();
   win.webContents.send('aside:update', backend?.getState());
+  void refreshProviderAuth();
 }
 
-function showWindow(openSettings = false): void {
+function showWindow(openSettings = false, refreshAuth = true): void {
   if (!win || !tray) return;
   positionWindow(win, tray);
   win.show();
   win.focus();
   win.webContents.send('aside:update', backend?.getState());
+  if (refreshAuth) void refreshProviderAuth();
   if (openSettings) win.webContents.send('aside:show-settings');
+}
+
+function broadcastProviderAuth(statuses: ProviderAuthStatus[]): void {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('aside:auth:update', statuses);
+  }
+}
+
+async function refreshProviderAuth(): Promise<ProviderAuthStatus[]> {
+  if (!providerAuth) return [];
+  const statuses = await providerAuth.getStatuses();
+  broadcastProviderAuth(statuses);
+  return statuses;
+}
+
+function validatedProvider(value: unknown): ProviderAuthId | null {
+  return validatedProviderId(value);
+}
+
+function safeProviderError(error: unknown): Error {
+  return new Error(
+    error instanceof ProviderAuthError
+      ? error.message
+      : 'Aside could not update provider access.',
+  );
+}
+
+function threadTarget(state: MenubarState): MenubarThreadTarget {
+  return {
+    threadId: state.activeThreadId,
+    provider: state.provider,
+    model: state.model,
+  };
 }
 
 function handleBackendUpdate(state: MenubarState): void {
@@ -188,19 +251,18 @@ app.whenReady().then(() => {
   // Menubar-only app: no dock icon.
   app.dock?.hide();
 
-  // A GUI launch inherits launchd's environment, not the user's shell. Two
-  // things break as a result, and both look like the app is simply broken:
-  //   - PATH lacks ~/.local/bin etc, so the `claude` CLI the default provider
-  //     spawns can't be found at all;
-  //   - a key exported from .zshrc is invisible, so key-based providers fail.
-  // Both work perfectly when launched from a terminal, which is exactly how
-  // this gets missed. Recover them from the login shell; skipped when launched
-  // from a shell, so startup isn't taxed for nothing.
+  // Finder launches receive launchd's minimal PATH, which cannot locate vendor
+  // CLIs in Homebrew or user bin directories. Import PATH only. Credentials
+  // are deliberately excluded: existing vendor sign-in and explicit Aside
+  // consent are the only account path in the Mac app.
   if (isMissingShellEnv()) {
     const { imported, error } = importShellEnv();
     if (imported.length > 0) console.log(`  • imported from login shell: ${imported.join(', ')}`);
     else if (error) console.warn(`  • shell env import failed: ${error}`);
   }
+  // The Mac UI promises that Ollama keeps transcript context on this machine.
+  // Ignore a terminal-only remote OLLAMA_HOST override in the GUI process.
+  process.env['OLLAMA_HOST'] = 'http://127.0.0.1:11434';
 
   const appRoot = path.resolve(here, '..');
   protocol.handle('aside', (request) => {
@@ -232,6 +294,7 @@ app.whenReady().then(() => {
     handleBackendUpdate,
   );
   backend.start();
+  providerAuth = new ProviderAuthCoordinator();
 
   ipcMain.handle('aside:get-state', () => backend?.getState());
   ipcMain.handle('aside:select-thread', (_e, threadId: unknown) => {
@@ -239,19 +302,84 @@ app.whenReady().then(() => {
       backend?.selectThread(threadId);
     }
   });
-  ipcMain.handle('aside:ask', (_e, question: unknown) => {
-    if (typeof question === 'string' && question.length <= 20_000) {
-      return backend?.ask(question);
+  ipcMain.handle('aside:ask', async (_e, question: unknown) => {
+    if (
+      typeof question !== 'string' ||
+      question.length > 20_000 ||
+      !backend
+    ) {
+      return;
+    }
+    const state = backend.getState();
+    const target = threadTarget(state);
+    await requireUsableProvider(
+      target.provider,
+      providerAuth,
+      'Connect this thread’s provider before chatting.',
+    );
+    return backend.ask(question, target);
+  });
+  ipcMain.handle('aside:set-model', async (_e, provider: unknown, model: unknown) => {
+    if (
+      typeof provider !== 'string' ||
+      typeof model !== 'string' ||
+      provider.length > 100 ||
+      model.length > 300 ||
+      !backend
+    ) {
+      return;
+    }
+    const target = threadTarget(backend.getState());
+    await requireUsableProvider(
+      provider,
+      providerAuth,
+      'Connect that provider before selecting its model.',
+    );
+    backend.setModel(provider, model, target);
+  });
+  ipcMain.handle('aside:auth:get', () => refreshProviderAuth());
+  ipcMain.handle('aside:auth:refresh', () => refreshProviderAuth());
+  ipcMain.handle('aside:auth:connect', async (_e, value: unknown) => {
+    const provider = validatedProvider(value);
+    if (!provider || !providerAuth) {
+      throw new Error('That provider is not supported.');
+    }
+    authFlowActive = true;
+    try {
+      await providerAuth.connect(provider);
+      if (provider === 'ollama') await backend?.refreshModels();
+      const statuses = await refreshProviderAuth();
+      const state = backend?.getState();
+      if (backend && state && !canAskWithProvider(statuses, state.provider)) {
+        const recommended = recommendedModelForProvider(state.models, provider);
+        if (recommended) {
+          backend.setDefaultModel(recommended.provider, recommended.model);
+          backend.setModel(recommended.provider, recommended.model);
+        }
+      }
+      return statuses;
+    } catch (error) {
+      throw safeProviderError(error);
+    } finally {
+      authFlowActive = false;
+      // Re-present the account surface after a browser flow without starting a
+      // racing refresh that could erase the renderer's success/failure message.
+      showWindow(false, false);
     }
   });
-  ipcMain.handle('aside:set-model', (_e, provider: string, model: string) =>
-    typeof provider === 'string' &&
-    typeof model === 'string' &&
-    provider.length <= 100 &&
-    model.length <= 300
-      ? backend?.setModel(provider, model)
-      : undefined,
-  );
+  ipcMain.handle('aside:auth:disconnect', async (_e, value: unknown) => {
+    const provider = validatedProvider(value);
+    if (!provider || !providerAuth) {
+      throw new Error('That provider is not supported.');
+    }
+    try {
+      await providerAuth.disconnect(provider);
+      if (provider === 'claude-cli') disposeClaudeSession();
+      return await refreshProviderAuth();
+    } catch (error) {
+      throw safeProviderError(error);
+    }
+  });
   ipcMain.handle('aside:open-data', () => {
     const storagePath = backend?.getState().storagePath;
     if (!storagePath) return;
@@ -274,12 +402,22 @@ app.whenReady().then(() => {
   tray.on('right-click', () => {
     const menu = Menu.buildFromTemplate([
       { label: 'Open aside', click: () => showWindow() },
-      { label: 'Privacy & diagnostics…', click: () => showWindow(true) },
+      { label: 'Aside Settings…', click: () => showWindow(true) },
       { type: 'separator' },
       { label: 'Quit aside', role: 'quit' },
     ]);
     tray?.popUpContextMenu(menu);
   });
+
+  void refreshProviderAuth()
+    .then((statuses) => {
+      if (!statuses.some(isProviderUsable) && !DEV_SHOW && !CAPTURE_PATH) {
+        showWindow();
+      }
+    })
+    .catch(() => {
+      if (!DEV_SHOW && !CAPTURE_PATH) showWindow();
+    });
 
   if (DEV_SHOW || CAPTURE_PATH) {
     win.setPosition(DEV_SHOW_POSITION.x, DEV_SHOW_POSITION.y, false);
