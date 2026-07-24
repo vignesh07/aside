@@ -3,6 +3,12 @@ import { MenubarBackend } from '../menubar/src/backend.js';
 import { SideChatService } from '../dist/core/side-chat-service.js';
 import type { AskParams } from '../dist/core/side-chat-engine.js';
 import type { TrackedSession } from '../dist/types/session.js';
+import type {
+  IndexableThread,
+  SearchIndexStatus,
+  ThreadSearchResult,
+  ThreadSearchService,
+} from '../menubar/src/search-types.js';
 
 function fakeSession(id: string, status: TrackedSession['status'] = 'active'): TrackedSession {
   return {
@@ -30,7 +36,10 @@ const FAKE_MODELS = [
   { provider: 'openai', model: 'gpt-4o-mini' },
 ];
 
-function makeBackend(sessions: TrackedSession[]) {
+function makeBackend(
+  sessions: TrackedSession[],
+  search?: ThreadSearchService,
+) {
   const setModelCalls: Array<[string, string]> = [];
   const askCalls: AskParams[] = [];
   const service = new SideChatService({
@@ -48,6 +57,7 @@ function makeBackend(sessions: TrackedSession[]) {
       scan: () => ({ sessions, jsonlPaths: new Map() }),
       service,
       models: () => FAKE_MODELS,
+      search,
     },
   );
   return { backend, service, setModelCalls, askCalls };
@@ -216,5 +226,96 @@ describe('MenubarBackend', () => {
     // lastEventTime is the epoch, so idleness is the wall clock — just assert it
     // is populated and non-negative rather than pinning a moving number.
     expect(backend.getState().sessions[0]!.idleForMs).toBeGreaterThan(0);
+  });
+
+  it('merges ranked transcript matches with current metadata and drops stale rows', async () => {
+    const a = fakeSession('a');
+    a.title = 'Needle migration';
+    const b = fakeSession('b');
+    const result: ThreadSearchResult = {
+      sessionId: 'b',
+      source: 'claude',
+      kind: 'assistant',
+      snippet: [{ text: 'needle', match: true }],
+      score: -10,
+    };
+    const stale: ThreadSearchResult = {
+      ...result,
+      sessionId: 'missing',
+    };
+    const status: SearchIndexStatus = {
+      phase: 'ready',
+      indexedThreads: 2,
+      totalThreads: 2,
+      indexedBytes: 10,
+      totalBytes: 10,
+    };
+    const search: ThreadSearchService = {
+      syncSessions: () => {},
+      syncSideChats: () => {},
+      search: async () => [result, stale],
+      rebuild: () => {},
+      getStatus: () => status,
+      onStatus: () => () => {},
+      dispose: () => {},
+    };
+    const { backend } = makeBackend([a, b], search);
+    backend.refresh();
+
+    const matches = await backend.searchThreads('needle');
+
+    expect(matches.map((match) => match.sessionId)).toEqual(['b', 'a']);
+    expect(backend.getState().searchIndex).toBe(status);
+  });
+
+  it('keeps subagents directly searchable without counting them as top-level attention', async () => {
+    const parent = fakeSession('parent');
+    parent.source = 'codex';
+    const child = fakeSession('child');
+    child.source = 'codex';
+    child.isInternal = true;
+    child.parentSessionId = 'parent';
+    const synced: IndexableThread[][] = [];
+    const search: ThreadSearchService = {
+      syncSessions: (sessions) => synced.push(sessions),
+      syncSideChats: () => {},
+      search: async () => [{
+        sessionId: 'child',
+        source: 'codex',
+        kind: 'assistant',
+        snippet: [{ text: 'hidden worker answer', match: true }],
+        score: -12,
+      }],
+      rebuild: () => {},
+      getStatus: () => ({
+        phase: 'ready',
+        indexedThreads: 2,
+        totalThreads: 2,
+        indexedBytes: 20,
+        totalBytes: 20,
+      }),
+      onStatus: () => () => {},
+      dispose: () => {},
+    };
+    const { backend } = makeBackend([parent, child], search);
+
+    backend.refresh();
+    const matches = await backend.searchThreads('hidden');
+
+    expect(backend.getState().sessions.map((session) => session.id)).toEqual([
+      'parent',
+      'child',
+    ]);
+    expect(synced.at(-1)?.map((session) => session.sessionId)).toEqual([
+      'parent',
+      'child',
+    ]);
+    expect(matches).toEqual([{
+      sessionId: 'child',
+      source: 'codex',
+      kind: 'assistant',
+      snippet: [{ text: 'hidden worker answer', match: true }],
+      score: -12,
+    }]);
   });
 });

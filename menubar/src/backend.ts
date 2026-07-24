@@ -18,10 +18,18 @@ import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
+import type {
+  IndexableSideChat,
+  SearchIndexStatus,
+  ThreadSearchResult,
+  ThreadSearchService,
+} from './search-types.js';
 
 export interface SessionSummary {
   id: string;
-  source: string;
+  source: TrackedSession['source'];
+  isInternal: boolean;
+  parentSessionId?: string;
   projectName: string;
   /** Actual working folder when the transcript records one. */
   projectPath: string;
@@ -51,6 +59,8 @@ export interface MenubarState {
   storagePath: string;
   /** Every provider/model the observer can run on, for the picker. */
   models: ModelOption[];
+  /** Local transcript-content indexing progress. */
+  searchIndex: SearchIndexStatus;
 }
 
 export interface BackendConfig {
@@ -69,6 +79,7 @@ export interface BackendDeps {
   scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
   service?: SideChatService;
   models?: () => ModelOption[];
+  search?: ThreadSearchService;
 }
 
 export class MenubarBackend {
@@ -78,6 +89,8 @@ export class MenubarBackend {
   private models: ModelOption[];
   private readonly loadModels: (() => Promise<ModelOption[]>) | null;
   private readonly storagePath: string;
+  private readonly search?: ThreadSearchService;
+  private readonly unsubscribeSearchStatus?: () => void;
   private sessions: TrackedSession[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -86,7 +99,11 @@ export class MenubarBackend {
     private readonly onUpdate: (state: MenubarState) => void,
     deps: BackendDeps = {},
   ) {
-    this.scan = deps.scan ?? (() => scanAllSessions({}));
+    this.scan =
+      deps.scan ??
+      (() => scanAllSessions({}, { includeInternal: true }));
+    this.search = deps.search;
+    this.unsubscribeSearchStatus = this.search?.onStatus(() => this.emit());
     this.models = (deps.models ?? flattenModelCatalog)();
     this.loadModels = deps.models ? null : flattenModelCatalogWithLocal;
     const store = new FileThreadStore();
@@ -96,7 +113,10 @@ export class MenubarBackend {
       new SideChatService(
         new SideChatEngine(config),
         {
-          onChat: () => this.emit(),
+          onChat: () => {
+            this.syncSideChats();
+            this.emit();
+          },
           onThinking: () => this.emit(),
           onTranscript: () => this.emit(),
           onAttention: () => this.emit(),
@@ -125,6 +145,8 @@ export class MenubarBackend {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.service.dispose();
+    this.unsubscribeSearchStatus?.();
+    this.search?.dispose();
   }
 
   /** Open the fleet conversation or one durable session side thread. */
@@ -181,6 +203,63 @@ export class MenubarBackend {
     return this.service.ask(question, target?.threadId);
   }
 
+  /**
+   * Search current metadata immediately and merge it with ranked local FTS
+   * matches. The current scanner roster is authoritative, so stale index rows
+   * can never resurrect a transcript that has disappeared.
+   */
+  async searchThreads(
+    query: string,
+    limit = 40,
+  ): Promise<ThreadSearchResult[]> {
+    const trimmed = query.trim();
+    if (!trimmed || trimmed.length > 500) return [];
+    const normalized = trimmed.toLocaleLowerCase();
+    const metadata = this.sessions
+      .filter((session) =>
+        [
+          session.projectName,
+          session.cwd || session.projectDir,
+          session.title ?? '',
+          session.source,
+          session.id,
+          session.status,
+          session.currentActivity,
+          this.service.getSessionAttention(session.id).reason,
+        ].some((value) => value.toLocaleLowerCase().includes(normalized)),
+      )
+      .map(
+        (session): ThreadSearchResult => ({
+          sessionId: session.id,
+          source: session.source,
+          kind: 'metadata',
+          snippet: [],
+          score: 0,
+        }),
+      );
+    if (!this.search || normalized.length < 3) return metadata.slice(0, limit);
+
+    const visible = new Set(
+      this.sessions.map((session) => `${session.source}:${session.id}`),
+    );
+    const indexed = (await this.search.search(trimmed, limit)).filter((result) =>
+      visible.has(`${result.source}:${result.sessionId}`),
+    );
+    const seen = new Set(
+      indexed.map((result) => `${result.source}:${result.sessionId}`),
+    );
+    return [
+      ...indexed,
+      ...metadata.filter(
+        (result) => !seen.has(`${result.source}:${result.sessionId}`),
+      ),
+    ].slice(0, limit);
+  }
+
+  rebuildSearchIndex(): void {
+    this.search?.rebuild();
+  }
+
   getState(): MenubarState {
     const now = Date.now();
     const active = this.service.getActiveThread();
@@ -189,6 +268,8 @@ export class MenubarBackend {
       return {
         id: s.id,
         source: s.source,
+        isInternal: s.isInternal ?? false,
+        parentSessionId: s.parentSessionId,
         projectName: s.projectName,
         projectPath: s.cwd || s.projectDir,
         title: s.title ?? '',
@@ -207,12 +288,23 @@ export class MenubarBackend {
       thinking: active.thinking,
       provider: active.provider,
       model: active.model,
-      needsUserCount: sessions.filter((session) => session.needsUser).length,
+      needsUserCount: sessions.filter(
+        (session) => !session.isInternal && session.needsUser,
+      ).length,
       recentSessionCount: sessions.filter(
-        (session) => session.status === 'active' || session.status === 'idle',
+        (session) =>
+          !session.isInternal &&
+          (session.status === 'active' || session.status === 'idle'),
       ).length,
       storagePath: this.storagePath,
       models: this.models,
+      searchIndex: this.search?.getStatus() ?? {
+        phase: 'ready',
+        indexedThreads: this.sessions.length,
+        totalThreads: this.sessions.length,
+        indexedBytes: 0,
+        totalBytes: 0,
+      },
     };
   }
 
@@ -227,6 +319,19 @@ export class MenubarBackend {
         : session;
     });
     this.service.syncSessions(this.sessions, jsonlPaths);
+    this.search?.syncSessions(
+      this.sessions.map((session) => ({
+        sessionId: session.id,
+        source: session.source,
+        jsonlPath: session.jsonlPath,
+        projectName: session.projectName,
+        projectPath: session.cwd || session.projectDir,
+        title: session.title ?? '',
+        gitBranch: session.gitBranch,
+        lastEventMs: session.lastEventTime.getTime(),
+      })),
+    );
+    this.syncSideChats();
     const active = this.service.getActiveThread();
     const activeSessionId =
       active.scope.kind === 'session' ? active.scope.sessionId : null;
@@ -241,6 +346,26 @@ export class MenubarBackend {
 
   private emit(): void {
     this.onUpdate(this.getState());
+  }
+
+  private syncSideChats(): void {
+    if (!this.search) return;
+    const chats: IndexableSideChat[] = this.service
+      .getThreads()
+      .flatMap((thread): IndexableSideChat[] =>
+        thread.scope.kind === 'session'
+          ? [{
+              sessionId: thread.scope.sessionId,
+              updatedAt: thread.updatedAt.toISOString(),
+              turns: thread.turns.map((turn) => ({
+                role: turn.role,
+                content: turn.content,
+                timestamp: turn.timestamp.toISOString(),
+              })),
+            }]
+          : [],
+      );
+    this.search.syncSideChats(chats);
   }
 
   private threadStillMatches(target: MenubarThreadTarget): boolean {

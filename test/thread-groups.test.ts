@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   OLDER_AFTER_MS,
+  groupSubagentsByRoot,
   groupThreadsByProject,
   splitThreadsByAge,
 } from '../menubar/src/thread-groups.js';
@@ -43,5 +44,46 @@ describe('menubar thread hierarchy', () => {
       thread('waiting', 'app', '/app', 50, true),
     ]);
     expect(group?.sessions.map((item) => item.id)).toEqual(['waiting', 'quiet']);
+  });
+
+  it('folds nested subagents beneath their user-owned root', () => {
+    const base = {
+      projectName: 'app',
+      projectPath: '/app',
+      needsUser: false,
+    };
+    const sessions = [
+      { ...base, id: 'root', source: 'codex', idleForMs: 30, isInternal: false },
+      {
+        ...base,
+        id: 'child',
+        source: 'codex',
+        idleForMs: 20,
+        isInternal: true,
+        parentSessionId: 'root',
+      },
+      {
+        ...base,
+        id: 'grandchild',
+        source: 'codex',
+        idleForMs: 10,
+        isInternal: true,
+        parentSessionId: 'child',
+      },
+      {
+        ...base,
+        id: 'orphan',
+        source: 'codex',
+        idleForMs: 5,
+        isInternal: true,
+        parentSessionId: 'missing',
+      },
+    ];
+
+    expect(
+      groupSubagentsByRoot(sessions)
+        .get('codex:root')
+        ?.map((session) => session.id),
+    ).toEqual(['grandchild', 'child']);
   });
 });

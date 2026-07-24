@@ -39,6 +39,16 @@ await esbuild.build({
   external: ['electron', 'electron-updater'],
 });
 
+// Search indexing parses multi-gigabyte local transcript catalogs. Keep that
+// work outside Electron's main thread while a separate WAL reader serves UI
+// queries.
+await esbuild.build({
+  ...shared,
+  entryPoints: [path.join(root, 'src', 'search-worker.ts')],
+  outfile: path.join(root, 'build', 'search-worker.js'),
+  platform: 'node',
+});
+
 // Renderer. Runs in the browser context and touches only the window.aside
 // bridge, so it has no node externals.
 await esbuild.build({

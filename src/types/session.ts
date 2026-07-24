@@ -18,6 +18,10 @@ export interface SessionAttention {
 export interface TrackedSession {
   id: string;
   source: SessionSource;
+  /** Internal worker transcript that should not appear as a top-level thread. */
+  isInternal?: boolean;
+  /** Immediate user or worker parent, when the agent records that relationship. */
+  parentSessionId?: string;
   projectName: string;
   /** Saved agent title, or a compact first-prompt fallback when available. */
   title?: string;

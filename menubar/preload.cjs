@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('aside', {
   getState: () => ipcRenderer.invoke('aside:get-state'),
+  searchThreads: (query) => ipcRenderer.invoke('aside:search-threads', query),
+  rebuildSearchIndex: () => ipcRenderer.invoke('aside:search-rebuild'),
   selectThread: (threadId) => ipcRenderer.invoke('aside:select-thread', threadId),
   ask: (question) => ipcRenderer.invoke('aside:ask', question),
   setModel: (provider, model) => ipcRenderer.invoke('aside:set-model', provider, model),

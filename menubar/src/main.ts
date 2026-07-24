@@ -53,6 +53,7 @@ import {
   WindowRecoveryController,
 } from './window-recovery.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
+import { createThreadSearchService } from './search-coordinator.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WINDOW_WIDTH = 760;
@@ -293,9 +294,14 @@ function handleBackendUpdate(state: MenubarState): void {
   if (win && !win.isDestroyed()) win.webContents.send('aside:update', state);
   updateTrayToolTip(state);
 
-  const next = new Set(state.sessions.filter((session) => session.needsUser).map((session) => session.id));
+  const next = new Set(
+    state.sessions
+      .filter((session) => !session.isInternal && session.needsUser)
+      .map((session) => session.id),
+  );
   if (attentionInitialized && Notification.isSupported()) {
     for (const session of state.sessions) {
+      if (session.isInternal) continue;
       // Historical reconstruction powers the sidebar inbox, but must never
       // manufacture a delayed macOS alert for a stale thread after launch.
       if (!shouldNotifyForAttention(session, lastNeedsUser)) continue;
@@ -362,6 +368,7 @@ app.whenReady().then(() => {
   backend = new MenubarBackend(
     { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
     handleBackendUpdate,
+    { search: createThreadSearchService() },
   );
   backend.start();
   providerAuth = new ProviderAuthCoordinator();
@@ -378,6 +385,13 @@ app.whenReady().then(() => {
     if (typeof threadId === 'string' && threadId.length <= 500) {
       backend?.selectThread(threadId);
     }
+  });
+  ipcMain.handle('aside:search-threads', (_e, query: unknown) => {
+    if (typeof query !== 'string' || query.length > 500 || !backend) return [];
+    return backend.searchThreads(query);
+  });
+  ipcMain.handle('aside:search-rebuild', () => {
+    backend?.rebuildSearchIndex();
   });
   ipcMain.handle('aside:ask', async (_e, question: unknown) => {
     if (

@@ -28,4 +28,18 @@ describe('attention notification policy', () => {
       ),
     ).toBe(false);
   });
+
+  it('does not notify for an internal worker waiting on its parent', () => {
+    expect(
+      shouldNotifyForAttention(
+        {
+          id: 'worker',
+          status: 'active',
+          needsUser: true,
+          isInternal: true,
+        },
+        new Set(),
+      ),
+    ).toBe(false);
+  });
 });

@@ -23,11 +23,15 @@ thread, history, and observer model remain independent from every other thread.
 ## The product
 
 - **Fleet thread.** Ask across recent agents and query-relevant history.
-- **Machine-wide thread search.** Browse and filter every discovered Claude
-  Code, Codex, and Pi transcript, including older threads with no recent writes.
+- **Machine-wide full-content search.** Search user prompts, agent replies,
+  commands, file targets, failures, and Aside side chats across every discovered
+  Claude Code, Codex, and Pi transcript—including older threads with no recent
+  writes.
 - **Project hierarchy.** Threads are grouped by their working folder. Anything
   quiet for seven days or more sits under a collapsed **Older Threads** section
-  but remains searchable.
+  but remains searchable. Codex and Claude Code subagents stay searchable and
+  appear folded beneath their parent task; they can be hidden from the thread
+  list in **Aside Settings** without removing them from search.
 - **Session side threads.** Select an agent and keep a persistent conversation
   about exactly that session.
 - **Needs-you inbox.** Explicit input-request tools and likely direct questions
@@ -75,6 +79,10 @@ Aside is read-only, but an observer model still needs context to answer.
 - Aside's own side-chat history is stored at `~/.aside/threads.json`. The
   directory is mode `0700` and the file is mode `0600`. The TUI and Mac app
   merge writes so they can run together without erasing each other's threads.
+- Full-content search is backed by a rebuildable local index at
+  `~/.aside/search.sqlite`. Indexed text is redacted with the same common-secret
+  safety net used before provider calls, and search queries never leave the
+  machine.
 - Aside never reads or copies OAuth tokens from Claude Code, Codex, Keychain, or
   their auth files. It delegates account-backed replies to the installed vendor
   client in a sanitized child environment with API-key and token variables

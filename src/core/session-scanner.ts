@@ -9,13 +9,25 @@ export interface ScanResult {
   jsonlPaths: Map<string, string>; // sessionId → jsonlPath
 }
 
-export function scanAllSessions(filter: ScopeFilter): ScanResult {
+export interface ScanOptions {
+  /** Include vendor worker transcripts for consumers such as content search. */
+  includeInternal?: boolean;
+  /** @deprecated Use `includeInternal`; retained for older callers. */
+  includeInternalCodex?: boolean;
+}
+
+export function scanAllSessions(
+  filter: ScopeFilter,
+  options: ScanOptions = {},
+): ScanResult {
   const sessions: TrackedSession[] = [];
   const jsonlPaths = new Map<string, string>();
 
   // Scan both sources unless filtered
   if (filter.source !== 'codex' && filter.source !== 'pi') {
-    for (const { session, jsonlPath } of scanClaudeSessions()) {
+    for (const { session, jsonlPath } of scanClaudeSessions({
+      includeInternal: options.includeInternal,
+    })) {
       if (matchesFilter(session, filter)) {
         sessions.push(session);
         jsonlPaths.set(session.id, jsonlPath);
@@ -24,7 +36,10 @@ export function scanAllSessions(filter: ScopeFilter): ScanResult {
   }
 
   if (filter.source !== 'claude' && filter.source !== 'pi') {
-    for (const { session, jsonlPath } of scanCodexSessions()) {
+    for (const { session, jsonlPath } of scanCodexSessions({
+      includeInternal:
+        options.includeInternal ?? options.includeInternalCodex,
+    })) {
       if (matchesFilter(session, filter)) {
         sessions.push(session);
         jsonlPaths.set(session.id, jsonlPath);

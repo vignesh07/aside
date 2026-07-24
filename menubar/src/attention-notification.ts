@@ -2,6 +2,7 @@ export interface AttentionNotificationCandidate {
   id: string;
   status: 'active' | 'idle' | 'history';
   needsUser: boolean;
+  isInternal?: boolean;
 }
 
 /**
@@ -14,6 +15,7 @@ export function shouldNotifyForAttention(
   previouslyWaiting: ReadonlySet<string>,
 ): boolean {
   return (
+    !session.isInternal &&
     (session.status === 'active' || session.status === 'idle') &&
     session.needsUser &&
     !previouslyWaiting.has(session.id)

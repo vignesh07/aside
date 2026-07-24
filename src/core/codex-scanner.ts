@@ -14,6 +14,7 @@ interface DiscoveredCodexSession {
 interface CodexScannerOptions {
   sessionsDir?: string;
   nowMs?: number;
+  includeInternal?: boolean;
 }
 
 const metadataCache = new Map<
@@ -41,6 +42,8 @@ export function scanCodexSessions(options: CodexScannerOptions = {}): Discovered
     const age = Math.max(0, nowMs - mtime);
 
     const metadata = cachedMetadata(jsonlPath, stat);
+    if (metadata.isInternal && !options.includeInternal) continue;
+
     // Forked/resumed Codex rollouts can retain the ancestor session_meta.id.
     // The rollout filename is the identity Codex gives this concrete thread;
     // using the copied metadata id collapses many distinct histories into one
@@ -59,9 +62,11 @@ export function scanCodexSessions(options: CodexScannerOptions = {}): Discovered
       jsonlPath,
       session: {
         id: sessionId,
-          source: 'codex',
-          projectName: metadata.projectName || 'unknown',
-          title: metadata.title,
+        source: 'codex',
+        isInternal: metadata.isInternal,
+        parentSessionId: metadata.parentSessionId,
+        projectName: metadata.projectName || 'unknown',
+        title: metadata.title,
         projectDir: metadata.cwd || path.dirname(jsonlPath),
         jsonlPath,
         cwd: metadata.cwd || '',
@@ -116,6 +121,8 @@ interface CodexSessionMeta {
   model?: string;
   cliVersion?: string;
   title?: string;
+  isInternal?: boolean;
+  parentSessionId?: string;
 }
 
 function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
@@ -132,6 +139,12 @@ function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
         meta.cliVersion = p.cli_version;
         if (p.git?.branch) meta.gitBranch = p.git.branch;
         if (p.cwd) meta.projectName = extractProjectNameFromCwd(p.cwd);
+        if (isInternalCodexThread(p)) {
+          meta.isInternal = true;
+          meta.parentSessionId = codexParentSessionId(p);
+          meta.title = codexSubagentTitle(p);
+          return true;
+        }
       }
 
       if (parsed.type === 'turn_context' && parsed.payload?.model && !meta.model) {
@@ -154,6 +167,60 @@ function readCodexSessionMeta(jsonlPath: string): CodexSessionMeta {
   }, { maxBytes: 512 * 1024, maxLines: 400 });
 
   return meta;
+}
+
+function isInternalCodexThread(payload: Record<string, unknown>): boolean {
+  if (payload.thread_source === 'subagent') return true;
+
+  const source = payload.source;
+  return (
+    typeof source === 'object' &&
+    source !== null &&
+    Object.prototype.hasOwnProperty.call(source, 'subagent')
+  );
+}
+
+function codexParentSessionId(
+  payload: Record<string, unknown>,
+): string | undefined {
+  if (typeof payload.parent_thread_id === 'string') {
+    return payload.parent_thread_id;
+  }
+
+  const source = asRecord(payload.source);
+  const subagent = asRecord(source?.subagent);
+  const threadSpawn = asRecord(subagent?.thread_spawn);
+  return typeof threadSpawn?.parent_thread_id === 'string'
+    ? threadSpawn.parent_thread_id
+    : undefined;
+}
+
+function codexSubagentTitle(payload: Record<string, unknown>): string {
+  const source = asRecord(payload.source);
+  const subagent = asRecord(source?.subagent);
+  const threadSpawn = asRecord(subagent?.thread_spawn);
+  const agentPath =
+    typeof payload.agent_path === 'string'
+      ? payload.agent_path
+      : typeof threadSpawn?.agent_path === 'string'
+        ? threadSpawn.agent_path
+        : '';
+  const taskName = agentPath.split('/').filter(Boolean).at(-1);
+  if (taskName) return taskName.replaceAll(/[_-]+/g, ' ');
+
+  const nickname =
+    typeof payload.agent_nickname === 'string'
+      ? payload.agent_nickname
+      : typeof threadSpawn?.agent_nickname === 'string'
+        ? threadSpawn.agent_nickname
+        : '';
+  return nickname || 'Subagent';
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function cachedMetadata(jsonlPath: string, stat: fs.Stats): CodexSessionMeta {

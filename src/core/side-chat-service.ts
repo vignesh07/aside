@@ -141,6 +141,7 @@ export class SideChatService {
     this.activeThreadId = normalized;
     const scope = scopeFromThreadId(normalized);
     if (scope.kind === 'session') this.hydrateSession(scope.sessionId);
+    this.reconcileTailers();
     this.handlers.onThread?.(normalized);
   }
 
@@ -244,29 +245,9 @@ export class SideChatService {
     for (const sessionId of this.attentionSeededSessions) {
       if (!visibleIds.has(sessionId)) this.attentionSeededSessions.delete(sessionId);
     }
-    for (const session of sessions) {
-      this.sources.set(session.id, session.source);
-      // Create the durable thread as soon as a session becomes visible.
-      this.ensureThread(sessionThreadId(session.id));
-    }
+    for (const session of sessions) this.sources.set(session.id, session.source);
 
-    const activeIds = new Set<string>();
-    for (const session of sessions) {
-      if (session.status === 'active' || session.status === 'idle') {
-        activeIds.add(session.id);
-        const jsonlPath = jsonlPaths.get(session.id);
-        if (jsonlPath && !this.tailer.tailedSessionIds.includes(session.id)) {
-          this.attentionSeededSessions.add(session.id);
-          this.attentionDeferredSessions.delete(session.id);
-          this.hydratedSessions.add(session.id);
-          this.tailer.startTailing(session.id, jsonlPath);
-        }
-      }
-    }
-    for (const id of this.tailer.tailedSessionIds) {
-      if (!activeIds.has(id)) this.tailer.stopTailing(id);
-    }
-
+    this.reconcileTailers();
     if (this.seedHistoricalAttentionBatch()) this.scheduleAttentionDrain();
   }
 
@@ -302,7 +283,10 @@ export class SideChatService {
     }));
     return {
       now,
-      totalSessionCount: scopedSessionId === null ? this.sessions.length : sourceSessions.length,
+      totalSessionCount:
+        scopedSessionId === null
+          ? this.sessions.filter((session) => !session.isInternal).length
+          : sourceSessions.length,
       sessions,
       focusId: thread.scope.kind === 'session' ? thread.scope.sessionId : null,
     };
@@ -459,6 +443,7 @@ export class SideChatService {
     let attempts = 0;
     for (const session of this.sessions) {
       if (
+        session.isInternal ||
         session.status !== 'history' ||
         this.attentionSeededSessions.has(session.id) ||
         this.attentionDeferredSessions.has(session.id)
@@ -498,8 +483,9 @@ export class SideChatService {
    * search hundreds of local threads without creating an unbounded prompt.
    */
   private fleetContextSessions(question: string): TrackedSession[] {
-    const recent = this.sessions.filter((session) => session.status !== 'history');
-    const history = this.sessions.filter((session) => session.status === 'history');
+    const userSessions = this.sessions.filter((session) => !session.isInternal);
+    const recent = userSessions.filter((session) => session.status !== 'history');
+    const history = userSessions.filter((session) => session.status === 'history');
     const tokens = searchTokens(question);
     const ranked = history
       .map((session) => ({ session, score: this.searchScore(session, tokens) }))
@@ -517,6 +503,37 @@ export class SideChatService {
     for (const { session } of hydrate) this.hydrateSession(session.id);
 
     return [...recent, ...selectedHistory.map(({ session }) => session)];
+  }
+
+  /**
+   * User-owned live sessions stay tailed for activity and attention. Internal
+   * workers remain lightweight until selected; the selected worker is tailed
+   * so its dedicated side chat still follows live transcript updates.
+   */
+  private reconcileTailers(): void {
+    const activeScope = scopeFromThreadId(this.activeThreadId);
+    const selectedSessionId =
+      activeScope.kind === 'session' ? activeScope.sessionId : null;
+    const activeIds = new Set<string>();
+
+    for (const session of this.sessions) {
+      const isLive = session.status === 'active' || session.status === 'idle';
+      if (!isLive || (session.isInternal && session.id !== selectedSessionId)) {
+        continue;
+      }
+      activeIds.add(session.id);
+      const jsonlPath = this.jsonlPaths.get(session.id);
+      if (jsonlPath && !this.tailer.tailedSessionIds.includes(session.id)) {
+        this.attentionSeededSessions.add(session.id);
+        this.attentionDeferredSessions.delete(session.id);
+        this.hydratedSessions.add(session.id);
+        this.tailer.startTailing(session.id, jsonlPath);
+      }
+    }
+
+    for (const id of this.tailer.tailedSessionIds) {
+      if (!activeIds.has(id)) this.tailer.stopTailing(id);
+    }
   }
 
   private searchScore(session: TrackedSession, tokens: string[]): number {

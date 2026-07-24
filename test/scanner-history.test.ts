@@ -81,6 +81,79 @@ describe('historical session discovery', () => {
     expect(result?.session.id).toBe(rolloutId);
   });
 
+  it('excludes internal Codex subagent rollouts from top-level threads', () => {
+    const sessionsDir = path.join(tempRoot(), 'sessions');
+    writeOld(path.join(sessionsDir, '2026', '07', '23', 'rollout-user.jsonl'), [
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'user-thread',
+          cwd: '/Users/test/project',
+          source: 'vscode',
+          thread_source: 'user',
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Build the feature' },
+      },
+    ]);
+    writeOld(path.join(sessionsDir, '2026', '07', '23', 'rollout-subagent.jsonl'), [
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'subagent-thread',
+          cwd: '/Users/test/project',
+          source: 'vscode',
+          thread_source: 'subagent',
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Build the feature' },
+      },
+    ]);
+    writeOld(path.join(sessionsDir, '2026', '04', '28', 'rollout-legacy-subagent.jsonl'), [
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-subagent-thread',
+          cwd: '/Users/test/project',
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: 'user-thread',
+                depth: 1,
+              },
+            },
+          },
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Build the feature' },
+      },
+    ]);
+
+    const result = scanCodexSessions({ sessionsDir, nowMs: NOW });
+    expect(result.map(({ session }) => session.id)).toEqual(['user-thread']);
+
+    const withInternal = scanCodexSessions({
+      sessionsDir,
+      nowMs: NOW,
+      includeInternal: true,
+    });
+    expect(
+      withInternal
+        .filter(({ session }) => session.isInternal)
+        .map(({ session }) => [session.id, session.parentSessionId])
+        .sort(),
+    ).toEqual([
+      ['legacy-subagent-thread', 'user-thread'],
+      ['subagent-thread', undefined],
+    ]);
+  });
+
   it('keeps old Claude Code project transcripts searchable', () => {
     const claudeDir = tempRoot();
     writeOld(path.join(claudeDir, 'projects', '-Users-test-claude-project', 'claude-old.jsonl'), [
@@ -101,6 +174,136 @@ describe('historical session discovery', () => {
       projectName: 'claude-project',
       title: 'Research the old launch',
       status: 'history',
+    });
+  });
+
+  it('discovers Claude Code subagents beneath their parent task on demand', () => {
+    const claudeDir = tempRoot();
+    const projectDir = path.join(
+      claudeDir,
+      'projects',
+      '-Users-test-claude-workers',
+    );
+    const parentId = '20fab568-29de-49ba-a286-11f20382993e';
+    writeOld(path.join(projectDir, `${parentId}.jsonl`), [
+      {
+        type: 'user',
+        sessionId: parentId,
+        cwd: '/Users/test/claude-workers',
+        gitBranch: 'feature/workers',
+        slug: 'parent-task',
+        version: '2.1',
+        message: {
+          role: 'user',
+          content: 'Coordinate the launch review',
+        },
+      },
+    ]);
+    writeOld(
+      path.join(
+        projectDir,
+        parentId,
+        'subagents',
+        'agent-a192d43b1fa2ed258.jsonl',
+      ),
+      [
+        {
+          type: 'user',
+          // Claude records the owning task here, not the worker identity.
+          sessionId: parentId,
+          agentId: 'a192d43b1fa2ed258',
+          isSidechain: true,
+          cwd: '/Users/test/claude-workers',
+          gitBranch: 'feature/workers',
+          slug: 'worker-task',
+          version: '2.1',
+          message: {
+            role: 'user',
+            content: 'Review the release pipeline for hidden blockers',
+          },
+        },
+        {
+          type: 'assistant',
+          sessionId: parentId,
+          agentId: 'a192d43b1fa2ed258',
+          isSidechain: true,
+          cwd: '/Users/test/claude-workers',
+          message: {
+            role: 'assistant',
+            model: 'claude-test',
+            content: [{ type: 'text', text: 'Review complete' }],
+          },
+        },
+      ],
+    );
+
+    expect(
+      scanClaudeSessions({ claudeDir, nowMs: NOW })
+        .map(({ session }) => session.id),
+    ).toEqual([parentId]);
+
+    const withInternal = scanClaudeSessions({
+      claudeDir,
+      nowMs: NOW,
+      includeInternal: true,
+    });
+    expect(withInternal.map(({ session }) => session.id).sort()).toEqual([
+      parentId,
+      'agent-a192d43b1fa2ed258',
+    ].sort());
+    expect(
+      withInternal.find(
+        ({ session }) => session.id === 'agent-a192d43b1fa2ed258',
+      )?.session,
+    ).toMatchObject({
+      source: 'claude',
+      isInternal: true,
+      parentSessionId: parentId,
+      projectName: 'claude-workers',
+      title: 'Review the release pipeline for hidden blockers',
+      model: 'claude-test',
+      status: 'history',
+    });
+  });
+
+  it('keeps orphaned Claude subagents selectable without inventing a parent', () => {
+    const claudeDir = tempRoot();
+    const projectDir = path.join(
+      claudeDir,
+      'projects',
+      '-Users-test-claude-orphan',
+    );
+    const missingParentId = '44261e97-a180-43eb-bcf3-c039b09f0b0d';
+    writeOld(
+      path.join(
+        projectDir,
+        missingParentId,
+        'subagents',
+        'agent-af4516532454cb45f.jsonl',
+      ),
+      [{
+        type: 'user',
+        sessionId: missingParentId,
+        agentId: 'af4516532454cb45f',
+        isSidechain: true,
+        cwd: '/Users/test/claude-orphan',
+        message: {
+          role: 'user',
+          content: 'Recover an old worker result',
+        },
+      }],
+    );
+
+    const [result] = scanClaudeSessions({
+      claudeDir,
+      nowMs: NOW,
+      includeInternal: true,
+    });
+    expect(result?.session).toMatchObject({
+      id: 'agent-af4516532454cb45f',
+      isInternal: true,
+      parentSessionId: missingParentId,
+      title: 'Recover an old worker result',
     });
   });
 

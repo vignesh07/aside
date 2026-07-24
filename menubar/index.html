@@ -140,6 +140,14 @@
       }
       #thread-search::placeholder { color: var(--tertiary); }
       #thread-search::-webkit-search-cancel-button { opacity: .58; }
+      #search-status {
+        flex: none;
+        min-height: 20px;
+        margin: -3px 11px 4px;
+        color: var(--tertiary);
+        font-size: 9px;
+      }
+      #search-status.error { color: var(--danger); }
       #threads {
         min-height: 0;
         flex: 1;
@@ -189,6 +197,18 @@
       }
       .thread-group.older:hover { background: transparent; }
       .thread-group.older .group-name { font-size: 11px; }
+      .thread-group.subagents {
+        height: 27px;
+        margin: 0 0 1px;
+        padding-left: 27px;
+        color: var(--secondary);
+      }
+      .thread-group.subagents .group-name {
+        font-size: 10px;
+        font-weight: 560;
+      }
+      .thread-group.subagents.has-live .group-name { color: var(--text); }
+      .thread-group.subagents.has-live .group-count { color: var(--success); }
       .no-thread-results {
         padding: 13px 9px;
         color: var(--secondary);
@@ -213,6 +233,15 @@
         padding-left: 17px;
         grid-template-columns: 20px minmax(0, 1fr) auto;
       }
+      .thread.subagent {
+        min-height: 39px;
+        padding-left: 34px;
+      }
+      .thread.subagent .source {
+        width: 18px;
+        height: 18px;
+        opacity: .75;
+      }
       .thread:hover { background: var(--surface-hover); }
       .thread.active { background: var(--selection); }
       .source {
@@ -235,6 +264,32 @@
       }
       .thread-title { color: var(--text); font-size: 12px; font-weight: 530; }
       .thread-subtitle { color: var(--secondary); font-size: 10px; }
+      .thread-subtitle mark, .thread-snippet mark {
+        color: var(--text);
+        border-radius: 2px;
+        background: color-mix(in srgb, var(--accent) 26%, transparent);
+      }
+      .thread.search-result {
+        min-height: 48px;
+      }
+      .thread.search-result.has-snippet {
+        min-height: 68px;
+        align-items: start;
+        padding-top: 7px;
+        padding-bottom: 7px;
+      }
+      .thread.search-result.has-snippet .source { margin-top: 2px; }
+      .thread-snippet {
+        display: -webkit-box;
+        overflow: hidden;
+        margin-top: 2px;
+        color: var(--secondary);
+        font-size: 10px;
+        line-height: 1.28;
+        white-space: normal;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
       .thread.needs-user .thread-subtitle { color: var(--attention); }
       .attention-dot {
         width: 7px;
@@ -703,6 +758,54 @@
       .settings-section:first-child { margin-top: 0; }
       .settings-section h3 { margin: 0 0 5px; font-size: 12px; font-weight: 590; }
       .settings-section p { margin: 4px 0; color: var(--secondary); font-size: 11px; }
+      .settings-toggle {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-top: 8px;
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      .settings-toggle-copy {
+        min-width: 0;
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+      }
+      .settings-toggle-copy strong { font-size: 11px; font-weight: 590; }
+      .settings-toggle-copy span { color: var(--secondary); font-size: 10px; }
+      .settings-toggle input {
+        position: relative;
+        width: 30px;
+        height: 18px;
+        flex: none;
+        appearance: none;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        outline: 0;
+        background: var(--line-strong);
+        transition: background .16s ease, border-color .16s ease;
+      }
+      .settings-toggle input::after {
+        position: absolute;
+        top: 1px;
+        left: 1px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgb(0 0 0 / .28);
+        content: "";
+        transition: transform .16s ease;
+      }
+      .settings-toggle input:checked {
+        border-color: var(--accent);
+        background: var(--accent);
+      }
+      .settings-toggle input:checked::after { transform: translateX(12px); }
+      .settings-toggle input:focus-visible {
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+      }
       .settings-update {
         display: flex;
         align-items: center;
@@ -723,6 +826,11 @@
         font-size: 10px;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #search-index-status {
+        display: block;
+        color: var(--secondary);
+        font-size: 10px;
       }
       #update-progress {
         height: 2px;
@@ -800,6 +908,7 @@
             aria-label="Search all threads"
           />
         </div>
+        <div id="search-status" role="status" aria-live="polite" hidden></div>
         <div id="threads"></div>
         <footer class="sidebar-foot">
           <span id="observer-label" hidden>Read-only observer</span>
@@ -908,9 +1017,31 @@
             <p>Scoped transcript excerpts go to the selected cloud provider. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
           </div>
           <div class="settings-section">
+            <h3>Thread list</h3>
+            <label class="settings-toggle" for="show-subagent-threads">
+              <span class="settings-toggle-copy">
+                <strong>Show subagents</strong>
+                <span>Keep Codex and Claude workers beneath their parent task.</span>
+              </span>
+              <input id="show-subagent-threads" type="checkbox" />
+            </label>
+          </div>
+          <div class="settings-section">
             <h3>Persistent side chats</h3>
             <p>Fleet and per-session conversations are stored locally with user-only permissions.</p>
             <span id="storage-path" class="path"></span>
+          </div>
+          <div class="settings-section">
+            <h3>Local content search</h3>
+            <p>User prompts, agent replies, commands, failures, and side chats are indexed locally. Common credential patterns are redacted before indexing.</p>
+            <div class="settings-update">
+              <div class="settings-update-copy">
+                <span id="search-index-status" role="status" aria-live="polite">Preparing content index…</span>
+              </div>
+              <div class="settings-update-actions">
+                <button id="rebuild-search-index" class="secondary" type="button">Rebuild</button>
+              </div>
+            </div>
           </div>
           <div class="settings-section">
             <h3>Finding Aside</h3>

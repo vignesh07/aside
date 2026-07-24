@@ -15,4 +15,12 @@ describe('cloud privacy disclosure', () => {
       'automatic redaction can miss sensitive prose',
     );
   });
+
+  it('explains that full-content indexing stays local and is redacted', () => {
+    expect(indexHtml).toContain('indexed locally');
+    expect(indexHtml).toContain(
+      'Common credential patterns are redacted before indexing',
+    );
+    expect(indexHtml).toContain('rebuild-search-index');
+  });
 });

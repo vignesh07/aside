@@ -4,8 +4,10 @@
 import type { MenubarState, SessionSummary } from './backend.js';
 import { stripMarkdown } from '../../dist/utils/markdown.js';
 import {
+  groupSubagentsByRoot,
   groupThreadsByProject,
   splitThreadsByAge,
+  threadKey,
   type ProjectGroup,
 } from './thread-groups.js';
 import type {
@@ -13,6 +15,11 @@ import type {
   ProviderAuthStatus,
 } from './provider-auth.js';
 import type { AppUpdateStatus } from './app-update.js';
+import type {
+  SearchMatchKind,
+  SearchSnippetPart,
+  ThreadSearchResult,
+} from './search-types.js';
 import {
   canDisconnectProvider,
   canAskWithProvider,
@@ -26,6 +33,8 @@ import {
 
 interface AsideBridge {
   getState(): Promise<MenubarState>;
+  searchThreads(query: string): Promise<ThreadSearchResult[]>;
+  rebuildSearchIndex(): Promise<void>;
   selectThread(threadId: string): Promise<void>;
   ask(question: string): Promise<void>;
   setModel(provider: string, model: string): Promise<void>;
@@ -56,6 +65,12 @@ declare global {
 const FLEET_THREAD_ID = 'fleet';
 const threadsEl = document.getElementById('threads') as HTMLDivElement;
 const searchEl = document.getElementById('thread-search') as HTMLInputElement;
+const searchStatusEl = document.getElementById('search-status') as HTMLDivElement;
+const searchIndexStatusEl = document.getElementById('search-index-status') as HTMLSpanElement;
+const rebuildSearchIndexEl = document.getElementById('rebuild-search-index') as HTMLButtonElement;
+const showSubagentThreadsEl = document.getElementById(
+  'show-subagent-threads',
+) as HTMLInputElement;
 const modelsEl = document.getElementById('models') as HTMLSelectElement;
 const messagesEl = document.getElementById('messages') as HTMLDivElement;
 const onboardingEl = document.getElementById('onboarding') as HTMLDivElement;
@@ -106,9 +121,19 @@ let latestState: MenubarState | null = null;
 let lastRenderedThread = '';
 let wasThinking = false;
 let searchQuery = '';
+let searchResults: ThreadSearchResult[] | null = null;
+let searchInFlight = false;
+let searchError: string | null = null;
+let searchSequence = 0;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let lastIndexedThreadCount = -1;
 let olderCollapsed = true;
 const collapsedProjects = new Set<string>();
 const expandedOlderProjects = new Set<string>();
+const expandedSubagentRoots = new Set<string>();
+const showSubagentsStorageKey = 'aside:show-subagent-threads';
+let showSubagentThreads =
+  localStorage.getItem(showSubagentsStorageKey) !== '0';
 let providerAuth: ProviderAuthStatus[] = [];
 let authPhase: 'loading' | 'ready' | 'error' = 'loading';
 let authError: string | null = null;
@@ -433,6 +458,10 @@ function makeThreadButton(
     needsUser?: boolean;
     reason?: string;
     nested?: boolean;
+    subagent?: boolean;
+    searchResult?: boolean;
+    subtitlePrefix?: string;
+    snippet?: SearchSnippetPart[];
   },
 ): HTMLButtonElement {
   const button = document.createElement('button');
@@ -440,6 +469,8 @@ function makeThreadButton(
   button.className = `thread${state.activeThreadId === options.threadId ? ' active' : ''}${
     options.needsUser ? ' needs-user' : ''
   }${options.nested ? ' nested' : ''}`;
+  if (options.subagent) button.classList.add('subagent');
+  if (options.searchResult) button.classList.add('search-result');
   button.dataset['threadId'] = options.threadId;
 
   const icon = document.createElement('span');
@@ -453,10 +484,30 @@ function makeThreadButton(
   title.textContent = options.title;
   const subtitle = document.createElement('span');
   subtitle.className = 'thread-subtitle';
-  subtitle.textContent = options.needsUser
-    ? options.reason || 'Waiting for your input'
-    : options.subtitle;
+  if (options.needsUser && !options.searchResult) {
+    subtitle.textContent = options.reason || 'Waiting for your input';
+  } else {
+    subtitle.textContent = options.subtitle;
+  }
   copy.append(title, subtitle);
+  if (
+    options.searchResult &&
+    options.snippet &&
+    options.snippet.length > 0
+  ) {
+    button.classList.add('has-snippet');
+    const snippet = document.createElement('span');
+    snippet.className = 'thread-snippet';
+    snippet.append(document.createTextNode(options.subtitlePrefix ?? ''));
+    for (const part of options.snippet) {
+      const node = part.match
+        ? document.createElement('mark')
+        : document.createTextNode(part.text);
+      if (part.match) node.textContent = part.text;
+      snippet.append(node);
+    }
+    copy.append(snippet);
+  }
 
   button.append(icon, copy);
   if (options.needsUser) {
@@ -495,9 +546,45 @@ function makeGroupButton(
   return button;
 }
 
+function makeSubagentGroupButton(
+  subagents: SessionSummary[],
+  collapsed: boolean,
+  onToggle: () => void,
+): HTMLButtonElement {
+  const liveCount = subagents.filter(
+    (session) => session.status === 'active' || session.status === 'idle',
+  ).length;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'thread-group subagents';
+  button.classList.toggle('has-live', liveCount > 0);
+  button.setAttribute('aria-expanded', String(!collapsed));
+  button.setAttribute(
+    'aria-label',
+    `Subagents, ${subagents.length} total${
+      liveCount > 0 ? `, ${liveCount} live` : ''
+    }`,
+  );
+
+  const disclosure = document.createElement('span');
+  disclosure.className = 'disclosure';
+  disclosure.textContent = collapsed ? '▶' : '▼';
+  const name = document.createElement('span');
+  name.className = 'group-name';
+  name.textContent = 'Subagents';
+  const total = document.createElement('span');
+  total.className = 'group-count';
+  total.textContent =
+    liveCount > 0 ? `${liveCount} live · ${subagents.length}` : String(subagents.length);
+  button.append(disclosure, name, total);
+  button.addEventListener('click', onToggle);
+  return button;
+}
+
 function appendProjectGroups(
   state: MenubarState,
   groups: ProjectGroup<SessionSummary>[],
+  subagentsByRoot: Map<string, SessionSummary[]>,
   searching: boolean,
   defaultCollapsed = false,
 ): void {
@@ -522,6 +609,7 @@ function appendProjectGroups(
     );
     if (collapsed) continue;
     for (const session of group.sessions) {
+      const rootKey = threadKey(session);
       threadsEl.appendChild(
         makeThreadButton(state, {
           threadId: session.threadId,
@@ -540,11 +628,48 @@ function appendProjectGroups(
           nested: true,
         }),
       );
+      const subagents = subagentsByRoot.get(rootKey) ?? [];
+      if (!showSubagentThreads || subagents.length === 0) continue;
+      const expanded = expandedSubagentRoots.has(rootKey);
+      threadsEl.appendChild(
+        makeSubagentGroupButton(subagents, !expanded, () => {
+          if (expandedSubagentRoots.has(rootKey)) {
+            expandedSubagentRoots.delete(rootKey);
+          } else {
+            expandedSubagentRoots.add(rootKey);
+          }
+          if (latestState) renderThreads(latestState);
+        }),
+      );
+      if (!expanded) continue;
+      for (const subagent of subagents) {
+        threadsEl.appendChild(
+          makeThreadButton(state, {
+            threadId: subagent.threadId,
+            title: subagent.title || 'Subagent',
+            subtitle: `subagent · ${subagent.status}${
+              subagent.status === 'active'
+                ? ''
+                : ` · ${formatDuration(subagent.idleForMs)}`
+            }`,
+            source: subagent.source,
+            needsUser: subagent.needsUser,
+            reason: subagent.attentionReason,
+            nested: true,
+            subagent: true,
+          }),
+        );
+      }
     }
   }
 }
 
 function renderThreads(state: MenubarState): void {
+  const topLevelSessions = state.sessions.filter(
+    (session) => !session.isInternal,
+  );
+  const subagentsByRoot = groupSubagentsByRoot(state.sessions);
+  const subagentCount = state.sessions.length - topLevelSessions.length;
   threadsEl.innerHTML = '';
   threadsEl.appendChild(
     makeThreadButton(state, {
@@ -553,7 +678,7 @@ function renderThreads(state: MenubarState): void {
       subtitle:
         state.needsUserCount > 0
           ? `${state.needsUserCount} waiting for you`
-          : `${state.recentSessionCount} recent · ${state.sessions.length} total`,
+          : `${state.recentSessionCount} recent · ${topLevelSessions.length} threads`,
       needsUser: state.needsUserCount > 0,
       reason:
         state.needsUserCount > 0
@@ -563,29 +688,25 @@ function renderThreads(state: MenubarState): void {
   );
 
   const query = searchQuery.trim().toLowerCase();
-  const matching = query
-    ? state.sessions.filter((session) =>
-        [
-          session.projectName,
-          session.projectPath,
-          session.title,
-          session.source,
-          session.id,
-          session.status,
-          session.currentActivity,
-          session.attentionReason,
-        ].some((value) => value.toLowerCase().includes(query)),
-      )
-    : state.sessions;
-
-  const { recent, older } = splitThreadsByAge(matching);
-  appendProjectGroups(state, groupThreadsByProject(recent), Boolean(query));
+  if (query) {
+    renderSearchResults(state, query);
+    return;
+  }
+  searchStatusEl.hidden = true;
+  searchStatusEl.classList.remove('error');
+  const { recent, older } = splitThreadsByAge(topLevelSessions);
+  appendProjectGroups(
+    state,
+    groupThreadsByProject(recent),
+    subagentsByRoot,
+    false,
+  );
 
   if (older.length > 0) {
     const olderButton = document.createElement('button');
     olderButton.type = 'button';
     olderButton.className = 'thread-group older';
-    const expanded = Boolean(query) || !olderCollapsed;
+    const expanded = !olderCollapsed;
     olderButton.setAttribute('aria-expanded', String(expanded));
 
     const disclosure = document.createElement('span');
@@ -607,18 +728,178 @@ function renderThreads(state: MenubarState): void {
       appendProjectGroups(
         state,
         groupThreadsByProject(older),
-        Boolean(query),
+        subagentsByRoot,
+        false,
         true,
       );
     }
   }
+}
 
-  if (query && matching.length === 0) {
+function renderSearchResults(state: MenubarState, query: string): void {
+  const bySession = new Map(
+    state.sessions.map((session) => [
+      `${session.source}:${session.id}`,
+      session,
+    ]),
+  );
+  const rootBySubagent = new Map<string, SessionSummary>();
+  for (const [rootKey, subagents] of groupSubagentsByRoot(state.sessions)) {
+    const root = bySession.get(rootKey);
+    if (!root) continue;
+    for (const subagent of subagents) {
+      rootBySubagent.set(`${subagent.source}:${subagent.id}`, root);
+    }
+  }
+  const localMatches = state.sessions
+    .filter((session) =>
+      [
+        session.projectName,
+        session.projectPath,
+        session.title,
+        session.source,
+        session.id,
+        session.status,
+        session.currentActivity,
+        session.attentionReason,
+      ].some((value) => value.toLocaleLowerCase().includes(query)),
+    )
+    .map(
+      (session): ThreadSearchResult => ({
+        sessionId: session.id,
+        source: session.source,
+        kind: 'metadata',
+        snippet: [],
+        score: 0,
+      }),
+    );
+  const results = searchResults ?? localMatches;
+
+  searchStatusEl.hidden = false;
+  searchStatusEl.classList.toggle('error', state.searchIndex.phase === 'error');
+  if (query.length < 3) {
+    searchStatusEl.textContent = 'Type 3 characters to search contents';
+  } else if (state.searchIndex.phase === 'error') {
+    searchStatusEl.textContent = 'Content index unavailable · showing metadata matches';
+  } else if (searchError) {
+    searchStatusEl.classList.add('error');
+    searchStatusEl.textContent = searchError;
+  } else if (
+    state.searchIndex.phase === 'starting' ||
+    state.searchIndex.phase === 'indexing'
+  ) {
+    const percent =
+      state.searchIndex.totalBytes > 0
+        ? Math.floor(
+            (state.searchIndex.indexedBytes / state.searchIndex.totalBytes) * 100,
+          )
+        : 0;
+    searchStatusEl.textContent =
+      `Searching indexed content · ${Math.max(0, Math.min(100, percent))}% ready`;
+  } else if (state.searchIndex.phase === 'optimizing') {
+    searchStatusEl.textContent = 'Finishing content index…';
+  } else if (searchInFlight) {
+    searchStatusEl.textContent = 'Searching thread contents…';
+  } else {
+    searchStatusEl.textContent = `${results.length} result${
+      results.length === 1 ? '' : 's'
+    }`;
+  }
+
+  for (const result of results) {
+    const session = bySession.get(`${result.source}:${result.sessionId}`);
+    if (!session) continue;
+    const matchLabel = searchMatchLabel(result.kind);
+    const root = rootBySubagent.get(`${session.source}:${session.id}`);
+    const rootTitle = root?.title || root?.projectName;
+    const subtitle = session.isInternal
+      ? `${session.projectName} · subagent${
+          rootTitle ? ` of ${rootTitle}` : ''
+        }`
+      : `${session.projectName} · ${matchLabel}`;
+    threadsEl.appendChild(
+      makeThreadButton(state, {
+        threadId: session.threadId,
+        title: session.title || session.projectName,
+        subtitle,
+        subtitlePrefix: session.isInternal ? `${matchLabel} · ` : '',
+        snippet: result.kind === 'metadata' ? [] : result.snippet,
+        source: session.source,
+        needsUser: session.needsUser,
+        reason: session.attentionReason,
+        searchResult: true,
+      }),
+    );
+  }
+
+  if (results.length === 0 && !searchInFlight) {
     const empty = document.createElement('div');
     empty.className = 'no-thread-results';
-    empty.textContent = 'No matching threads';
+    empty.textContent =
+      state.searchIndex.phase === 'indexing'
+        ? 'No match in indexed threads yet'
+        : 'No matching thread content';
     threadsEl.appendChild(empty);
   }
+}
+
+function searchMatchLabel(kind: SearchMatchKind): string {
+  switch (kind) {
+    case 'user':
+      return 'your prompt';
+    case 'assistant':
+      return 'agent reply';
+    case 'tool':
+      return 'command or file';
+    case 'error':
+      return 'error';
+    case 'side_user':
+      return 'your side chat';
+    case 'side_assistant':
+      return 'Aside reply';
+    default:
+      return 'thread details';
+  }
+}
+
+function scheduleThreadSearch(delayMs = 65): void {
+  if (searchTimer) clearTimeout(searchTimer);
+  const query = searchQuery.trim();
+  if (query.length < 3) {
+    searchInFlight = false;
+    searchError = null;
+    searchResults = null;
+    return;
+  }
+  const sequence = ++searchSequence;
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    searchInFlight = true;
+    searchError = null;
+    if (latestState) renderThreads(latestState);
+    void window.aside
+      .searchThreads(query)
+      .then((results) => {
+        if (
+          sequence !== searchSequence ||
+          query !== searchQuery.trim()
+        ) {
+          return;
+        }
+        searchResults = results;
+      })
+      .catch(() => {
+        if (sequence === searchSequence) {
+          searchResults = null;
+          searchError = 'Content search unavailable · showing metadata matches';
+        }
+      })
+      .finally(() => {
+        if (sequence !== searchSequence) return;
+        searchInFlight = false;
+        if (latestState) renderThreads(latestState);
+      });
+  }, delayMs);
 }
 
 function renderModels(state: MenubarState): void {
@@ -694,7 +975,7 @@ function renderMessages(state: MenubarState): void {
     const session = activeSession(state);
     const title = document.createElement('strong');
     title.textContent = session
-      ? `Ask about ${session.projectName}`
+      ? `Ask about ${session.title || session.projectName}`
       : state.sessions.length > 0
         ? 'Ask about your agents'
         : 'No agent sessions';
@@ -734,17 +1015,36 @@ function renderMessages(state: MenubarState): void {
 
 function render(state: MenubarState): void {
   latestState = state;
+  if (
+    searchQuery.trim().length >= 3 &&
+    state.searchIndex.indexedThreads !== lastIndexedThreadCount &&
+    !searchInFlight &&
+    searchTimer === null
+  ) {
+    lastIndexedThreadCount = state.searchIndex.indexedThreads;
+    scheduleThreadSearch(120);
+  }
   const session = activeSession(state);
+  const topLevelCount = state.sessions.filter(
+    (item) => !item.isInternal,
+  ).length;
+  const subagentCount = state.sessions.length - topLevelCount;
   scopeTitleEl.textContent = session?.title || session?.projectName || 'All agents';
   scopeMetaEl.textContent = session
-    ? `${session.projectName} · ${session.source} · ${session.status} · persistent thread`
-    : `${state.recentSessionCount} recent · ${state.sessions.length} total · fleet conversation`;
+    ? `${session.projectName} · ${session.isInternal ? 'subagent · ' : ''}${
+        session.source
+      } · ${session.status} · persistent thread`
+    : `${state.recentSessionCount} recent · ${topLevelCount} threads${
+        showSubagentThreads && subagentCount > 0
+          ? ` · ${subagentCount} subagents`
+          : ''
+      } · fleet conversation`;
   needsCountEl.textContent =
     state.needsUserCount > 0
       ? `${state.needsUserCount} need${state.needsUserCount === 1 ? 's' : ''} you`
       : '';
   needsCountEl.hidden = state.needsUserCount === 0;
-  threadCountEl.textContent = String(state.sessions.length);
+  threadCountEl.textContent = String(topLevelCount);
   const activeAuth = providerAuth.find((status) => status.provider === state.provider);
   const activeProviderLabel = activeAuth
     ? providerDisplayName(activeAuth.provider)
@@ -770,7 +1070,7 @@ function render(state: MenubarState): void {
 
   inputEl.placeholder = canAsk
     ? session
-      ? `Ask about ${session.projectName}…`
+      ? `Ask about ${session.title || session.projectName}…`
       : 'Ask across all agents…'
       : authPhase === 'loading'
         ? 'Checking account status…'
@@ -811,10 +1111,22 @@ function render(state: MenubarState): void {
       : `${usable.length} account${usable.length === 1 ? '' : 's'}`;
   storagePathEl.textContent = state.storagePath;
   diagnosticsEl.textContent =
-    `${state.sessions.length} detected threads · ${state.recentSessionCount} recent · ` +
+    `${topLevelCount} threads · ${subagentCount} subagents · ${state.recentSessionCount} recent · ` +
     `${state.needsUserCount} need you · ` +
     `${state.provider}/${state.model} · ` +
     `${usable.length} connected`;
+  searchIndexStatusEl.textContent =
+    state.searchIndex.phase === 'error'
+      ? `Index unavailable: ${state.searchIndex.message ?? 'unknown error'}`
+      : state.searchIndex.phase === 'ready'
+        ? `${state.searchIndex.indexedThreads} threads indexed on this Mac`
+        : state.searchIndex.phase === 'optimizing'
+          ? 'Optimizing the local content index…'
+          : `${state.searchIndex.indexedThreads} of ${state.searchIndex.totalThreads} threads indexed…`;
+  rebuildSearchIndexEl.disabled =
+    state.searchIndex.phase === 'starting' ||
+    state.searchIndex.phase === 'indexing' ||
+    state.searchIndex.phase === 'optimizing';
 
   renderThreads(state);
   renderModels(state);
@@ -884,8 +1196,21 @@ settingsButtonEl.addEventListener('click', () => {
   showSettings();
 });
 settingsCloseEl.addEventListener('click', hideSettings);
+showSubagentThreadsEl.checked = showSubagentThreads;
+showSubagentThreadsEl.addEventListener('change', () => {
+  showSubagentThreads = showSubagentThreadsEl.checked;
+  localStorage.setItem(
+    showSubagentsStorageKey,
+    showSubagentThreads ? '1' : '0',
+  );
+  if (latestState) render(latestState);
+});
 openDataEl.addEventListener('click', () => void window.aside.openDataFolder());
 quitEl.addEventListener('click', () => void window.aside.quit());
+rebuildSearchIndexEl.addEventListener('click', () => {
+  rebuildSearchIndexEl.disabled = true;
+  void window.aside.rebuildSearchIndex();
+});
 checkUpdateEl.addEventListener('click', () => {
   checkUpdateEl.disabled = true;
   updateStatusEl.textContent = 'Checking for updates…';
@@ -946,6 +1271,10 @@ privacyDismissEl.addEventListener('click', () => {
 
 searchEl.addEventListener('input', () => {
   searchQuery = searchEl.value;
+  searchResults = null;
+  searchError = null;
+  searchSequence += 1;
+  scheduleThreadSearch();
   if (latestState) renderThreads(latestState);
 });
 
@@ -953,6 +1282,12 @@ searchEl.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && searchEl.value) {
     searchEl.value = '';
     searchQuery = '';
+    searchResults = null;
+    searchInFlight = false;
+    searchError = null;
+    searchSequence += 1;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
     if (latestState) renderThreads(latestState);
     event.stopPropagation();
   }

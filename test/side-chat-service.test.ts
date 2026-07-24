@@ -199,6 +199,32 @@ describe('SideChatService.snapshot', () => {
     expect(svc.snapshot().totalSessionCount).toBe(3);
   });
 
+  it('keeps internal workers out of fleet context but selectable on demand', () => {
+    const svc = new SideChatService(new FakeEngine(), {}, clock);
+    svc.syncSessions(
+      [
+        session('root', { source: 'codex' }),
+        session('worker', {
+          source: 'codex',
+          isInternal: true,
+          parentSessionId: 'root',
+        }),
+      ],
+      new Map(),
+    );
+
+    expect(svc.snapshot().sessions.map((item) => item.id)).toEqual(['root']);
+    expect(svc.snapshot().totalSessionCount).toBe(1);
+    expect(svc.getThreads().map((thread) => thread.id)).toEqual(['fleet']);
+
+    svc.selectThread('session:worker');
+    expect(svc.snapshot().sessions.map((item) => item.id)).toEqual(['worker']);
+    expect(svc.getThreads().map((thread) => thread.id)).toEqual([
+      'fleet',
+      'session:worker',
+    ]);
+  });
+
   it('reports an empty world when nothing is running', () => {
     const svc = new SideChatService(new FakeEngine(), {}, clock);
     expect(svc.snapshot().sessions).toEqual([]);

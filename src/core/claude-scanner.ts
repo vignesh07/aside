@@ -14,6 +14,15 @@ interface DiscoveredClaudeSession {
 interface ClaudeScannerOptions {
   claudeDir?: string;
   nowMs?: number;
+  /** Include Claude Code worker transcripts stored beneath their parent task. */
+  includeInternal?: boolean;
+}
+
+interface ClaudeTranscript {
+  jsonlPath: string;
+  sessionId: string;
+  isInternal: boolean;
+  parentSessionId?: string;
 }
 
 const metadataCache = new Map<
@@ -46,17 +55,16 @@ export function scanClaudeSessions(options: ClaudeScannerOptions = {}): Discover
     }
     if (!stat.isDirectory()) continue;
 
-    let jsonlFiles: string[];
-    try {
-      jsonlFiles = fs.readdirSync(fullProjDir).filter((f) => f.endsWith('.jsonl'));
-    } catch {
-      continue;
-    }
-
-    for (const jsonlFile of jsonlFiles) {
-      const jsonlPath = path.join(fullProjDir, jsonlFile);
-      const sessionId = jsonlFile.replace('.jsonl', '');
-
+    for (const transcript of listClaudeTranscripts(
+      fullProjDir,
+      options.includeInternal ?? false,
+    )) {
+      const {
+        jsonlPath,
+        sessionId,
+        isInternal,
+        parentSessionId,
+      } = transcript;
       let jsonlStat: fs.Stats;
       try {
         jsonlStat = fs.statSync(jsonlPath);
@@ -84,6 +92,8 @@ export function scanClaudeSessions(options: ClaudeScannerOptions = {}): Discover
         session: {
           id: sessionId,
           source: 'claude',
+          isInternal,
+          parentSessionId,
           projectName: metadata.cwd
             ? extractProjectNameFromCwd(metadata.cwd)
             : extractProjectName(projDir),
@@ -107,6 +117,65 @@ export function scanClaudeSessions(options: ClaudeScannerOptions = {}): Discover
   }
 
   return results;
+}
+
+/**
+ * Claude Code stores user-owned transcripts directly in a project directory:
+ *
+ *   <project>/<session UUID>.jsonl
+ *
+ * Its workers live one level below the owning task:
+ *
+ *   <project>/<parent session UUID>/subagents/agent-<agent ID>.jsonl
+ *
+ * The records inside a worker transcript repeat the parent's `sessionId`, so
+ * the filename—not that field—is the worker's durable identity. Restricting
+ * recursion to this documented shape also avoids mistaking unrelated JSONL
+ * artifacts for sessions.
+ */
+function listClaudeTranscripts(
+  projectDir: string,
+  includeInternal: boolean,
+): ClaudeTranscript[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(projectDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const transcripts: ClaudeTranscript[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      transcripts.push({
+        jsonlPath: path.join(projectDir, entry.name),
+        sessionId: entry.name.slice(0, -'.jsonl'.length),
+        isInternal: false,
+      });
+      continue;
+    }
+
+    if (!includeInternal || !entry.isDirectory()) continue;
+    const parentSessionId = entry.name;
+    const subagentsDir = path.join(projectDir, parentSessionId, 'subagents');
+    let subagents: fs.Dirent[];
+    try {
+      subagents = fs.readdirSync(subagentsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const subagent of subagents) {
+      if (!subagent.isFile() || !subagent.name.endsWith('.jsonl')) continue;
+      transcripts.push({
+        jsonlPath: path.join(subagentsDir, subagent.name),
+        sessionId: subagent.name.slice(0, -'.jsonl'.length),
+        isInternal: true,
+        parentSessionId,
+      });
+    }
+  }
+  return transcripts;
 }
 
 function readContextStates(claudeDir: string): ClaudeContextState[] {
