@@ -793,12 +793,24 @@ button {
   line-height: 1.02;
 }
 
-.feature-copy > p:last-child {
+.feature-copy > p:not(.eyebrow) {
   max-width: 450px;
   margin: 24px 0 0;
   color: var(--muted);
   font-size: 16px;
   line-height: 1.65;
+}
+
+.feature-copy > .feature-note {
+  margin-top: 14px;
+  color: #8e8a82;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.feature-note strong {
+  color: var(--ink);
+  font-weight: 620;
 }
 
 .feature-visual {

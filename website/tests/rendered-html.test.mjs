@@ -36,6 +36,11 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Ask about the work\./);
   assert.match(html, /Don(?:&#x27;|')t interrupt it\./);
   assert.match(html, /Dashboards show status\. Aside lets you ask why\./);
+  assert.match(html, /Search the work, not just the title/);
+  assert.match(html, /Find the thread from what happened inside it\./);
+  assert.match(html, /Coming next:/);
+  assert.match(html, /Codex subagents, folded beneath/);
+  assert.match(html, /Search queries never leave your machine\./);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
   assert.match(
     html,

@@ -316,29 +316,34 @@ export default function Home() {
           <article className="feature-row reveal">
             <div className="feature-index">01</div>
             <div className="feature-copy">
-              <p className="eyebrow">Every thread stays findable</p>
-              <h3>Walk away. Come back caught up.</h3>
+              <p className="eyebrow">Search the work, not just the title</p>
+              <h3>Find the thread from what happened inside it.</h3>
               <p>
-                Threads are grouped by project folder. Quiet work moves under
-                Older Threads after seven days, but remains searchable and
-                ready for side chat.
+                Search prompts, agent replies, commands, file paths, failures,
+                and Aside side chats across Codex, Claude Code, and Pi—even
+                older work. The index stays on your Mac.
+              </p>
+              <p className="feature-note">
+                <strong>Coming next:</strong> Codex subagents, folded beneath
+                the task that spawned them.
               </p>
             </div>
             <div className="feature-visual project-visual" aria-hidden="true">
-              <div className="visual-search">⌕&nbsp;&nbsp; Search threads</div>
+              <div className="visual-search">
+                ⌕&nbsp;&nbsp; Railway auto-deploy
+              </div>
               <div className="folder-row open">
                 <span>⌄</span>
                 <strong>atlas</strong>
-                <small>3</small>
+                <small>2 results</small>
               </div>
               <div className="compact-thread active">
-                <i className="needs-dot" />
                 <span>Prepare the release</span>
-                <small>now</small>
+                <small>agent reply</small>
               </div>
               <div className="compact-thread">
-                <span>Audit the database</span>
-                <small>8m</small>
+                <span>Fix the deployment</span>
+                <small>command</small>
               </div>
               <div className="folder-row">
                 <span>›</span>
@@ -412,10 +417,11 @@ export default function Home() {
           <div className="privacy-rules">
             <article className="reveal">
               <span>01</span>
-              <h3>Your history stays on this Mac.</h3>
+              <h3>Search and history stay on this Mac.</h3>
               <p>
-                The thread index and every side-chat conversation are stored
-                locally with user-only permissions.
+                The searchable index, thread list, and every side chat are
+                stored locally with user-only permissions. Search queries never
+                leave your machine.
               </p>
             </article>
             <article className="reveal">
@@ -527,9 +533,10 @@ export default function Home() {
               Does everything stay local? <span>+</span>
             </summary>
             <p>
-              Your index and side-chat history do. When you choose a cloud
-              model, Aside sends scoped, redacted transcript context to that
-              provider. Choose Ollama to keep model context local.
+              Your thread and content-search indexes, plus side-chat history,
+              do. When you choose a cloud model, Aside sends scoped, redacted
+              transcript context to that provider. Choose Ollama to keep model
+              context local.
             </p>
           </details>
           <details className="reveal">
