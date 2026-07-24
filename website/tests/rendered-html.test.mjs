@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-async function render(pathname = "/", method = "GET") {
+async function render(pathname = "/", method = "GET", init = {}) {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
+  const headers = new Headers({
+    accept: "text/html",
+    "x-forwarded-host": "aside.example",
+    "x-forwarded-proto": "https",
+  });
+
+  for (const [name, value] of new Headers(init.headers)) {
+    headers.set(name, value);
+  }
 
   return worker.fetch(
     new Request(`https://aside.example${pathname}`, {
+      ...init,
       method,
-      headers: {
-        accept: "text/html",
-        "x-forwarded-host": "aside.example",
-        "x-forwarded-proto": "https",
-      },
+      headers,
     }),
     {
       ASSETS: {
@@ -85,4 +91,73 @@ test("serves a no-store health endpoint", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), { status: "ok" });
+});
+
+test("keeps the analytics dashboard locked until an admin key is configured", async () => {
+  const response = await render("/admin");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /Analytics isn(?:&#x27;|'|’)t configured yet\./);
+  assert.match(html, /ASIDE_ADMIN_KEY/);
+  assert.match(html, /name="robots" content="noindex, nofollow, nocache"/);
+  assert.doesNotMatch(html, /Aside downloads/);
+});
+
+test("keeps admin auth redirects same-origin and clears path-scoped cookies", async () => {
+  process.env.ASIDE_ADMIN_KEY = "aside-rendered-test-key-32-bytes-long";
+
+  try {
+    const invalidResponse = await render("/admin/session", "POST", {
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ key: "wrong" }),
+    });
+    assert.equal(invalidResponse.status, 303);
+    assert.equal(invalidResponse.headers.get("location"), "/admin?error=invalid");
+    assert.match(
+      invalidResponse.headers.get("set-cookie") ?? "",
+      /Path=\/admin/i,
+    );
+    assert.match(
+      invalidResponse.headers.get("set-cookie") ?? "",
+      /Max-Age=0/i,
+    );
+
+    const loginResponse = await render("/admin/session", "POST", {
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        key: process.env.ASIDE_ADMIN_KEY,
+      }),
+    });
+    assert.equal(loginResponse.status, 303);
+    assert.equal(loginResponse.headers.get("location"), "/admin");
+
+    const sessionCookie = loginResponse.headers.get("set-cookie") ?? "";
+    assert.match(sessionCookie, /HttpOnly/i);
+    assert.match(sessionCookie, /Secure/i);
+    assert.match(sessionCookie, /SameSite=strict/i);
+    assert.match(sessionCookie, /Path=\/admin/i);
+
+    const logoutResponse = await render("/admin/logout", "POST", {
+      headers: {
+        cookie: sessionCookie.split(";", 1)[0],
+      },
+    });
+    assert.equal(logoutResponse.status, 303);
+    assert.equal(logoutResponse.headers.get("location"), "/admin");
+    assert.match(
+      logoutResponse.headers.get("set-cookie") ?? "",
+      /Path=\/admin/i,
+    );
+    assert.match(
+      logoutResponse.headers.get("set-cookie") ?? "",
+      /Max-Age=0/i,
+    );
+  } finally {
+    delete process.env.ASIDE_ADMIN_KEY;
+  }
 });

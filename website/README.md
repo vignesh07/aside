@@ -29,3 +29,20 @@ npm run lint
 
 `npm test` creates the production Worker build and checks the rendered page,
 metadata, and stable download routes.
+
+## Download analytics
+
+The Railway deployment records one anonymous event when a browser starts a DMG
+download through `/download/mac-arm64` or `/download/mac-intel`. It does not
+store IP addresses, user agents, or referrers, and HEAD checks are not counted.
+
+The events live in `aside-analytics.sqlite` on the volume mounted to
+`aside-web`. The private dashboard is available at `/admin` after setting:
+
+```bash
+ASIDE_ADMIN_KEY="$(openssl rand -base64 32)"
+```
+
+The key is exchanged for a 12-hour, HTTP-only admin session cookie. The
+dashboard reports rolling 7-day, rolling 30-day, and all-time counts; tracking
+begins when the analytics-enabled website deployment goes live.

@@ -1,7 +1,12 @@
-import { redirectToRelease } from "../release-route";
+import {
+  redirectToRelease,
+  trackDownloadAndRedirect,
+} from "../release-route";
 
-export function GET(): Response {
-  return redirectToRelease("/download/mac-intel");
+export function GET(): Promise<Response> {
+  return trackDownloadAndRedirect("mac-intel", "/download/mac-intel");
 }
 
-export const HEAD = GET;
+export function HEAD(): Response {
+  return redirectToRelease("/download/mac-intel");
+}
