@@ -6,6 +6,21 @@ directories:
   output: release
   buildResources: assets
 
+# electron-updater reads this fixed generic feed from app-update.yml inside the
+# signed bundle. Railway serves latest-mac.yml plus immutable ZIP artifacts;
+# DMGs remain the manual recovery/install path.
+publish:
+  provider: generic
+  url: https://aside-production-fd82.up.railway.app/updates
+  channel: latest
+  # Railway fronts an S3-compatible bucket with signed redirects. Single-range
+  # requests preserve differential ZIP downloads across that boundary.
+  useMultipleRangeRequest: false
+
+# Use the current multi-file metadata format so one feed can safely describe
+# both Apple Silicon and Intel ZIPs.
+electronUpdaterCompatibility: ">= 2.16"
+
 # Remove Electron execution paths this app does not use. Together with ASAR
 # integrity, this prevents environment variables or a loose app directory from
 # substituting code before the signed bundle starts.

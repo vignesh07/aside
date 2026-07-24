@@ -35,12 +35,15 @@ interface AsideBridge {
   disconnectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
   openProviderHelp(provider: ProviderAuthId): Promise<void>;
   getAppVersion(): Promise<string>;
+  getUpdateStatus(): Promise<AppUpdateStatus>;
   checkForUpdates(): Promise<AppUpdateStatus>;
-  downloadUpdate(): Promise<void>;
+  restartToUpdate(): Promise<void>;
+  openManualUpdate(): Promise<void>;
   openDataFolder(): Promise<void>;
   quit(): Promise<void>;
   onUpdate(callback: (state: MenubarState) => void): () => void;
   onProviderAuthUpdate(callback: (state: ProviderAuthStatus[]) => void): () => void;
+  onAppUpdate(callback: (status: AppUpdateStatus) => void): () => void;
   onShowSettings(callback: () => void): () => void;
 }
 
@@ -91,7 +94,13 @@ const accountsSettingsEl = document.getElementById('accounts-settings') as HTMLB
 const appVersionEl = document.getElementById('app-version') as HTMLSpanElement;
 const updateStatusEl = document.getElementById('update-status') as HTMLSpanElement;
 const checkUpdateEl = document.getElementById('check-update') as HTMLButtonElement;
-const downloadUpdateEl = document.getElementById('download-update') as HTMLButtonElement;
+const restartUpdateEl = document.getElementById('restart-update') as HTMLButtonElement;
+const manualUpdateEl = document.getElementById('manual-update') as HTMLButtonElement;
+const updateProgressEl = document.getElementById('update-progress') as HTMLSpanElement;
+const updateProgressBarEl = document.getElementById('update-progress-bar') as HTMLSpanElement;
+const updateReadyEl = document.getElementById('update-ready') as HTMLDivElement;
+const updateReadyCopyEl = document.getElementById('update-ready-copy') as HTMLSpanElement;
+const updateReadyRestartEl = document.getElementById('update-ready-restart') as HTMLButtonElement;
 
 let latestState: MenubarState | null = null;
 let lastRenderedThread = '';
@@ -106,6 +115,7 @@ let authError: string | null = null;
 let busyProviderId: ProviderAuthId | null = null;
 let pendingDisconnectId: ProviderAuthId | null = null;
 let lastProviderSurfaceKey = '';
+let appUpdateStatus: AppUpdateStatus | null = null;
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
@@ -138,6 +148,58 @@ function providerMark(provider: ProviderAuthId): string {
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^Error invoking remote method '[^']+':\s*/i, '').slice(0, 180);
+}
+
+function renderAppUpdate(status: AppUpdateStatus): void {
+  appUpdateStatus = status;
+  appVersionEl.textContent = `Aside ${status.currentVersion}`;
+  // A failed native restart/install attempt can return the app to an error and
+  // later to ready again. Re-enable both entry points on every authoritative
+  // updater state instead of leaving a stale click-time disabled flag behind.
+  restartUpdateEl.disabled = false;
+  updateReadyRestartEl.disabled = false;
+  checkUpdateEl.disabled =
+    status.phase === 'checking' ||
+    status.phase === 'downloading' ||
+    status.phase === 'ready';
+  restartUpdateEl.hidden = status.phase !== 'ready';
+  manualUpdateEl.hidden = status.phase !== 'error';
+  updateProgressEl.hidden = status.phase !== 'downloading';
+  updateProgressBarEl.style.width = `${status.percent ?? 0}%`;
+  updateReadyEl.hidden = status.phase !== 'ready';
+
+  const latest = status.latestVersion ? ` ${status.latestVersion}` : '';
+  if (status.phase === 'checking') {
+    updateStatusEl.textContent = 'Checking for updates…';
+  } else if (status.phase === 'downloading') {
+    updateStatusEl.textContent = `Downloading Aside${latest} · ${status.percent ?? 0}%`;
+  } else if (status.phase === 'ready') {
+    updateStatusEl.textContent = `Aside${latest} is ready to install.`;
+    updateReadyCopyEl.textContent = `Aside${latest} is ready.`;
+  } else if (status.phase === 'current') {
+    updateStatusEl.textContent = 'Aside is up to date.';
+  } else if (status.phase === 'error') {
+    updateStatusEl.textContent =
+      status.error ?? 'Automatic update failed. Try again in a moment.';
+  } else if (status.phase === 'unsupported') {
+    updateStatusEl.textContent = 'Automatic updates run in the installed app.';
+  } else {
+    updateStatusEl.textContent = 'Updates download automatically.';
+  }
+}
+
+async function restartToUpdate(): Promise<void> {
+  if (appUpdateStatus?.phase !== 'ready') return;
+  restartUpdateEl.disabled = true;
+  updateReadyRestartEl.disabled = true;
+  updateStatusEl.textContent = 'Restarting to install…';
+  try {
+    await window.aside.restartToUpdate();
+  } catch (error) {
+    updateStatusEl.textContent = safeErrorMessage(error);
+    restartUpdateEl.disabled = false;
+    updateReadyRestartEl.disabled = false;
+  }
 }
 
 function updateProviderAuth(statuses: ProviderAuthStatus[]): void {
@@ -826,36 +888,31 @@ openDataEl.addEventListener('click', () => void window.aside.openDataFolder());
 quitEl.addEventListener('click', () => void window.aside.quit());
 checkUpdateEl.addEventListener('click', () => {
   checkUpdateEl.disabled = true;
-  downloadUpdateEl.hidden = true;
   updateStatusEl.textContent = 'Checking for updates…';
   void window.aside
     .checkForUpdates()
-    .then((status) => {
-      appVersionEl.textContent = `Aside ${status.currentVersion}`;
-      if (status.updateAvailable) {
-        updateStatusEl.textContent = `Aside ${status.latestVersion} is available.`;
-        downloadUpdateEl.hidden = false;
-      } else {
-        updateStatusEl.textContent = 'Aside is up to date.';
-      }
-    })
+    .then(renderAppUpdate)
     .catch((error) => {
       updateStatusEl.textContent = safeErrorMessage(error);
     })
     .finally(() => {
-      checkUpdateEl.disabled = false;
+      if (appUpdateStatus?.phase !== 'downloading' && appUpdateStatus?.phase !== 'ready') {
+        checkUpdateEl.disabled = false;
+      }
     });
 });
-downloadUpdateEl.addEventListener('click', () => {
-  downloadUpdateEl.disabled = true;
+restartUpdateEl.addEventListener('click', () => void restartToUpdate());
+updateReadyRestartEl.addEventListener('click', () => void restartToUpdate());
+manualUpdateEl.addEventListener('click', () => {
+  manualUpdateEl.disabled = true;
   updateStatusEl.textContent = 'Opening the signed installer…';
   void window.aside
-    .downloadUpdate()
+    .openManualUpdate()
     .catch((error) => {
       updateStatusEl.textContent = safeErrorMessage(error);
     })
     .finally(() => {
-      downloadUpdateEl.disabled = false;
+      manualUpdateEl.disabled = false;
     });
 });
 document.addEventListener('keydown', (event) => {
@@ -903,13 +960,12 @@ searchEl.addEventListener('keydown', (event) => {
 
 window.aside.onUpdate(render);
 window.aside.onProviderAuthUpdate(updateProviderAuth);
+window.aside.onAppUpdate(renderAppUpdate);
 window.aside.onShowSettings(showSettings);
 void window.aside.getState().then(render);
 void window.aside
-  .getAppVersion()
-  .then((version) => {
-    appVersionEl.textContent = `Aside ${version}`;
-  })
+  .getUpdateStatus()
+  .then(renderAppUpdate)
   .catch(() => {
     appVersionEl.textContent = 'Aside';
     updateStatusEl.textContent = 'Version unavailable.';

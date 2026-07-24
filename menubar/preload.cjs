@@ -13,8 +13,10 @@ contextBridge.exposeInMainWorld('aside', {
   disconnectProvider: (provider) => ipcRenderer.invoke('aside:auth:disconnect', provider),
   openProviderHelp: (provider) => ipcRenderer.invoke('aside:auth:help', provider),
   getAppVersion: () => ipcRenderer.invoke('aside:app-version'),
+  getUpdateStatus: () => ipcRenderer.invoke('aside:update:get'),
   checkForUpdates: () => ipcRenderer.invoke('aside:update:check'),
-  downloadUpdate: () => ipcRenderer.invoke('aside:update:download'),
+  restartToUpdate: () => ipcRenderer.invoke('aside:update:restart'),
+  openManualUpdate: () => ipcRenderer.invoke('aside:update:manual-download'),
   openDataFolder: () => ipcRenderer.invoke('aside:open-data'),
   quit: () => ipcRenderer.invoke('aside:quit'),
   onUpdate: (callback) => {
@@ -26,6 +28,11 @@ contextBridge.exposeInMainWorld('aside', {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('aside:auth:update', listener);
     return () => ipcRenderer.removeListener('aside:auth:update', listener);
+  },
+  onAppUpdate: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('aside:app-update', listener);
+    return () => ipcRenderer.removeListener('aside:app-update', listener);
   },
   onShowSettings: (callback) => {
     const listener = () => callback();

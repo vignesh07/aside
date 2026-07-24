@@ -75,6 +75,20 @@ export async function loadReleaseManifest(client, bucket) {
   return manifest;
 }
 
+export async function loadReleaseObjectText(client, bucket, key) {
+  const response = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    }),
+  );
+  const raw = await response.Body?.transformToString();
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new Error(`Release object is empty: ${key}`);
+  }
+  return raw;
+}
+
 export async function loadReleaseObjectMetadata(client, bucket, key) {
   try {
     const response = await client.send(
@@ -99,25 +113,131 @@ export async function loadReleaseObjectMetadata(client, bucket, key) {
   }
 }
 
+const SHA256 = /^[a-f0-9]{64}$/;
+const SHA512_BASE64 = /^[A-Za-z0-9+/]{86}==$/;
+
+function isPositiveSafeSize(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function isSha512Base64(value) {
+  if (typeof value !== 'string' || !SHA512_BASE64.test(value)) return false;
+  const decoded = Buffer.from(value, 'base64');
+  return decoded.length === 64 && decoded.toString('base64') === value;
+}
+
+function validateArtifact({
+  artifact,
+  expectedFilename,
+  expectedVersion,
+  label,
+  expectedArch,
+  requireSha512 = false,
+}) {
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+    throw new Error(`Release manifest is missing ${label}`);
+  }
+  if (artifact.filename !== expectedFilename) {
+    throw new Error(`Release manifest has an unexpected ${label} filename`);
+  }
+  if (
+    artifact.key !==
+    `releases/v${expectedVersion}/${expectedFilename}`
+  ) {
+    throw new Error(`Release manifest has an unsafe ${label} key`);
+  }
+  if (!isPositiveSafeSize(artifact.size)) {
+    throw new Error(`Release manifest has an invalid ${label} size`);
+  }
+  if (typeof artifact.sha256 !== 'string' || !SHA256.test(artifact.sha256)) {
+    throw new Error(`Release manifest has an invalid ${label} SHA-256`);
+  }
+  if (requireSha512 && !isSha512Base64(artifact.sha512)) {
+    throw new Error(`Release manifest has an invalid ${label} SHA-512`);
+  }
+  if (
+    expectedArch &&
+    (artifact.platform !== 'darwin' || artifact.arch !== expectedArch)
+  ) {
+    throw new Error(`Release manifest has an invalid ${label} architecture`);
+  }
+}
+
 export function validateReleaseManifest(manifest) {
   if (
     !manifest ||
-    manifest.schemaVersion !== 1 ||
+    typeof manifest !== 'object' ||
+    Array.isArray(manifest) ||
+    (manifest.schemaVersion !== 1 && manifest.schemaVersion !== 2) ||
+    manifest.product !== 'Aside' ||
     typeof manifest.version !== 'string' ||
+    !/^\d+\.\d+\.\d+$/.test(manifest.version) ||
     !manifest.artifacts ||
-    typeof manifest.artifacts !== 'object'
+    typeof manifest.artifacts !== 'object' ||
+    Array.isArray(manifest.artifacts)
   ) {
     throw new Error('Release manifest has an unsupported shape');
   }
-  for (const platform of ['mac-arm64', 'mac-intel']) {
-    const artifact = manifest.artifacts[platform];
-    if (
-      !artifact ||
-      typeof artifact.key !== 'string' ||
-      typeof artifact.filename !== 'string' ||
-      typeof artifact.sha256 !== 'string'
-    ) {
-      throw new Error(`Release manifest is missing ${platform}`);
-    }
+
+  const manualArtifacts = [
+    {
+      platform: 'mac-arm64',
+      arch: 'arm64',
+      filename: `Aside-${manifest.version}-arm64.dmg`,
+    },
+    {
+      platform: 'mac-intel',
+      arch: 'x64',
+      filename: `Aside-${manifest.version}.dmg`,
+    },
+  ];
+  for (const expected of manualArtifacts) {
+    validateArtifact({
+      artifact: manifest.artifacts[expected.platform],
+      expectedFilename: expected.filename,
+      expectedVersion: manifest.version,
+      expectedArch: expected.arch,
+      label: expected.platform,
+    });
+  }
+  if (manifest.schemaVersion === 1) return;
+
+  const metadata = manifest.updater?.metadata;
+  validateArtifact({
+    artifact: metadata,
+    expectedFilename: 'latest-mac.yml',
+    expectedVersion: manifest.version,
+    label: 'updater metadata',
+  });
+
+  const updaterArtifacts = [
+    {
+      platform: 'mac-arm64',
+      arch: 'arm64',
+      filename: `Aside-${manifest.version}-arm64-mac.zip`,
+    },
+    {
+      platform: 'mac-intel',
+      arch: 'x64',
+      filename: `Aside-${manifest.version}-mac.zip`,
+    },
+  ];
+  for (const expected of updaterArtifacts) {
+    const label = `updater ${expected.platform}`;
+    const artifact = manifest.updater?.artifacts?.[expected.platform];
+    validateArtifact({
+      artifact,
+      expectedFilename: expected.filename,
+      expectedVersion: manifest.version,
+      expectedArch: expected.arch,
+      label,
+      requireSha512: true,
+    });
+    validateArtifact({
+      artifact: artifact.blockmap,
+      expectedFilename: `${expected.filename}.blockmap`,
+      expectedVersion: manifest.version,
+      label: `${label} blockmap`,
+    });
   }
 }

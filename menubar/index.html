@@ -415,6 +415,51 @@
         margin: 0 auto;
         padding: 7px 18px 14px;
       }
+      #update-ready {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 8px;
+        padding: 7px 8px 7px 10px;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: color-mix(in srgb, var(--accent) 7%, var(--window));
+        font-size: 10px;
+        animation: update-arrive .28s cubic-bezier(.2, .8, .2, 1) both;
+      }
+      #update-ready::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      #update-ready-copy {
+        min-width: 0;
+        overflow: hidden;
+        flex: 1;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #update-ready button {
+        padding: 3px 8px;
+        color: var(--window);
+        border: 0;
+        border-radius: 6px;
+        background: var(--text);
+        font-size: 10px;
+        font-weight: 570;
+        cursor: default;
+      }
+      @keyframes update-arrive {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #update-ready { animation: none; }
+      }
       #privacy-banner {
         display: flex;
         align-items: center;
@@ -679,6 +724,21 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      #update-progress {
+        height: 2px;
+        overflow: hidden;
+        margin-top: 5px;
+        border-radius: 2px;
+        background: var(--line-strong);
+      }
+      #update-progress-bar {
+        display: block;
+        width: 0;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent);
+        transition: width .18s ease-out;
+      }
       .settings-update-actions { display: flex; flex: none; gap: 6px; }
       .settings-update-actions button:disabled { opacity: .48; }
       #settings-providers {
@@ -786,6 +846,10 @@
         </div>
         <div id="messages"></div>
         <div class="composer-shell">
+          <div id="update-ready" role="status" aria-live="polite" hidden>
+            <span id="update-ready-copy">An Aside update is ready.</span>
+            <button id="update-ready-restart" type="button">Restart</button>
+          </div>
           <div id="privacy-banner">
             <span><strong>Cloud context is scoped.</strong> Credential patterns are redacted first, but sensitive prose can be missed.</span>
             <button id="privacy-dismiss" type="button">Dismiss</button>
@@ -857,11 +921,13 @@
             <div class="settings-update">
               <div class="settings-update-copy">
                 <span id="app-version">Aside</span>
-                <span id="update-status" role="status" aria-live="polite">Signed release for this Mac.</span>
+                <span id="update-status" role="status" aria-live="polite">Updates download automatically.</span>
+                <span id="update-progress" hidden><span id="update-progress-bar"></span></span>
               </div>
               <div class="settings-update-actions">
-                <button id="check-update" class="secondary" type="button">Check for Updates</button>
-                <button id="download-update" class="secondary" type="button" hidden>Download</button>
+                <button id="check-update" class="secondary" type="button">Check Now</button>
+                <button id="restart-update" class="secondary" type="button" hidden>Restart</button>
+                <button id="manual-update" class="secondary" type="button" hidden>Installer…</button>
               </div>
             </div>
           </div>

@@ -13,6 +13,7 @@ import {
   shell,
   protocol,
 } from 'electron';
+import electronUpdater from 'electron-updater';
 import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -41,8 +42,10 @@ import {
   recommendedModelForProvider,
 } from './auth-ui.js';
 import {
-  checkForAppUpdate,
+  AppUpdateController,
   downloadUrlForArch,
+  type AppUpdateStatus,
+  type AutoUpdaterLike,
 } from './app-update.js';
 import { shouldNotifyForAttention } from './attention-notification.js';
 import {
@@ -54,6 +57,9 @@ import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WINDOW_WIDTH = 760;
 const WINDOW_HEIGHT = 620;
+const UPDATE_INITIAL_DELAY_MS = 15_000;
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+const { autoUpdater } = electronUpdater;
 
 /**
  * Dev flag: pin the dropdown open at a fixed position instead of hanging it off
@@ -104,9 +110,12 @@ let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
 let providerAuth: ProviderAuthCoordinator | null = null;
+let appUpdates: AppUpdateController | null = null;
 let lastNeedsUser = new Set<string>();
 let attentionInitialized = false;
 let authFlowActive = false;
+let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 const windowRecovery = new WindowRecoveryController(() => showWindow());
@@ -221,6 +230,38 @@ function broadcastProviderAuth(statuses: ProviderAuthStatus[]): void {
   }
 }
 
+function broadcastAppUpdate(status: AppUpdateStatus): void {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('aside:app-update', status);
+  }
+  updateTrayToolTip();
+}
+
+function updateTrayToolTip(state = backend?.getState()): void {
+  if (!tray) return;
+  const update = appUpdates?.getStatus();
+  if (update?.phase === 'ready') {
+    tray.setToolTip(
+      `Aside ${update.latestVersion ?? 'update'} is ready — restart to install`,
+    );
+    return;
+  }
+  tray.setToolTip(
+    state && state.needsUserCount > 0
+      ? `aside — ${state.needsUserCount} session${state.needsUserCount === 1 ? '' : 's'} need you`
+      : 'aside — your agent threads, one side chat away',
+  );
+}
+
+function checkForUpdatesInBackground(): void {
+  void appUpdates?.checkForUpdates().catch((error: unknown) => {
+    console.warn(
+      '  • automatic update check failed:',
+      error instanceof Error ? error.message : 'unknown error',
+    );
+  });
+}
+
 async function refreshProviderAuth(): Promise<ProviderAuthStatus[]> {
   if (!providerAuth) return [];
   const statuses = await providerAuth.getStatuses();
@@ -250,13 +291,7 @@ function threadTarget(state: MenubarState): MenubarThreadTarget {
 
 function handleBackendUpdate(state: MenubarState): void {
   if (win && !win.isDestroyed()) win.webContents.send('aside:update', state);
-  if (tray) {
-    tray.setToolTip(
-      state.needsUserCount > 0
-        ? `aside — ${state.needsUserCount} session${state.needsUserCount === 1 ? '' : 's'} need you`
-        : 'aside — your agent threads, one side chat away',
-    );
-  }
+  updateTrayToolTip(state);
 
   const next = new Set(state.sessions.filter((session) => session.needsUser).map((session) => session.id));
   if (attentionInitialized && Notification.isSupported()) {
@@ -330,6 +365,13 @@ app.whenReady().then(() => {
   );
   backend.start();
   providerAuth = new ProviderAuthCoordinator();
+  appUpdates = new AppUpdateController({
+    updater: autoUpdater as unknown as AutoUpdaterLike,
+    currentVersion: app.getVersion(),
+    arch: releaseArch,
+    enabled: app.isPackaged && process.platform === 'darwin',
+    onStatus: broadcastAppUpdate,
+  });
 
   ipcMain.handle('aside:get-state', () => backend?.getState());
   ipcMain.handle('aside:select-thread', (_e, threadId: unknown) => {
@@ -428,10 +470,10 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('aside:app-version', () => app.getVersion());
-  ipcMain.handle('aside:update:check', () =>
-    checkForAppUpdate(app.getVersion(), releaseArch),
-  );
-  ipcMain.handle('aside:update:download', async () => {
+  ipcMain.handle('aside:update:get', () => appUpdates?.getStatus());
+  ipcMain.handle('aside:update:check', () => appUpdates?.checkForUpdates());
+  ipcMain.handle('aside:update:restart', () => appUpdates?.restartToInstall());
+  ipcMain.handle('aside:update:manual-download', async () => {
     try {
       await shell.openExternal(downloadUrlForArch(releaseArch));
     } catch {
@@ -455,12 +497,21 @@ app.whenReady().then(() => {
   tray = new Tray(icon);
   // Without an icon there'd be nothing to click, so label it instead.
   if (icon.isEmpty()) tray.setTitle('Aside');
-  tray.setToolTip('aside — your agent threads, one side chat away');
+  updateTrayToolTip();
   tray.on('click', toggleWindow);
   tray.on('right-click', () => {
+    const update = appUpdates?.getStatus();
     const menu = Menu.buildFromTemplate([
       { label: 'Open aside', click: () => showWindow() },
       { label: 'Aside Settings…', click: () => showWindow(true) },
+      ...(update?.phase === 'ready'
+        ? [
+            {
+              label: `Restart to Update to ${update.latestVersion ?? 'Latest'}`,
+              click: () => appUpdates?.restartToInstall(),
+            },
+          ]
+        : []),
       { type: 'separator' },
       { label: 'Quit aside', role: 'quit' },
     ]);
@@ -483,6 +534,17 @@ app.whenReady().then(() => {
     });
   }
 
+  if (app.isPackaged && !CAPTURE_PATH) {
+    updateCheckTimer = setTimeout(
+      checkForUpdatesInBackground,
+      UPDATE_INITIAL_DELAY_MS,
+    );
+    updateCheckInterval = setInterval(
+      checkForUpdatesInBackground,
+      UPDATE_INTERVAL_MS,
+    );
+  }
+
   if (CAPTURE_PATH) {
     void captureAndQuit(
       win,
@@ -494,6 +556,13 @@ app.whenReady().then(() => {
       CAPTURE_SETTINGS,
     );
   }
+});
+
+app.on('before-quit', () => {
+  if (updateCheckTimer) clearTimeout(updateCheckTimer);
+  if (updateCheckInterval) clearInterval(updateCheckInterval);
+  updateCheckTimer = null;
+  updateCheckInterval = null;
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

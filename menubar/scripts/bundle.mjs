@@ -33,7 +33,10 @@ await esbuild.build({
   entryPoints: [path.join(root, 'src', 'main.ts')],
   outfile: path.join(root, 'build', 'main.js'),
   platform: 'node',
-  external: ['electron'],
+  // electron-updater is CommonJS and dynamically requires Electron. Keep it as
+  // a packaged runtime dependency rather than wrapping those requires in this
+  // ESM bundle.
+  external: ['electron', 'electron-updater'],
 });
 
 // Renderer. Runs in the browser context and touches only the window.aside

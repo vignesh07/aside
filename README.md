@@ -133,16 +133,16 @@ these allow/deny choices at `~/.aside/providers.json`, never a credential.
 
 The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
 contains the current version, filenames, byte sizes, and SHA-256 checksums.
-The installed version and a manual **Check for Updates** action are available
-under **Aside Settings**.
+Installed builds download signed updates in the background and offer a
+**Restart to Update** action when the next version is ready. A manual installer
+remains available in **Aside Settings** if automatic updating fails.
 
-### TUI from source
+### Developer harness
 
-The npm package is not published yet. To run the TUI from source:
+The terminal interface is an internal development harness for the shared
+session core, not a distributed Aside product:
 
 ```bash
-git clone https://github.com/vignesh07/aside.git
-cd aside
 npm install
 npm run check
 npm start
@@ -150,14 +150,7 @@ npm start
 
 Node.js 20 or newer is required.
 
-When the npm release is live, installation will be:
-
-```bash
-npm install -g @vignesh07/aside
-aside
-```
-
-## TUI usage
+## Developer harness usage
 
 ```bash
 aside
