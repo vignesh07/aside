@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  MAX_ATTENTION_SEEDS_PER_SYNC,
   MAX_FLEET_CONTEXT_SESSIONS,
   SideChatService,
   type AskEngine,
@@ -45,6 +46,38 @@ function session(id: string, over: Partial<TrackedSession> = {}): TrackedSession
     currentActivity: '',
     ...over,
   };
+}
+
+function claudeAssistantLine(text: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    timestamp: NOW.toISOString(),
+    message: {
+      content: [{ type: 'text', text }],
+    },
+  });
+}
+
+function claudeUserLine(text: string): string {
+  return JSON.stringify({
+    type: 'user',
+    timestamp: NOW.toISOString(),
+    message: { content: text },
+  });
+}
+
+function claudeInputRequestLine(question: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    timestamp: NOW.toISOString(),
+    message: {
+      content: [{
+        type: 'tool_use',
+        name: 'AskUserQuestion',
+        input: { questions: [{ question }] },
+      }],
+    },
+  });
 }
 
 describe('SideChatService.ask', () => {
@@ -212,6 +245,225 @@ describe('SideChatService.snapshot', () => {
       expect(svc.getTranscript('old')).toEqual([
         expect.objectContaining({ kind: 'assistant_text', preview: 'historical answer' }),
       ]);
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('SideChatService restart attention reconstruction', () => {
+  it('restores needs-user state for a historical session without selecting or tailing it', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-restart-'));
+    const jsonlPath = path.join(root, 'waiting.jsonl');
+    const changes: Array<{ needsUser: boolean; becameNeedsUser: boolean }> = [];
+    fs.writeFileSync(
+      jsonlPath,
+      [
+        claudeAssistantLine('Should I deploy this to production?'),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'turn_response',
+          durationMs: 100,
+          timestamp: NOW.toISOString(),
+        }),
+      ].join('\n') + '\n',
+    );
+
+    try {
+      const svc = new SideChatService(
+        new FakeEngine(),
+        {
+          onAttention: (_id, attention, becameNeedsUser) => {
+            changes.push({ needsUser: attention.needsUser, becameNeedsUser });
+          },
+        },
+        clock,
+      );
+      svc.syncSessions(
+        [session('waiting', {
+          status: 'history',
+          jsonlPath,
+          lastEventTime: new Date(NOW.getTime() - 6 * 24 * 60 * 60_000),
+        })],
+        new Map([['waiting', jsonlPath]]),
+      );
+
+      expect(svc.getSessionAttention('waiting')).toEqual({
+        needsUser: true,
+        reason: 'Should I deploy this to production?',
+      });
+      expect(changes).toEqual([{ needsUser: true, becameNeedsUser: true }]);
+      expect(svc.getTranscript('waiting')).toEqual([]);
+      expect(
+        (svc as unknown as { tailer: { tailedSessionIds: string[] } })
+          .tailer.tailedSessionIds,
+      ).toEqual([]);
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses heuristic questions from stale historical sessions', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-stale-'));
+    const jsonlPath = path.join(root, 'stale-question.jsonl');
+    fs.writeFileSync(
+      jsonlPath,
+      `${claudeAssistantLine('Should I deploy this old branch?')}\n`,
+    );
+
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      svc.syncSessions(
+        [session('stale-question', {
+          status: 'history',
+          jsonlPath,
+          lastEventTime: new Date(NOW.getTime() - 8 * 24 * 60 * 60_000),
+        })],
+        new Map([['stale-question', jsonlPath]]),
+      );
+
+      expect(svc.getSessionAttention('stale-question')).toEqual({
+        needsUser: false,
+        reason: '',
+      });
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores an explicit input request regardless of historical age', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-explicit-'));
+    const jsonlPath = path.join(root, 'explicit-wait.jsonl');
+    fs.writeFileSync(
+      jsonlPath,
+      `${claudeInputRequestLine('Approve the production deployment?')}\n`,
+    );
+
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      svc.syncSessions(
+        [session('explicit-wait', {
+          status: 'history',
+          jsonlPath,
+          lastEventTime: new Date(NOW.getTime() - 365 * 24 * 60 * 60_000),
+        })],
+        new Map([['explicit-wait', jsonlPath]]),
+      );
+
+      expect(svc.getSessionAttention('explicit-wait')).toEqual({
+        needsUser: true,
+        reason: 'Approve the production deployment?',
+      });
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('replays the tail in order so later user activity clears an older request', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-clear-'));
+    const jsonlPath = path.join(root, 'answered.jsonl');
+    fs.writeFileSync(
+      jsonlPath,
+      [
+        claudeAssistantLine('Which environment should I deploy to?'),
+        claudeUserLine('Use staging.'),
+      ].join('\n') + '\n',
+    );
+
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      svc.syncSessions(
+        [session('answered', { status: 'history', jsonlPath })],
+        new Map([['answered', jsonlPath]]),
+      );
+
+      expect(svc.getSessionAttention('answered')).toEqual({
+        needsUser: false,
+        reason: '',
+      });
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('drains the historical catalog promptly in bounded event-loop chunks', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-bounded-'));
+    const count = MAX_ATTENTION_SEEDS_PER_SYNC * 2 + 3;
+    const sessions: TrackedSession[] = [];
+    const paths = new Map<string, string>();
+    for (let index = 0; index < count; index += 1) {
+      const id = `history-${index}`;
+      const jsonlPath = path.join(root, `${id}.jsonl`);
+      fs.writeFileSync(
+        jsonlPath,
+        `${claudeInputRequestLine(`Approve item ${index}?`)}\n`,
+      );
+      sessions.push(session(id, {
+        status: 'history',
+        jsonlPath,
+        lastEventTime: new Date(NOW.getTime() - (index + 1) * 24 * 60 * 60_000),
+      }));
+      paths.set(id, jsonlPath);
+    }
+
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      svc.syncSessions(sessions, paths);
+      expect(
+        sessions.filter((item) => svc.getSessionAttention(item.id).needsUser),
+      ).toHaveLength(MAX_ATTENTION_SEEDS_PER_SYNC);
+      expect(svc.getSessionAttention(`history-${count - 1}`).needsUser).toBe(false);
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(
+        sessions.filter((item) => svc.getSessionAttention(item.id).needsUser),
+      ).toHaveLength(MAX_ATTENTION_SEEDS_PER_SYNC * 2);
+      expect(svc.getSessionAttention(`history-${count - 1}`).needsUser).toBe(false);
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(
+        sessions.filter((item) => svc.getSessionAttention(item.id).needsUser),
+      ).toHaveLength(count);
+      expect(sessions.every((item) => svc.getTranscript(item.id).length === 0)).toBe(true);
+      expect(
+        (svc as unknown as { tailer: { tailedSessionIds: string[] } })
+          .tailer.tailedSessionIds,
+      ).toEqual([]);
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retries a missing historical transcript on a later scanner sync', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-retry-'));
+    const jsonlPath = path.join(root, 'appears-later.jsonl');
+    const oldSession = session('appears-later', {
+      status: 'history',
+      jsonlPath,
+      lastEventTime: new Date(NOW.getTime() - 30 * 24 * 60 * 60_000),
+    });
+
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      const paths = new Map([['appears-later', jsonlPath]]);
+      svc.syncSessions([oldSession], paths);
+      expect(svc.getSessionAttention('appears-later').needsUser).toBe(false);
+
+      fs.writeFileSync(
+        jsonlPath,
+        `${claudeInputRequestLine('Choose a release channel?')}\n`,
+      );
+      svc.syncSessions([oldSession], paths);
+      expect(svc.getSessionAttention('appears-later')).toEqual({
+        needsUser: true,
+        reason: 'Choose a release channel?',
+      });
       svc.dispose();
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

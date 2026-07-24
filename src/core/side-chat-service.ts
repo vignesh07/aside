@@ -4,8 +4,11 @@
 // per agent session. Selecting a session changes the chat scope; it does not
 // merely highlight the same global conversation.
 
-import { SessionTailer } from './session-tailer.js';
-import { readJsonlTailLines } from './session-tailer.js';
+import {
+  SessionTailer,
+  readJsonlTailLines,
+  tryReadJsonlTailLines,
+} from './session-tailer.js';
 import * as fs from 'node:fs';
 import { classifyLine, activityFromEvent } from './event-classifier.js';
 import { disposeClaudeSession } from './providers/index.js';
@@ -33,6 +36,17 @@ export const MAX_FLEET_CONTEXT_SESSIONS = 48;
 /** Historical matches whose recent transcript is hydrated for one fleet ask. */
 const MAX_SEARCH_HYDRATIONS = 8;
 const SEARCH_TAIL_BYTES = 128 * 1024;
+/**
+ * Restart-time attention reconstruction is deliberately incremental. Each
+ * chunk examines a small, fixed tail from at most this many historical
+ * transcripts. The first chunk runs with the scanner sync; remaining chunks
+ * yield through setImmediate. This covers the whole catalog promptly without
+ * opening watchers for old files or blocking the event loop for the full scan.
+ */
+export const MAX_ATTENTION_SEEDS_PER_SYNC = 32;
+export const HISTORICAL_HEURISTIC_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+const ATTENTION_SEED_LINES = 100;
+const ATTENTION_SEED_BYTES = 128 * 1024;
 const SEARCH_STOP_WORDS = new Set([
   'about', 'agent', 'agents', 'across', 'all', 'and', 'are', 'did', 'find',
   'for', 'from', 'have', 'machine', 'other', 'session', 'sessions', 'show',
@@ -69,6 +83,9 @@ export class SideChatService {
   private readonly transcripts = new Map<string, SessionEvent[]>();
   private readonly sources = new Map<string, SessionSource>();
   private readonly attention = new Map<string, SessionAttention>();
+  private readonly attentionSeededSessions = new Set<string>();
+  /** Failed reads are deferred until the next scanner sync, not hot-looped. */
+  private readonly attentionDeferredSessions = new Set<string>();
   private readonly threads = new Map<string, ChatThread>();
   private readonly hydratedSessions = new Set<string>();
   private readonly searchCache = new Map<
@@ -79,6 +96,8 @@ export class SideChatService {
   private sessions: TrackedSession[] = [];
   private activeThreadId = FLEET_THREAD_ID;
   private turnSeq = 0;
+  private attentionDrainImmediate: ReturnType<typeof setImmediate> | null = null;
+  private disposed = false;
   private readonly defaults: { provider: string; model: string };
   private readonly store?: ThreadStore;
 
@@ -210,9 +229,21 @@ export class SideChatService {
 
   /** Reconcile the set of tailed sessions with the currently active ones. */
   syncSessions(sessions: TrackedSession[], jsonlPaths: Map<string, string>): void {
+    if (this.attentionDrainImmediate) {
+      clearImmediate(this.attentionDrainImmediate);
+      this.attentionDrainImmediate = null;
+    }
     this.sessions = sessions;
     this.jsonlPaths = new Map(jsonlPaths);
     this.sources.clear();
+    this.attentionDeferredSessions.clear();
+    const visibleIds = new Set(sessions.map((session) => session.id));
+    for (const sessionId of this.attention.keys()) {
+      if (!visibleIds.has(sessionId)) this.attention.delete(sessionId);
+    }
+    for (const sessionId of this.attentionSeededSessions) {
+      if (!visibleIds.has(sessionId)) this.attentionSeededSessions.delete(sessionId);
+    }
     for (const session of sessions) {
       this.sources.set(session.id, session.source);
       // Create the durable thread as soon as a session becomes visible.
@@ -225,6 +256,8 @@ export class SideChatService {
         activeIds.add(session.id);
         const jsonlPath = jsonlPaths.get(session.id);
         if (jsonlPath && !this.tailer.tailedSessionIds.includes(session.id)) {
+          this.attentionSeededSessions.add(session.id);
+          this.attentionDeferredSessions.delete(session.id);
           this.hydratedSessions.add(session.id);
           this.tailer.startTailing(session.id, jsonlPath);
         }
@@ -233,6 +266,8 @@ export class SideChatService {
     for (const id of this.tailer.tailedSessionIds) {
       if (!activeIds.has(id)) this.tailer.stopTailing(id);
     }
+
+    if (this.seedHistoricalAttentionBatch()) this.scheduleAttentionDrain();
   }
 
   /**
@@ -305,6 +340,11 @@ export class SideChatService {
   }
 
   dispose(): void {
+    this.disposed = true;
+    if (this.attentionDrainImmediate) {
+      clearImmediate(this.attentionDrainImmediate);
+      this.attentionDrainImmediate = null;
+    }
     this.tailer.stopAll();
     disposeClaudeSession();
   }
@@ -378,9 +418,78 @@ export class SideChatService {
     const jsonlPath = this.jsonlPaths.get(sessionId);
     if (!jsonlPath) return;
     this.hydratedSessions.add(sessionId);
+    this.attentionSeededSessions.add(sessionId);
+    this.attentionDeferredSessions.delete(sessionId);
     for (const line of readJsonlTailLines(jsonlPath, MAX_TRANSCRIPT)) {
       this.consumeLine(sessionId, line, true);
     }
+  }
+
+  /**
+   * Recover only the final attention state for a historical session. Unlike
+   * hydrateSession this does not retain transcript events, and unlike the
+   * active-session path it does not install a file watcher or poll timer.
+   */
+  private seedHistoricalAttention(
+    session: TrackedSession,
+    jsonlPath: string,
+  ): boolean {
+    const result = tryReadJsonlTailLines(
+      jsonlPath,
+      ATTENTION_SEED_LINES,
+      ATTENTION_SEED_BYTES,
+    );
+    if (!result.success) return false;
+
+    const allowHeuristic =
+      Math.max(0, this.now().getTime() - session.lastEventTime.getTime()) <=
+      HISTORICAL_HEURISTIC_MAX_AGE_MS;
+    let next: SessionAttention = { needsUser: false, reason: '' };
+    for (const line of result.lines) {
+      const event = classifyLine(line, session.source);
+      if (!event) continue;
+      next = attentionAfterHistoricalEvent(next, event, allowHeuristic);
+    }
+    this.setAttention(session.id, next);
+    return true;
+  }
+
+  /** Process one bounded chunk, returning whether another chunk is ready. */
+  private seedHistoricalAttentionBatch(): boolean {
+    let attempts = 0;
+    for (const session of this.sessions) {
+      if (
+        session.status !== 'history' ||
+        this.attentionSeededSessions.has(session.id) ||
+        this.attentionDeferredSessions.has(session.id)
+      ) {
+        continue;
+      }
+
+      const jsonlPath = this.jsonlPaths.get(session.id);
+      if (!jsonlPath) {
+        this.attentionDeferredSessions.add(session.id);
+        continue;
+      }
+      if (attempts >= MAX_ATTENTION_SEEDS_PER_SYNC) return true;
+      attempts += 1;
+
+      if (this.seedHistoricalAttention(session, jsonlPath)) {
+        this.attentionSeededSessions.add(session.id);
+      } else {
+        this.attentionDeferredSessions.add(session.id);
+      }
+    }
+    return false;
+  }
+
+  private scheduleAttentionDrain(): void {
+    if (this.disposed || this.attentionDrainImmediate) return;
+    this.attentionDrainImmediate = setImmediate(() => {
+      this.attentionDrainImmediate = null;
+      if (this.disposed) return;
+      if (this.seedHistoricalAttentionBatch()) this.scheduleAttentionDrain();
+    });
   }
 
   /**
@@ -470,6 +579,11 @@ export class SideChatService {
   private updateAttention(sessionId: string, event: SessionEvent): void {
     const previous = this.getSessionAttention(sessionId);
     const next = attentionAfterEvent(previous, event);
+    this.setAttention(sessionId, next);
+  }
+
+  private setAttention(sessionId: string, next: SessionAttention): void {
+    const previous = this.getSessionAttention(sessionId);
     if (next.needsUser === previous.needsUser && next.reason === previous.reason) return;
     this.attention.set(sessionId, next);
     this.handlers.onAttention?.(
@@ -518,6 +632,20 @@ export function attentionAfterEvent(
     return { needsUser: false, reason: '' };
   }
   return current;
+}
+
+function attentionAfterHistoricalEvent(
+  current: SessionAttention,
+  event: SessionEvent,
+  allowAssistantHeuristic: boolean,
+): SessionAttention {
+  // A conversational question at the end of a long-closed thread is not an
+  // actionable inbox item. Explicit input-request tools remain authoritative
+  // regardless of age.
+  if (!allowAssistantHeuristic && event.kind === 'assistant_text') {
+    return { needsUser: false, reason: '' };
+  }
+  return attentionAfterEvent(current, event);
 }
 
 function looksLikeInputRequest(text: string): boolean {

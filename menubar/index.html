@@ -658,6 +658,29 @@
       .settings-section:first-child { margin-top: 0; }
       .settings-section h3 { margin: 0 0 5px; font-size: 12px; font-weight: 590; }
       .settings-section p { margin: 4px 0; color: var(--secondary); font-size: 11px; }
+      .settings-update {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 8px;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface);
+      }
+      .settings-update-copy { min-width: 0; flex: 1; }
+      #app-version { display: block; font-size: 11px; font-weight: 590; }
+      #update-status {
+        display: block;
+        overflow: hidden;
+        margin-top: 1px;
+        color: var(--secondary);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .settings-update-actions { display: flex; flex: none; gap: 6px; }
+      .settings-update-actions button:disabled { opacity: .48; }
       #settings-providers {
         margin-top: 9px;
         overflow: hidden;
@@ -749,8 +772,10 @@
             <div class="onboarding-eyebrow">Read-only observer</div>
             <h2>Choose how Aside answers</h2>
             <p class="onboarding-copy">
-              Your thread index and side-chat history stay on this Mac. When you
-              ask a cloud model, Aside sends only the scoped, redacted context.
+              Your thread index and side-chat history stay on this Mac. When you ask
+              a cloud model, scoped transcript excerpts go to your selected provider.
+              Common credential patterns are redacted first, but automatic redaction
+              can miss sensitive prose.
             </p>
             <div id="onboarding-providers" class="provider-list"></div>
             <div id="onboarding-error" class="surface-message" role="status" aria-live="polite" hidden></div>
@@ -762,7 +787,7 @@
         <div id="messages"></div>
         <div class="composer-shell">
           <div id="privacy-banner">
-            <span><strong>Private by default.</strong> Common secrets are redacted before cloud inference.</span>
+            <span><strong>Cloud context is scoped.</strong> Credential patterns are redacted first, but sensitive prose can be missed.</span>
             <button id="privacy-dismiss" type="button">Dismiss</button>
           </div>
           <div class="composer-card">
@@ -816,12 +841,29 @@
           <div class="settings-section">
             <h3>Observer boundary</h3>
             <p>Aside only reads local agent session logs. It never writes to an agent session or project.</p>
-            <p>Common credential patterns are redacted before scoped context reaches the selected observer. Choose Ollama to keep inference local.</p>
+            <p>Scoped transcript excerpts go to the selected cloud provider. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
           </div>
           <div class="settings-section">
             <h3>Persistent side chats</h3>
             <p>Fleet and per-session conversations are stored locally with user-only permissions.</p>
             <span id="storage-path" class="path"></span>
+          </div>
+          <div class="settings-section">
+            <h3>Finding Aside</h3>
+            <p>If the menu bar icon is hidden by the camera notch, reopen Aside from Spotlight or Applications to bring this window back.</p>
+          </div>
+          <div class="settings-section">
+            <h3>Updates</h3>
+            <div class="settings-update">
+              <div class="settings-update-copy">
+                <span id="app-version">Aside</span>
+                <span id="update-status" role="status" aria-live="polite">Signed release for this Mac.</span>
+              </div>
+              <div class="settings-update-actions">
+                <button id="check-update" class="secondary" type="button">Check for Updates</button>
+                <button id="download-update" class="secondary" type="button" hidden>Download</button>
+              </div>
+            </div>
           </div>
           <div class="settings-section">
             <h3>Diagnostics</h3>

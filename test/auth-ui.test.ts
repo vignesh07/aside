@@ -3,6 +3,8 @@ import {
   canDisconnectProvider,
   canAskWithProvider,
   isProviderUsable,
+  providerHelpLink,
+  providerStatusText,
   recommendedModelForProvider,
   shouldShowFirstRun,
   visibleModels,
@@ -76,5 +78,26 @@ describe('auth UI state', () => {
       recommendedModelForProvider(models, 'claude-cli')?.model,
     ).toBe('claude-fast');
     expect(recommendedModelForProvider(models, 'ollama')).toBeUndefined();
+  });
+
+  it('offers official recovery guides when a vendor client is missing', () => {
+    expect(providerStatusText(auth('codex-cli', 'missing'))).toBe(
+      'Codex CLI was not found',
+    );
+    expect(providerHelpLink('codex-cli')).toEqual({
+      label: 'Setup Guide…',
+      title: 'Open the official Codex CLI setup guide',
+      url: 'https://learn.chatgpt.com/docs/codex/cli',
+    });
+
+    expect(providerStatusText(auth('claude-cli', 'missing'))).toBe(
+      'Claude Code was not found',
+    );
+    expect(providerHelpLink('claude-cli')).toEqual({
+      label: 'Setup Guide…',
+      title: 'Open the official Claude Code setup guide',
+      url: 'https://code.claude.com/docs/en/getting-started',
+    });
+    expect(providerHelpLink('ollama')).toBeUndefined();
   });
 });

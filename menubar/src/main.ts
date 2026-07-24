@@ -37,9 +37,15 @@ import {
 } from '../../dist/core/providers/index.js';
 import {
   canAskWithProvider,
-  isProviderUsable,
+  providerHelpLink,
   recommendedModelForProvider,
 } from './auth-ui.js';
+import {
+  checkForAppUpdate,
+  downloadUrlForArch,
+} from './app-update.js';
+import { shouldNotifyForAttention } from './attention-notification.js';
+import { WindowRecoveryController } from './window-recovery.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -98,6 +104,23 @@ let providerAuth: ProviderAuthCoordinator | null = null;
 let lastNeedsUser = new Set<string>();
 let attentionInitialized = false;
 let authFlowActive = false;
+
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+const windowRecovery = new WindowRecoveryController(() => showWindow());
+const releaseArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+
+if (!ownsSingleInstanceLock) {
+  app.quit();
+} else {
+  // Finder and Spotlight activate the existing macOS app process. Direct
+  // launches are covered by Electron's single-instance event as well.
+  app.on('activate', () => {
+    windowRecovery.request();
+  });
+  app.on('second-instance', () => {
+    windowRecovery.request();
+  });
+}
 
 /**
  * The menubar icon.
@@ -174,14 +197,15 @@ function toggleWindow(): void {
   void refreshProviderAuth();
 }
 
-function showWindow(openSettings = false, refreshAuth = true): void {
-  if (!win || !tray) return;
+function showWindow(openSettings = false, refreshAuth = true): boolean {
+  if (!win || !tray) return false;
   positionWindow(win, tray);
   win.show();
   win.focus();
   win.webContents.send('aside:update', backend?.getState());
   if (refreshAuth) void refreshProviderAuth();
   if (openSettings) win.webContents.send('aside:show-settings');
+  return true;
 }
 
 function broadcastProviderAuth(statuses: ProviderAuthStatus[]): void {
@@ -230,7 +254,9 @@ function handleBackendUpdate(state: MenubarState): void {
   const next = new Set(state.sessions.filter((session) => session.needsUser).map((session) => session.id));
   if (attentionInitialized && Notification.isSupported()) {
     for (const session of state.sessions) {
-      if (!session.needsUser || lastNeedsUser.has(session.id)) continue;
+      // Historical reconstruction powers the sidebar inbox, but must never
+      // manufacture a delayed macOS alert for a stale thread after launch.
+      if (!shouldNotifyForAttention(session, lastNeedsUser)) continue;
       const notification = new Notification({
         title: `${session.projectName} needs you`,
         body: session.attentionReason || 'This agent is waiting for your input.',
@@ -248,6 +274,8 @@ function handleBackendUpdate(state: MenubarState): void {
 }
 
 app.whenReady().then(() => {
+  if (!ownsSingleInstanceLock) return;
+
   // Menubar-only app: no dock icon.
   app.dock?.hide();
 
@@ -380,6 +408,29 @@ app.whenReady().then(() => {
       throw safeProviderError(error);
     }
   });
+  ipcMain.handle('aside:auth:help', async (_e, value: unknown) => {
+    const provider = validatedProvider(value);
+    const help = provider ? providerHelpLink(provider) : undefined;
+    if (!help) {
+      throw new Error('No setup guide is available for that provider.');
+    }
+    try {
+      await shell.openExternal(help.url);
+    } catch {
+      throw new Error('Aside could not open the provider setup guide.');
+    }
+  });
+  ipcMain.handle('aside:app-version', () => app.getVersion());
+  ipcMain.handle('aside:update:check', () =>
+    checkForAppUpdate(app.getVersion(), releaseArch),
+  );
+  ipcMain.handle('aside:update:download', async () => {
+    try {
+      await shell.openExternal(downloadUrlForArch(releaseArch));
+    } catch {
+      throw new Error('Aside could not open the signed installer download.');
+    }
+  });
   ipcMain.handle('aside:open-data', () => {
     const storagePath = backend?.getState().storagePath;
     if (!storagePath) return;
@@ -409,15 +460,13 @@ app.whenReady().then(() => {
     tray?.popUpContextMenu(menu);
   });
 
-  void refreshProviderAuth()
-    .then((statuses) => {
-      if (!statuses.some(isProviderUsable) && !DEV_SHOW && !CAPTURE_PATH) {
-        showWindow();
-      }
-    })
-    .catch(() => {
-      if (!DEV_SHOW && !CAPTURE_PATH) showWindow();
-    });
+  if (!DEV_SHOW && !CAPTURE_PATH) {
+    // A manual app launch must always produce visible feedback, including when
+    // accounts are already connected and the status item sits behind a notch.
+    windowRecovery.request();
+  } else {
+    void refreshProviderAuth();
+  }
 
   if (DEV_SHOW || CAPTURE_PATH) {
     win.setPosition(DEV_SHOW_POSITION.x, DEV_SHOW_POSITION.y, false);

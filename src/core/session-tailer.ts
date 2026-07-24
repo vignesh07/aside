@@ -118,11 +118,24 @@ export function readJsonlTailLines(
   maxLines: number,
   maxBytes = 512 * 1024,
 ): string[] {
+  return tryReadJsonlTailLines(jsonlPath, maxLines, maxBytes).lines;
+}
+
+/**
+ * The status-bearing form lets restart recovery distinguish an empty
+ * transcript from a transient read failure. Callers that only need best-effort
+ * lines should continue using readJsonlTailLines.
+ */
+export function tryReadJsonlTailLines(
+  jsonlPath: string,
+  maxLines: number,
+  maxBytes = 512 * 1024,
+): { lines: string[]; success: boolean } {
   let fd: number | undefined;
   try {
     const stat = fs.statSync(jsonlPath);
     const bytes = Math.min(stat.size, maxBytes);
-    if (bytes <= 0 || maxLines <= 0) return [];
+    if (bytes <= 0 || maxLines <= 0) return { lines: [], success: true };
     const offset = stat.size - bytes;
     fd = fs.openSync(jsonlPath, 'r');
     const buf = Buffer.alloc(bytes);
@@ -134,13 +147,16 @@ export function readJsonlTailLines(
           return newline === -1 ? text.length : newline + 1;
         })()
       : 0;
-    return text
-      .slice(firstComplete)
-      .split('\n')
-      .filter(Boolean)
-      .slice(-maxLines);
+    return {
+      lines: text
+        .slice(firstComplete)
+        .split('\n')
+        .filter(Boolean)
+        .slice(-maxLines),
+      success: true,
+    };
   } catch {
-    return [];
+    return { lines: [], success: false };
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch { /* ignore */ }

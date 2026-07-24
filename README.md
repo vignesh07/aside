@@ -120,6 +120,9 @@ Download the current signed, notarized, and stapled preview:
 
 Open the DMG, drag **Aside** to **Applications**, and launch it. Aside is a
 menubar app, so it appears in the macOS menu bar rather than the Dock.
+If macOS hides the icon behind the camera notch, open **Aside** again from
+Spotlight or Applications; the existing app window will come forward instead
+of starting a duplicate process.
 
 On first launch, Aside detects whether the installed Codex and Claude clients
 already have an account sign-in, but does not use either one automatically.
@@ -130,6 +133,8 @@ these allow/deny choices at `~/.aside/providers.json`, never a credential.
 
 The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
 contains the current version, filenames, byte sizes, and SHA-256 checksums.
+The installed version and a manual **Check for Updates** action are available
+under **Aside Settings**.
 
 ### TUI from source
 

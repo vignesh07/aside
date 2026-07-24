@@ -12,11 +12,13 @@ import type {
   ProviderAuthId,
   ProviderAuthStatus,
 } from './provider-auth.js';
+import type { AppUpdateStatus } from './app-update.js';
 import {
   canDisconnectProvider,
   canAskWithProvider,
   isProviderUsable,
   providerDisplayName,
+  providerHelpLink,
   providerStatusText,
   shouldShowFirstRun,
   visibleModels,
@@ -31,6 +33,10 @@ interface AsideBridge {
   refreshProviderAuth(): Promise<ProviderAuthStatus[]>;
   connectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
   disconnectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
+  openProviderHelp(provider: ProviderAuthId): Promise<void>;
+  getAppVersion(): Promise<string>;
+  checkForUpdates(): Promise<AppUpdateStatus>;
+  downloadUpdate(): Promise<void>;
   openDataFolder(): Promise<void>;
   quit(): Promise<void>;
   onUpdate(callback: (state: MenubarState) => void): () => void;
@@ -82,6 +88,10 @@ const accountsErrorEl = document.getElementById('accounts-error') as HTMLDivElem
 const onboardingErrorEl = document.getElementById('onboarding-error') as HTMLDivElement;
 const settingsErrorEl = document.getElementById('settings-error') as HTMLDivElement;
 const accountsSettingsEl = document.getElementById('accounts-settings') as HTMLButtonElement;
+const appVersionEl = document.getElementById('app-version') as HTMLSpanElement;
+const updateStatusEl = document.getElementById('update-status') as HTMLSpanElement;
+const checkUpdateEl = document.getElementById('check-update') as HTMLButtonElement;
+const downloadUpdateEl = document.getElementById('download-update') as HTMLButtonElement;
 
 let latestState: MenubarState | null = null;
 let lastRenderedThread = '';
@@ -195,6 +205,10 @@ function providerActionLabel(status: ProviderAuthStatus): string {
     return status.state === 'signed_out' ? 'Waiting…' : 'Working…';
   }
   if (canDisconnectProvider(status)) return 'Disconnect';
+  const help = status.state === 'missing'
+    ? providerHelpLink(status.provider)
+    : undefined;
+  if (help) return help.label;
   if (status.state === 'signed_in') return `Use ${providerDisplayName(status.provider)}`;
   if (status.state === 'local_ready') return 'Use Ollama';
   if (status.state === 'signed_out') return 'Sign in';
@@ -204,6 +218,9 @@ function providerActionLabel(status: ProviderAuthStatus): string {
 }
 
 function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
+  const help = status.state === 'missing'
+    ? providerHelpLink(status.provider)
+    : undefined;
   const row = document.createElement('div');
   row.className = `provider-row${isProviderUsable(status) ? ' usable' : ''}`;
 
@@ -255,20 +272,30 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
   const action = document.createElement('button');
   action.type = 'button';
   action.className = `provider-action${
-    !status.enabled && (status.state === 'signed_in' || status.state === 'local_ready')
+    !status.enabled &&
+    (status.state === 'signed_in' || status.state === 'local_ready' || help)
       ? ' primary'
       : ''
   }`;
   action.textContent = providerActionLabel(status);
+  if (help) action.title = help.title;
   action.disabled =
     Boolean(busyProviderId) ||
     (!status.enabled &&
-      (status.state === 'missing' || status.reason === 'no_models'));
+      ((status.state === 'missing' && !help) || status.reason === 'no_models'));
   action.addEventListener('click', () => {
     if (canDisconnectProvider(status)) {
       pendingDisconnectId = status.provider;
       lastProviderSurfaceKey = '';
       if (latestState) render(latestState);
+      return;
+    }
+    if (help) {
+      void window.aside.openProviderHelp(status.provider).catch((error) => {
+        authError = safeErrorMessage(error);
+        lastProviderSurfaceKey = '';
+        if (latestState) render(latestState);
+      });
       return;
     }
     if (status.state === 'error') {
@@ -797,6 +824,40 @@ settingsButtonEl.addEventListener('click', () => {
 settingsCloseEl.addEventListener('click', hideSettings);
 openDataEl.addEventListener('click', () => void window.aside.openDataFolder());
 quitEl.addEventListener('click', () => void window.aside.quit());
+checkUpdateEl.addEventListener('click', () => {
+  checkUpdateEl.disabled = true;
+  downloadUpdateEl.hidden = true;
+  updateStatusEl.textContent = 'Checking for updates…';
+  void window.aside
+    .checkForUpdates()
+    .then((status) => {
+      appVersionEl.textContent = `Aside ${status.currentVersion}`;
+      if (status.updateAvailable) {
+        updateStatusEl.textContent = `Aside ${status.latestVersion} is available.`;
+        downloadUpdateEl.hidden = false;
+      } else {
+        updateStatusEl.textContent = 'Aside is up to date.';
+      }
+    })
+    .catch((error) => {
+      updateStatusEl.textContent = safeErrorMessage(error);
+    })
+    .finally(() => {
+      checkUpdateEl.disabled = false;
+    });
+});
+downloadUpdateEl.addEventListener('click', () => {
+  downloadUpdateEl.disabled = true;
+  updateStatusEl.textContent = 'Opening the signed installer…';
+  void window.aside
+    .downloadUpdate()
+    .catch((error) => {
+      updateStatusEl.textContent = safeErrorMessage(error);
+    })
+    .finally(() => {
+      downloadUpdateEl.disabled = false;
+    });
+});
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!accountsPopoverEl.hidden) {
@@ -844,6 +905,15 @@ window.aside.onUpdate(render);
 window.aside.onProviderAuthUpdate(updateProviderAuth);
 window.aside.onShowSettings(showSettings);
 void window.aside.getState().then(render);
+void window.aside
+  .getAppVersion()
+  .then((version) => {
+    appVersionEl.textContent = `Aside ${version}`;
+  })
+  .catch(() => {
+    appVersionEl.textContent = 'Aside';
+    updateStatusEl.textContent = 'Version unavailable.';
+  });
 void window.aside
   .getProviderAuth()
   .then(updateProviderAuth)

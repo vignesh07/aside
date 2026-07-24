@@ -10,6 +10,31 @@ export interface AuthModelOption {
   label?: string;
 }
 
+export interface ProviderHelpLink {
+  label: string;
+  title: string;
+  url: string;
+}
+
+const PROVIDER_HELP_LINKS: Partial<Record<ProviderAuthId, ProviderHelpLink>> = {
+  'codex-cli': {
+    label: 'Setup Guide…',
+    title: 'Open the official Codex CLI setup guide',
+    url: 'https://learn.chatgpt.com/docs/codex/cli',
+  },
+  'claude-cli': {
+    label: 'Setup Guide…',
+    title: 'Open the official Claude Code setup guide',
+    url: 'https://code.claude.com/docs/en/getting-started',
+  },
+};
+
+export function providerHelpLink(
+  provider: ProviderAuthId,
+): ProviderHelpLink | undefined {
+  return PROVIDER_HELP_LINKS[provider];
+}
+
 export function isProviderUsable(status: ProviderAuthStatus): boolean {
   return (
     status.enabled &&
@@ -82,7 +107,9 @@ export function providerStatusText(status: ProviderAuthStatus): string {
   if (status.reason === 'local_unreachable') return 'Ollama is not running';
   if (status.reason === 'no_models') return 'No local models installed';
   if (status.state === 'missing') {
-    return status.provider === 'ollama' ? 'Not installed' : 'Client not found';
+    if (status.provider === 'codex-cli') return 'Codex CLI was not found';
+    if (status.provider === 'claude-cli') return 'Claude Code was not found';
+    return 'Not installed';
   }
   return 'Could not check status';
 }

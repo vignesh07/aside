@@ -26,7 +26,7 @@ export interface SessionSummary {
   /** Actual working folder when the transcript records one. */
   projectPath: string;
   title: string;
-  status: string;
+  status: TrackedSession['status'];
   currentActivity: string;
   /** Milliseconds since this session's last observed event. */
   idleForMs: number;
