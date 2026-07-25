@@ -12,6 +12,7 @@ import {
   Notification,
   shell,
   protocol,
+  nativeTheme,
 } from 'electron';
 import electronUpdater from 'electron-updater';
 import { fileURLToPath } from 'node:url';
@@ -52,12 +53,19 @@ import {
   makeAvailableOnCurrentSpace,
   WindowRecoveryController,
 } from './window-recovery.js';
+import {
+  DEFAULT_WINDOW_SIZE,
+  MIN_WINDOW_SIZE,
+  parseWindowSize,
+  windowBoundsBelowTray,
+  windowSizeForWorkArea,
+  type WindowSize,
+} from './window-layout.js';
+import { FileWindowSizeStore } from './window-size-store.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 import { createThreadSearchService } from './search-coordinator.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const WINDOW_WIDTH = 760;
-const WINDOW_HEIGHT = 620;
 const UPDATE_INITIAL_DELAY_MS = 15_000;
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const { autoUpdater } = electronUpdater;
@@ -89,6 +97,13 @@ function flagValue(name: string): string | null {
   return i === -1 ? null : (process.argv[i + 1] ?? null);
 }
 
+function integerFlagValue(name: string): number | null {
+  const raw = flagValue(name);
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 /**
  * Dev flags for inspecting the dropdown without a human at the machine.
  *
@@ -96,6 +111,11 @@ function flagValue(name: string): string | null {
  *   --ask "<q>"       ask a real question first, so the shot shows an answer
  *   --search "<q>"    filter the machine-wide thread list before capture
  *   --older            expand and scroll to the 7d+ section before capture
+ *   --settings         open settings before capture
+ *   --accounts         open the account popover before capture
+ *   --width <px>       override the window width for responsive QA
+ *   --height <px>      override the window height for responsive QA
+ *   --theme <mode>     force light or dark appearance for responsive QA
  *
  * capturePage() photographs our own web contents, which — unlike the system
  * `screencapture` — needs no screen-recording permission.
@@ -106,6 +126,12 @@ const CAPTURE_THREAD = flagValue('--thread');
 const CAPTURE_SEARCH = flagValue('--search');
 const CAPTURE_OLDER = process.argv.includes('--older');
 const CAPTURE_SETTINGS = process.argv.includes('--settings');
+const CAPTURE_ACCOUNTS = process.argv.includes('--accounts');
+const CAPTURE_THEME = flagValue('--theme');
+const DEV_WINDOW_SIZE = parseWindowSize({
+  width: integerFlagValue('--width') ?? DEFAULT_WINDOW_SIZE.width,
+  height: integerFlagValue('--height') ?? DEFAULT_WINDOW_SIZE.height,
+});
 
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
@@ -117,6 +143,8 @@ let attentionInitialized = false;
 let authFlowActive = false;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
+let windowSizeStore: FileWindowSizeStore | null = null;
+let preferredWindowSize: WindowSize = { ...DEFAULT_WINDOW_SIZE };
 
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 const windowRecovery = new WindowRecoveryController(() => showWindow());
@@ -152,13 +180,16 @@ function trayImage(): Electron.NativeImage {
   return image;
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(initialSize: WindowSize): BrowserWindow {
   const window = new BrowserWindow({
-    width: WINDOW_WIDTH,
-    height: WINDOW_HEIGHT,
+    width: initialSize.width,
+    height: initialSize.height,
+    minWidth: MIN_WINDOW_SIZE.width,
+    minHeight: MIN_WINDOW_SIZE.height,
     show: false,
     frame: false,
-    resizable: false,
+    resizable: true,
+    maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
     roundedCorners: true,
@@ -184,6 +215,25 @@ function createWindow(): BrowserWindow {
       if (!authFlowActive) window.hide();
     });
   }
+  let manualResizePending = false;
+  window.on('will-resize', () => {
+    // Electron only emits will-resize for an interactive edge/corner drag.
+    // Programmatic fitting for a smaller display must not replace the user's
+    // preferred dimensions.
+    manualResizePending = true;
+  });
+  window.on('resized', () => {
+    if (!manualResizePending) return;
+    manualResizePending = false;
+    const bounds = window.getBounds();
+    const next = parseWindowSize({
+      width: bounds.width,
+      height: bounds.height,
+    });
+    if (!next) return;
+    preferredWindowSize = next;
+    windowSizeStore?.save(next);
+  });
   return window;
 }
 
@@ -191,14 +241,14 @@ function createWindow(): BrowserWindow {
 function positionWindow(window: BrowserWindow, trayInstance: Tray): void {
   const trayBounds = trayInstance.getBounds();
   const display = screen.getDisplayNearestPoint({ x: trayBounds.x, y: trayBounds.y });
-  const x = Math.round(
-    Math.min(
-      Math.max(trayBounds.x + trayBounds.width / 2 - WINDOW_WIDTH / 2, display.workArea.x + 8),
-      display.workArea.x + display.workArea.width - WINDOW_WIDTH - 8,
+  window.setBounds(
+    windowBoundsBelowTray(
+      preferredWindowSize,
+      trayBounds,
+      display.workArea,
     ),
+    false,
   );
-  const y = Math.round(trayBounds.y + trayBounds.height + 4);
-  window.setPosition(x, y, false);
 }
 
 function toggleWindow(): void {
@@ -327,6 +377,13 @@ app.whenReady().then(() => {
   // Menubar-only app: no dock icon.
   app.dock?.hide();
 
+  if (
+    (CAPTURE_PATH || DEV_SHOW) &&
+    (CAPTURE_THEME === 'light' || CAPTURE_THEME === 'dark')
+  ) {
+    nativeTheme.themeSource = CAPTURE_THEME;
+  }
+
   // Finder launches receive launchd's minimal PATH, which cannot locate vendor
   // CLIs in Homebrew or user bin directories. Import PATH only. Credentials
   // are deliberately excluded: existing vendor sign-in and explicit Aside
@@ -363,7 +420,21 @@ app.whenReady().then(() => {
     }
   });
 
-  win = createWindow();
+  // QA windows are deterministic and must never overwrite the user's real
+  // preference. Normal launches restore only dimensions; position is always
+  // recalculated beneath the menu item on the current display.
+  if (!CAPTURE_PATH && !DEV_SHOW) {
+    windowSizeStore = new FileWindowSizeStore();
+    preferredWindowSize = windowSizeStore.load();
+  } else {
+    preferredWindowSize = DEV_WINDOW_SIZE ?? { ...DEFAULT_WINDOW_SIZE };
+  }
+  win = createWindow(
+    windowSizeForWorkArea(
+      preferredWindowSize,
+      screen.getPrimaryDisplay().workArea,
+    ),
+  );
 
   backend = new MenubarBackend(
     { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
@@ -568,6 +639,7 @@ app.whenReady().then(() => {
       CAPTURE_SEARCH,
       CAPTURE_OLDER,
       CAPTURE_SETTINGS,
+      CAPTURE_ACCOUNTS,
     );
   }
 });
@@ -590,7 +662,9 @@ async function captureAndQuit(
   search: string | null,
   showOlder: boolean,
   showSettings: boolean,
+  showAccounts: boolean,
 ) {
+  let exitCode = 0;
   try {
     await new Promise<void>((resolve) => {
       if (!window.webContents.isLoading()) return resolve();
@@ -646,6 +720,13 @@ async function captureAndQuit(
       await sleep(250);
     }
 
+    if (showAccounts) {
+      await window.webContents.executeJavaScript(
+        `document.getElementById('accounts-button')?.click()`,
+      );
+      await sleep(250);
+    }
+
     if (question) {
       await window.webContents.executeJavaScript(`
         (() => {
@@ -669,14 +750,81 @@ async function captureAndQuit(
       await sleep(500);
     }
 
+    const layoutIssues = await captureLayoutIssues(window);
+    if (layoutIssues.length > 0) {
+      throw new Error(`responsive layout failed: ${layoutIssues.join('; ')}`);
+    }
+
     const image = await window.webContents.capturePage();
     fs.writeFileSync(target, image.toPNG());
     console.log(`captured -> ${target}`);
   } catch (err) {
+    exitCode = 1;
     console.error('capture failed:', err);
   } finally {
-    app.exit(0);
+    app.exit(exitCode);
   }
+}
+
+async function captureLayoutIssues(window: BrowserWindow): Promise<string[]> {
+  const result = await window.webContents.executeJavaScript(`
+    (() => {
+      const issues = [];
+      const visible = (element) =>
+        element instanceof HTMLElement &&
+        !element.hidden &&
+        element.getClientRects().length > 0;
+      const insideViewport = (name, element) => {
+        if (!visible(element)) return;
+        const rect = element.getBoundingClientRect();
+        if (
+          rect.left < -1 ||
+          rect.top < -1 ||
+          rect.right > window.innerWidth + 1 ||
+          rect.bottom > window.innerHeight + 1
+        ) {
+          issues.push(name + ' leaves viewport');
+        }
+      };
+
+      if (document.documentElement.scrollWidth > window.innerWidth + 1) {
+        issues.push('horizontal document overflow');
+      }
+      if (document.documentElement.scrollHeight > window.innerHeight + 1) {
+        issues.push('vertical document overflow');
+      }
+
+      const sidebar = document.querySelector('.sidebar');
+      const chat = document.querySelector('.chat');
+      if (visible(sidebar) && visible(chat)) {
+        const sidebarRect = sidebar.getBoundingClientRect();
+        const chatRect = chat.getBoundingClientRect();
+        if (Math.abs(sidebarRect.right - chatRect.left) > 1) {
+          issues.push('sidebar and chat are misaligned');
+        }
+      }
+
+      const settings = document.getElementById('settings');
+      if (visible(settings) && visible(sidebar)) {
+        const sidebarRect = sidebar.getBoundingClientRect();
+        const settingsRect = settings.getBoundingClientRect();
+        if (Math.abs(sidebarRect.right - settingsRect.left) > 1) {
+          issues.push('sidebar and settings are misaligned');
+        }
+      }
+
+      insideViewport('sidebar', sidebar);
+      insideViewport('chat', chat);
+      insideViewport('composer', document.querySelector('.composer-shell'));
+      insideViewport('send button', document.getElementById('send'));
+      insideViewport('settings', settings);
+      insideViewport('accounts popover', document.getElementById('accounts-popover'));
+      return issues;
+    })()
+  `);
+  return Array.isArray(result)
+    ? result.filter((issue): issue is string => typeof issue === 'string')
+    : ['layout assertion returned an invalid result'];
 }
 
 app.on('window-all-closed', () => {
