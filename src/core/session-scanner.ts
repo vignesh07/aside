@@ -2,11 +2,13 @@ import { scanClaudeSessions } from './claude-scanner.js';
 import { scanCodexSessions } from './codex-scanner.js';
 import { scanPiSessions } from './pi-scanner.js';
 import { OBSERVER_PROJECT_MARKER } from './providers/claude-cli.js';
+import { sessionThreadId } from '../types/chat.js';
 import type { TrackedSession, ScopeFilter } from '../types/session.js';
 
 export interface ScanResult {
   sessions: TrackedSession[];
-  jsonlPaths: Map<string, string>; // sessionId → jsonlPath
+  /** Provider-qualified session thread id → jsonlPath. */
+  jsonlPaths: Map<string, string>;
 }
 
 export interface ScanOptions {
@@ -30,7 +32,10 @@ export function scanAllSessions(
     })) {
       if (matchesFilter(session, filter)) {
         sessions.push(session);
-        jsonlPaths.set(session.id, jsonlPath);
+        jsonlPaths.set(
+          sessionThreadId(session.source, session.id),
+          jsonlPath,
+        );
       }
     }
   }
@@ -42,7 +47,10 @@ export function scanAllSessions(
     })) {
       if (matchesFilter(session, filter)) {
         sessions.push(session);
-        jsonlPaths.set(session.id, jsonlPath);
+        jsonlPaths.set(
+          sessionThreadId(session.source, session.id),
+          jsonlPath,
+        );
       }
     }
   }
@@ -51,7 +59,10 @@ export function scanAllSessions(
     for (const { session, jsonlPath } of scanPiSessions()) {
       if (matchesFilter(session, filter)) {
         sessions.push(session);
-        jsonlPaths.set(session.id, jsonlPath);
+        jsonlPaths.set(
+          sessionThreadId(session.source, session.id),
+          jsonlPath,
+        );
       }
     }
   }

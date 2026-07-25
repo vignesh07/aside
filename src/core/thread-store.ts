@@ -1,6 +1,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+  legacySessionThreadId,
+  scopeFromThreadId,
+} from '../types/chat.js';
 import type { ChatThread, ChatTurn } from '../types/chat.js';
 
 const STORE_VERSION = 1;
@@ -136,24 +140,65 @@ function serializeThread(thread: ChatThread): StoredThread {
 
 function mergeThreads(existing: ChatThread[], incoming: ChatThread[]): ChatThread[] {
   const merged = new Map(existing.map((thread) => [thread.id, thread]));
-  for (const next of incoming) {
+  for (const incomingThread of incoming) {
+    let next = incomingThread;
+    const scope = scopeFromThreadId(next.id);
+    if (scope.kind === 'session' && scope.source) {
+      const legacyId = legacySessionThreadId(scope.sessionId);
+      const legacy = merged.get(legacyId);
+      if (legacy) {
+        next = mergeThreadPair(legacy, next);
+        merged.delete(legacyId);
+      }
+    } else if (scope.kind === 'session') {
+      // A stale frontend may try to write an unqualified thread after another
+      // frontend migrated it. Merge it into the sole matching canonical thread
+      // instead of resurrecting the legacy id. If multiple providers share the
+      // id, retaining it is safer than guessing.
+      const canonical = [...merged.values()].filter((thread) => {
+        const candidate = scopeFromThreadId(thread.id);
+        return (
+          candidate.kind === 'session' &&
+          candidate.source &&
+          candidate.sessionId === scope.sessionId
+        );
+      });
+      if (canonical.length === 1) {
+        const target = canonical[0]!;
+        next = mergeThreadPair(target, {
+          ...next,
+          id: target.id,
+          scope: target.scope,
+        });
+      }
+    }
+
     const current = merged.get(next.id);
     if (!current) {
       merged.set(next.id, next);
       continue;
     }
-    const newer = next.updatedAt >= current.updatedAt ? next : current;
-    const turns = new Map(current.turns.map((turn) => [turn.id, turn]));
-    for (const turn of next.turns) turns.set(turn.id, turn);
-    merged.set(next.id, {
-      ...newer,
-      turns: [...turns.values()]
-        .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-        .slice(-MAX_TURNS_PER_THREAD),
-      thinking: false,
-    });
+    merged.set(next.id, mergeThreadPair(current, next));
   }
   return [...merged.values()];
+}
+
+function mergeThreadPair(
+  current: ChatThread,
+  next: ChatThread,
+): ChatThread {
+  const newer = next.updatedAt >= current.updatedAt ? next : current;
+  const turns = new Map(current.turns.map((turn) => [turn.id, turn]));
+  for (const turn of next.turns) turns.set(turn.id, turn);
+  return {
+    ...newer,
+    id: next.id,
+    scope: next.scope,
+    turns: [...turns.values()]
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+      .slice(-MAX_TURNS_PER_THREAD),
+    thinking: false,
+  };
 }
 
 function acquireLock(lockPath: string): number | null {

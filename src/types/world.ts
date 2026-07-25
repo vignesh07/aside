@@ -45,8 +45,10 @@ export interface WorldSnapshot {
   totalSessionCount: number;
   sessions: SessionSnapshot[];
   /**
-   * Session the user has focused, if any. Focus only buys a deeper transcript
-   * slice in the prompt — it never hides the other sessions.
+   * Provider-qualified session thread the user has focused, if any. Focus only
+   * buys a deeper transcript slice in the prompt — it never hides the other
+   * sessions. A bare vendor session ID is insufficient because providers can
+   * reuse the same ID.
    */
-  focusId: string | null;
+  focusThreadId: string | null;
 }

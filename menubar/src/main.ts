@@ -14,6 +14,7 @@ import {
   protocol,
 } from 'electron';
 import electronUpdater from 'electron-updater';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -37,6 +38,9 @@ import {
   disposeClaudeSession,
 } from '../../dist/core/providers/index.js';
 import {
+  cleanupExpiredHandoffCapsules,
+} from '../../dist/core/handoff/index.js';
+import {
   canAskWithProvider,
   providerHelpLink,
   recommendedModelForProvider,
@@ -54,12 +58,21 @@ import {
 } from './window-recovery.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 import { createThreadSearchService } from './search-coordinator.js';
+import {
+  OpenInController,
+  type OpenInThreadRequest,
+} from './open-in.js';
+import {
+  cleanupExpiredTerminalLaunchers,
+  NativeOpenInHost,
+} from './open-in-host.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WINDOW_WIDTH = 760;
 const WINDOW_HEIGHT = 620;
 const UPDATE_INITIAL_DELAY_MS = 15_000;
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+const HANDOFF_CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
 const { autoUpdater } = electronUpdater;
 
 /**
@@ -96,6 +109,7 @@ function flagValue(name: string): string | null {
  *   --ask "<q>"       ask a real question first, so the shot shows an answer
  *   --search "<q>"    filter the machine-wide thread list before capture
  *   --older            expand and scroll to the 7d+ section before capture
+ *   --open-in          open the selected thread's destination menu
  *
  * capturePage() photographs our own web contents, which — unlike the system
  * `screencapture` — needs no screen-recording permission.
@@ -106,17 +120,20 @@ const CAPTURE_THREAD = flagValue('--thread');
 const CAPTURE_SEARCH = flagValue('--search');
 const CAPTURE_OLDER = process.argv.includes('--older');
 const CAPTURE_SETTINGS = process.argv.includes('--settings');
+const CAPTURE_OPEN_IN = process.argv.includes('--open-in');
 
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
 let providerAuth: ProviderAuthCoordinator | null = null;
 let appUpdates: AppUpdateController | null = null;
+let openIn: OpenInController | null = null;
 let lastNeedsUser = new Set<string>();
 let attentionInitialized = false;
 let authFlowActive = false;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
+let handoffCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 const windowRecovery = new WindowRecoveryController(() => showWindow());
@@ -282,6 +299,35 @@ function safeProviderError(error: unknown): Error {
   );
 }
 
+function openApplication(applicationPath: string, cwd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      '/usr/bin/open',
+      ['-a', applicationPath, cwd],
+      { timeout: 10_000 },
+      (error) => {
+        if (error) reject(new Error('macOS could not open that application.'));
+        else resolve();
+      },
+    );
+  });
+}
+
+async function cleanupOpenInArtifacts(): Promise<void> {
+  const results = await Promise.allSettled([
+    cleanupExpiredHandoffCapsules(),
+    cleanupExpiredTerminalLaunchers(),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      console.warn(
+        '  • open-in cleanup failed:',
+        result.reason instanceof Error ? result.reason.message : 'unknown error',
+      );
+    }
+  }
+}
+
 function threadTarget(state: MenubarState): MenubarThreadTarget {
   return {
     threadId: state.activeThreadId,
@@ -297,7 +343,7 @@ function handleBackendUpdate(state: MenubarState): void {
   const next = new Set(
     state.sessions
       .filter((session) => !session.isInternal && session.needsUser)
-      .map((session) => session.id),
+      .map((session) => session.threadId),
   );
   if (attentionInitialized && Notification.isSupported()) {
     for (const session of state.sessions) {
@@ -336,6 +382,11 @@ app.whenReady().then(() => {
     if (imported.length > 0) console.log(`  • imported from login shell: ${imported.join(', ')}`);
     else if (error) console.warn(`  • shell env import failed: ${error}`);
   }
+  void cleanupOpenInArtifacts();
+  handoffCleanupInterval = setInterval(
+    cleanupOpenInArtifacts,
+    HANDOFF_CLEANUP_INTERVAL_MS,
+  );
   // The Mac UI promises that Ollama keeps transcript context on this machine.
   // Ignore a terminal-only remote OLLAMA_HOST override in the GUI process.
   process.env['OLLAMA_HOST'] = 'http://127.0.0.1:11434';
@@ -371,6 +422,19 @@ app.whenReady().then(() => {
     { search: createThreadSearchService() },
   );
   backend.start();
+  openIn = new OpenInController(
+    (threadId) => backend?.getSessionContext(threadId) ?? null,
+    new NativeOpenInHost({
+      openExternal: (url) => shell.openExternal(url),
+      openTerminalScript: async (scriptPath) => {
+        const error = await shell.openPath(scriptPath);
+        if (error) {
+          throw new Error('macOS could not open the terminal launcher.');
+        }
+      },
+      openApplication,
+    }),
+  );
   providerAuth = new ProviderAuthCoordinator();
   appUpdates = new AppUpdateController({
     updater: autoUpdater as unknown as AutoUpdaterLike,
@@ -392,6 +456,47 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('aside:search-rebuild', () => {
     backend?.rebuildSearchIndex();
+  });
+  ipcMain.handle('aside:open-in-options', (_e, threadId: unknown) => {
+    if (
+      typeof threadId !== 'string' ||
+      threadId.length > 500 ||
+      !openIn
+    ) {
+      throw new Error('That thread is not available.');
+    }
+    return openIn.getOptions(threadId);
+  });
+  ipcMain.handle('aside:open-in-thread', async (_e, value: unknown) => {
+    if (!value || typeof value !== 'object' || !openIn) {
+      return { ok: false, message: 'That launch request is not valid.' };
+    }
+    const request = value as Partial<OpenInThreadRequest>;
+    if (
+      typeof request.threadId !== 'string' ||
+      request.threadId.length > 500 ||
+      typeof request.optionId !== 'string' ||
+      request.optionId.length > 100 ||
+      typeof request.includeSideChat !== 'boolean'
+    ) {
+      return { ok: false, message: 'That launch request is not valid.' };
+    }
+    try {
+      return await openIn.open({
+        threadId: request.threadId,
+        optionId: request.optionId,
+        includeSideChat: request.includeSideChat,
+      });
+    } catch (error) {
+      console.warn(
+        '  • open-in launch failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
+      return {
+        ok: false,
+        message: 'Aside could not open that destination.',
+      };
+    }
   });
   ipcMain.handle('aside:ask', async (_e, question: unknown) => {
     if (
@@ -568,6 +673,7 @@ app.whenReady().then(() => {
       CAPTURE_SEARCH,
       CAPTURE_OLDER,
       CAPTURE_SETTINGS,
+      CAPTURE_OPEN_IN,
     );
   }
 });
@@ -575,8 +681,10 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   if (updateCheckTimer) clearTimeout(updateCheckTimer);
   if (updateCheckInterval) clearInterval(updateCheckInterval);
+  if (handoffCleanupInterval) clearInterval(handoffCleanupInterval);
   updateCheckTimer = null;
   updateCheckInterval = null;
+  handoffCleanupInterval = null;
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -590,6 +698,7 @@ async function captureAndQuit(
   search: string | null,
   showOlder: boolean,
   showSettings: boolean,
+  showOpenIn: boolean,
 ) {
   try {
     await new Promise<void>((resolve) => {
@@ -644,6 +753,13 @@ async function captureAndQuit(
         `document.getElementById('settings-button')?.click()`,
       );
       await sleep(250);
+    }
+
+    if (showOpenIn) {
+      await window.webContents.executeJavaScript(
+        `document.getElementById('open-in-button')?.click()`,
+      );
+      await sleep(750);
     }
 
     if (question) {

@@ -70,24 +70,24 @@ describe('MenubarBackend', () => {
     expect(backend.getState().activeThreadId).toBe('fleet');
     expect(backend.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
     expect(backend.getState().sessions.map((s) => s.threadId)).toEqual([
-      'session:a',
-      'session:b',
+      'session:claude:a',
+      'session:claude:b',
     ]);
   });
 
   it('keeps an existing valid session thread across refreshes', () => {
     const { backend } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectThread('session:b');
+    backend.selectThread('session:claude:b');
     backend.refresh();
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('returns to fleet when the selected session disappears', () => {
     const sessions = [fakeSession('a'), fakeSession('b')];
     const { backend } = makeBackend(sessions);
     backend.refresh();
-    backend.selectThread('session:b');
+    backend.selectThread('session:claude:b');
     sessions.pop(); // 'b' vanishes
     backend.refresh();
     expect(backend.getState().activeThreadId).toBe('fleet');
@@ -96,8 +96,25 @@ describe('MenubarBackend', () => {
   it('propagates thread selection to the scoped service conversation', () => {
     const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectThread('session:b');
+    backend.selectThread('session:claude:b');
     expect(service.getFocus()).toBe('b');
+  });
+
+  it('resolves launch context only for a provider-qualified concrete thread', async () => {
+    const source = fakeSession('a');
+    const { backend } = makeBackend([source]);
+    backend.refresh();
+    backend.selectThread('session:claude:a');
+    await backend.ask('remember this side-chat turn');
+
+    const context = backend.getSessionContext('session:claude:a');
+    expect(context?.session).toMatchObject({ id: 'a', source: 'claude' });
+    expect(context?.sideChat.map((turn) => turn.role)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(backend.getSessionContext('session:codex:a')).toBeNull();
+    expect(backend.getSessionContext('fleet')).toBeNull();
   });
 
   it('answers with no sessions at all — "nothing is running" is a valid answer', async () => {
@@ -120,7 +137,7 @@ describe('MenubarBackend', () => {
   it('keeps an authorized ask bound to its originating thread', async () => {
     const { backend, askCalls } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectThread('session:a');
+    backend.selectThread('session:claude:a');
     const state = backend.getState();
     const target = {
       threadId: state.activeThreadId,
@@ -128,11 +145,11 @@ describe('MenubarBackend', () => {
       model: state.model,
     };
 
-    backend.selectThread('session:b');
+    backend.selectThread('session:claude:b');
     await backend.ask('still about a', target);
 
-    expect(askCalls[0]?.threadId).toBe('session:a');
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(askCalls[0]?.threadId).toBe('session:claude:a');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('rejects a captured ask if that thread changed provider meanwhile', async () => {
@@ -176,9 +193,9 @@ describe('MenubarBackend', () => {
     backend.setDefaultModel('openai', 'gpt-4o-mini');
 
     expect(service.getThread('fleet').provider).toBe('openai');
-    expect(service.getThread('session:a').provider).toBe('openai');
-    expect(service.getThread('session:b').provider).toBe('openai');
-    expect(service.getThread('session:b').model).toBe('gpt-4o-mini');
+    expect(service.getThread('session:claude:a').provider).toBe('openai');
+    expect(service.getThread('session:claude:b').provider).toBe('openai');
+    expect(service.getThread('session:claude:b').model).toBe('gpt-4o-mini');
   });
 
   it('keeps an existing conversation pinned when the default changes', async () => {
@@ -190,13 +207,13 @@ describe('MenubarBackend', () => {
 
     expect(service.getThread('fleet').provider).toBe('claude-cli');
     expect(service.getThread('fleet').turns).toHaveLength(2);
-    expect(service.getThread('session:a').provider).toBe('openai');
+    expect(service.getThread('session:claude:a').provider).toBe('openai');
   });
 
   it('applies an authorized model switch only to its originating thread', () => {
     const { backend, service } = makeBackend([fakeSession('a'), fakeSession('b')]);
     backend.refresh();
-    backend.selectThread('session:a');
+    backend.selectThread('session:claude:a');
     const state = backend.getState();
     const target = {
       threadId: state.activeThreadId,
@@ -204,12 +221,12 @@ describe('MenubarBackend', () => {
       model: state.model,
     };
 
-    backend.selectThread('session:b');
+    backend.selectThread('session:claude:b');
     backend.setModel('openai', 'gpt-4o-mini', target);
 
-    expect(service.getThread('session:a').provider).toBe('openai');
-    expect(service.getThread('session:b').provider).toBe('claude-cli');
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(service.getThread('session:claude:a').provider).toBe('openai');
+    expect(service.getThread('session:claude:b').provider).toBe('claude-cli');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('rejects a model outside the catalog', () => {

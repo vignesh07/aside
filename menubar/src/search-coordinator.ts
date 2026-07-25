@@ -91,7 +91,7 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     const signature = chats
       .map(
         (chat) =>
-          `${chat.sessionId}\u0000${chat.updatedAt}\u0000${chat.turns.length}`,
+          `${chat.source}\u0000${chat.sessionId}\u0000${chat.updatedAt}\u0000${chat.turns.length}`,
       )
       .join('\u0001');
     if (signature === this.sideChatSignature) return;

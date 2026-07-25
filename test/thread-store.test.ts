@@ -21,8 +21,8 @@ function tempStore(): FileThreadStore {
 
 function thread(): ChatThread {
   return {
-    id: 'session:abc',
-    scope: { kind: 'session', sessionId: 'abc' },
+    id: 'session:claude:abc',
+    scope: { kind: 'session', source: 'claude', sessionId: 'abc' },
     provider: 'ollama',
     model: 'llama3.2',
     turns: [
@@ -70,17 +70,64 @@ describe('FileThreadStore', () => {
 
     const second: ChatThread = {
       ...thread(),
-      id: 'session:def',
-      scope: { kind: 'session', sessionId: 'def' },
+      id: 'session:codex:def',
+      scope: { kind: 'session', source: 'codex', sessionId: 'def' },
       turns: [{ ...thread().turns[0]!, id: 't2-2', content: 'from the menubar' }],
       updatedAt: new Date('2026-07-23T12:00:02.000Z'),
     };
-    // Simulates a process whose in-memory state did not contain session:abc.
+    // Simulates a process whose in-memory state did not contain the first chat.
     new FileThreadStore(store.location).save([second]);
 
     expect(store.load().map((saved) => saved.id).sort()).toEqual([
-      'session:abc',
-      'session:def',
+      'session:claude:abc',
+      'session:codex:def',
+    ]);
+  });
+
+  it('replaces a persisted legacy id with its provider-qualified successor', () => {
+    const store = tempStore();
+    const legacy: ChatThread = {
+      ...thread(),
+      id: 'session:abc',
+      scope: { kind: 'session', sessionId: 'abc' },
+    };
+    store.save([legacy]);
+
+    new FileThreadStore(store.location).save([thread()]);
+
+    const restored = store.load();
+    expect(restored.map((saved) => saved.id)).toEqual([
+      'session:claude:abc',
+    ]);
+    expect(restored[0]!.turns.map((turn) => turn.content)).toEqual([
+      'remember me',
+    ]);
+  });
+
+  it('does not resurrect a legacy id when a stale frontend writes later', () => {
+    const store = tempStore();
+    store.save([thread()]);
+    const staleLegacy: ChatThread = {
+      ...thread(),
+      id: 'session:abc',
+      scope: { kind: 'session', sessionId: 'abc' },
+      turns: [{
+        ...thread().turns[0]!,
+        id: 't2-2',
+        content: 'written by an older frontend',
+      }],
+      updatedAt: new Date('2026-07-23T12:00:02.000Z'),
+    };
+
+    new FileThreadStore(store.location).save([staleLegacy]);
+
+    const restored = store.load();
+    expect(restored.map((saved) => saved.id)).toEqual([
+      'session:claude:abc',
+    ]);
+    expect(restored[0]!.turns.map((turn) => turn.content)).toEqual([
+      'remember me',
+      'written by an older frontend',
     ]);
   });
 });

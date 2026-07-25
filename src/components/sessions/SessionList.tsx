@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 import { RetroBox } from '../shared/RetroBox.js';
 import { SessionCard } from './SessionCard.js';
 import { COLORS } from '../../config/defaults.js';
+import { sessionThreadId } from '../../types/chat.js';
 import type { TrackedSession } from '../../types/session.js';
 import type { SessionAttention } from '../../types/session.js';
 
@@ -34,7 +35,9 @@ export function SessionList({
   const visible = overflowing ? sessions.slice(0, Math.max(1, limit - 1)) : sessions;
   const hidden = sessions.length - visible.length;
   const needsUser = sessions.filter(
-    (session) => attentionBySession.get(session.id)?.needsUser,
+    (session) =>
+      attentionBySession.get(sessionThreadId(session.source, session.id))
+        ?.needsUser,
   ).length;
 
   return (
@@ -56,10 +59,12 @@ export function SessionList({
         <>
           {visible.map((s) => (
             <SessionCard
-              key={s.id}
+              key={sessionThreadId(s.source, s.id)}
               session={s}
-              selected={s.id === selectedId}
-              attention={attentionBySession.get(s.id)}
+              selected={sessionThreadId(s.source, s.id) === selectedId}
+              attention={attentionBySession.get(
+                sessionThreadId(s.source, s.id),
+              )}
             />
           ))}
           {hidden > 0 && (

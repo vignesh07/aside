@@ -1,5 +1,6 @@
 export interface AttentionNotificationCandidate {
-  id: string;
+  /** Provider-qualified durable thread identity (`session:<source>:<id>`). */
+  threadId: string;
   status: 'active' | 'idle' | 'history';
   needsUser: boolean;
   isInternal?: boolean;
@@ -18,6 +19,6 @@ export function shouldNotifyForAttention(
     !session.isInternal &&
     (session.status === 'active' || session.status === 'idle') &&
     session.needsUser &&
-    !previouslyWaiting.has(session.id)
+    !previouslyWaiting.has(session.threadId)
   );
 }

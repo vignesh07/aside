@@ -14,7 +14,11 @@ import {
   flattenModelCatalog,
   flattenModelCatalogWithLocal,
 } from '../../dist/config/model-catalog.js';
-import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
+import {
+  FLEET_THREAD_ID,
+  scopeFromThreadId,
+  sessionThreadId,
+} from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
@@ -74,6 +78,12 @@ export interface MenubarThreadTarget {
   model: string;
 }
 
+/** Main-process-only data for a launch handoff. Never exposed to the renderer. */
+export interface MenubarSessionContext {
+  session: TrackedSession;
+  sideChat: ChatTurn[];
+}
+
 /** Injection seam for tests (defaults wire up the real core). */
 export interface BackendDeps {
   scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
@@ -121,8 +131,10 @@ export class MenubarBackend {
           onTranscript: () => this.emit(),
           onAttention: () => this.emit(),
           onThread: () => this.emit(),
-          onActivity: (id, activity) => {
-            const s = this.sessions.find((x) => x.id === id);
+          onActivity: (id, activity, source) => {
+            const s = this.sessions.find(
+              (x) => x.id === id && x.source === source,
+            );
             if (s) {
               s.currentActivity = activity;
               s.status = 'active';
@@ -153,9 +165,33 @@ export class MenubarBackend {
   selectThread(threadId: string): void {
     const valid =
       threadId === FLEET_THREAD_ID ||
-      this.sessions.some((session) => sessionThreadId(session.id) === threadId);
+      this.sessions.some(
+        (session) =>
+          sessionThreadId(session.source, session.id) === threadId,
+      );
     this.service.selectThread(valid ? threadId : FLEET_THREAD_ID);
     this.emit();
+  }
+
+  /**
+   * Resolve a provider-qualified thread for Electron-main integrations.
+   *
+   * The renderer gets presentation metadata only; transcript paths stay behind
+   * IPC so a compromised webview cannot ask for arbitrary local files.
+   */
+  getSessionContext(threadId: string): MenubarSessionContext | null {
+    const scope = scopeFromThreadId(threadId);
+    if (scope.kind !== 'session' || !scope.source) return null;
+    const session = this.sessions.find(
+      (candidate) =>
+        candidate.id === scope.sessionId &&
+        candidate.source === scope.source,
+    );
+    if (!session) return null;
+    return {
+      session: { ...session },
+      sideChat: this.service.getChat(threadId).map((turn) => ({ ...turn })),
+    };
   }
 
   setModel(
@@ -225,7 +261,7 @@ export class MenubarBackend {
           session.id,
           session.status,
           session.currentActivity,
-          this.service.getSessionAttention(session.id).reason,
+          this.service.getSessionAttention(session.id, session.source).reason,
         ].some((value) => value.toLocaleLowerCase().includes(normalized)),
       )
       .map(
@@ -264,7 +300,7 @@ export class MenubarBackend {
     const now = Date.now();
     const active = this.service.getActiveThread();
     const sessions = this.sessions.map((s) => {
-      const attention = this.service.getSessionAttention(s.id);
+      const attention = this.service.getSessionAttention(s.id, s.source);
       return {
         id: s.id,
         source: s.source,
@@ -276,7 +312,7 @@ export class MenubarBackend {
         status: s.status,
         currentActivity: s.currentActivity,
         idleForMs: Math.max(0, now - s.lastEventTime.getTime()),
-        threadId: sessionThreadId(s.id),
+        threadId: sessionThreadId(s.source, s.id),
         needsUser: attention.needsUser,
         attentionReason: attention.reason,
       };
@@ -311,9 +347,16 @@ export class MenubarBackend {
   /** Rescan sessions, keep the selected thread valid, and re-sync the tailer. */
   refresh(): void {
     const { sessions, jsonlPaths } = this.scan();
-    const previous = new Map(this.sessions.map((session) => [session.id, session]));
+    const previous = new Map(
+      this.sessions.map((session) => [
+        sessionThreadId(session.source, session.id),
+        session,
+      ]),
+    );
     this.sessions = sessions.map((session) => {
-      const prior = previous.get(session.id);
+      const prior = previous.get(
+        sessionThreadId(session.source, session.id),
+      );
       return prior?.currentActivity
         ? { ...session, currentActivity: prior.currentActivity }
         : session;
@@ -333,11 +376,14 @@ export class MenubarBackend {
     );
     this.syncSideChats();
     const active = this.service.getActiveThread();
-    const activeSessionId =
-      active.scope.kind === 'session' ? active.scope.sessionId : null;
+    const activeScope = active.scope.kind === 'session' ? active.scope : null;
     if (
-      activeSessionId !== null &&
-      !sessions.some((session) => session.id === activeSessionId)
+      activeScope !== null &&
+      !sessions.some(
+        (session) =>
+          session.id === activeScope.sessionId &&
+          (!activeScope.source || session.source === activeScope.source),
+      )
     ) {
       this.service.selectThread(FLEET_THREAD_ID);
     }
@@ -353,9 +399,10 @@ export class MenubarBackend {
     const chats: IndexableSideChat[] = this.service
       .getThreads()
       .flatMap((thread): IndexableSideChat[] =>
-        thread.scope.kind === 'session'
+        thread.scope.kind === 'session' && thread.scope.source
           ? [{
               sessionId: thread.scope.sessionId,
+              source: thread.scope.source,
               updatedAt: thread.updatedAt.toISOString(),
               turns: thread.turns.map((turn) => ({
                 role: turn.role,

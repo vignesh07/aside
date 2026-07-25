@@ -31,6 +31,34 @@ import {
   visibleModels,
 } from './auth-ui.js';
 
+type OpenInTarget = 'codex' | 'claude' | 'cursor' | 'opencode';
+type OpenInOptionKind = 'resume' | 'continue' | 'open-project' | 'import';
+
+interface OpenInOption {
+  id: string;
+  target: OpenInTarget;
+  label: string;
+  available: boolean;
+  kind: OpenInOptionKind;
+  detail?: string;
+  unavailableReason?: string;
+}
+
+interface OpenInOptionsState {
+  threadId: string;
+  source: string;
+  title?: string;
+  projectPath?: string;
+  options: OpenInOption[];
+  defaultIncludeSideChat?: boolean;
+}
+
+interface OpenInThreadRequest {
+  threadId: string;
+  optionId: string;
+  includeSideChat: boolean;
+}
+
 interface AsideBridge {
   getState(): Promise<MenubarState>;
   searchThreads(query: string): Promise<ThreadSearchResult[]>;
@@ -48,6 +76,10 @@ interface AsideBridge {
   checkForUpdates(): Promise<AppUpdateStatus>;
   restartToUpdate(): Promise<void>;
   openManualUpdate(): Promise<void>;
+  getOpenInOptions(threadId: string): Promise<OpenInOptionsState>;
+  openInThread(
+    request: OpenInThreadRequest,
+  ): Promise<{ ok: boolean; message?: string }>;
   openDataFolder(): Promise<void>;
   quit(): Promise<void>;
   onUpdate(callback: (state: MenubarState) => void): () => void;
@@ -84,6 +116,27 @@ const providerLockActionEl = document.getElementById('provider-lock-action') as 
 const scopeTitleEl = document.getElementById('scope-title') as HTMLHeadingElement;
 const scopeMetaEl = document.getElementById('scope-meta') as HTMLDivElement;
 const needsCountEl = document.getElementById('needs-count') as HTMLSpanElement;
+const openInButtonEl = document.getElementById('open-in-button') as HTMLButtonElement;
+const openInPopoverEl = document.getElementById('open-in-popover') as HTMLElement;
+const openInCloseEl = document.getElementById('open-in-close') as HTMLButtonElement;
+const openInTitleEl = document.getElementById('open-in-title') as HTMLElement;
+const openInSubtitleEl = document.getElementById('open-in-subtitle') as HTMLSpanElement;
+const openInStatusEl = document.getElementById('open-in-status') as HTMLDivElement;
+const openInResumeOptionsEl = document.getElementById(
+  'open-in-resume-options',
+) as HTMLDivElement;
+const openInResumeSectionEl = document.getElementById(
+  'open-in-resume-section',
+) as HTMLElement;
+const openInContinueOptionsEl = document.getElementById(
+  'open-in-continue-options',
+) as HTMLDivElement;
+const openInContinueSectionEl = document.getElementById(
+  'open-in-continue-section',
+) as HTMLElement;
+const openInIncludeSideChatEl = document.getElementById(
+  'open-in-include-side-chat',
+) as HTMLInputElement;
 const threadCountEl = document.getElementById('thread-count') as HTMLSpanElement;
 const settingsEl = document.getElementById('settings') as HTMLDivElement;
 const settingsButtonEl = document.getElementById('settings-button') as HTMLButtonElement;
@@ -141,6 +194,10 @@ let busyProviderId: ProviderAuthId | null = null;
 let pendingDisconnectId: ProviderAuthId | null = null;
 let lastProviderSurfaceKey = '';
 let appUpdateStatus: AppUpdateStatus | null = null;
+let openInThreadId: string | null = null;
+let openInOptions: OpenInOptionsState | null = null;
+let openInSequence = 0;
+let openInBusy = false;
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
@@ -173,6 +230,218 @@ function providerMark(provider: ProviderAuthId): string {
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^Error invoking remote method '[^']+':\s*/i, '').slice(0, 180);
+}
+
+function openInTargetLabel(target: string): string {
+  if (target === 'codex') return 'Codex';
+  if (target === 'claude') return 'Claude Code';
+  if (target === 'cursor') return 'Cursor';
+  if (target === 'opencode') return 'OpenCode';
+  if (target === 'pi') return 'Pi';
+  return target;
+}
+
+function openInTargetMark(target: OpenInTarget): string {
+  if (target === 'codex') return 'X';
+  if (target === 'claude') return 'C';
+  if (target === 'cursor') return '↗';
+  return 'O';
+}
+
+function setOpenInStatus(message: string | null, error = false): void {
+  openInStatusEl.hidden = !message;
+  openInStatusEl.textContent = message ?? '';
+  openInStatusEl.classList.toggle('error', error);
+}
+
+function setOpenInBusy(busy: boolean): void {
+  openInBusy = busy;
+  openInIncludeSideChatEl.disabled = busy;
+  for (const button of openInPopoverEl.querySelectorAll<HTMLButtonElement>(
+    '.open-in-option',
+  )) {
+    button.disabled = busy || button.dataset['available'] !== 'true';
+  }
+}
+
+function openInFocusableElements(): HTMLElement[] {
+  return Array.from(
+    openInPopoverEl.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.getClientRects().length > 0);
+}
+
+function fallbackOpenInDetail(option: OpenInOption): string {
+  const target = openInTargetLabel(option.target);
+  if (option.kind === 'resume') {
+    return 'Open the existing native thread.';
+  }
+  if (option.kind === 'import') {
+    return `Import this history as a new native ${target} thread.`;
+  }
+  if (option.kind === 'open-project') {
+    return `Open this project in ${target} without creating a thread.`;
+  }
+  return `Create a new native ${target} thread with handoff context.`;
+}
+
+function makeOpenInOption(option: OpenInOption): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'open-in-option';
+  button.dataset['available'] = String(option.available);
+  button.disabled = !option.available;
+
+  const mark = document.createElement('span');
+  mark.className = 'open-in-option-mark';
+  mark.textContent = openInTargetMark(option.target);
+
+  const copy = document.createElement('span');
+  copy.className = 'open-in-option-copy';
+  const label = document.createElement('strong');
+  label.textContent = option.label;
+  const detail = document.createElement('span');
+  detail.textContent =
+    (!option.available && option.unavailableReason) ||
+    option.detail ||
+    fallbackOpenInDetail(option);
+  copy.append(label, detail);
+
+  const arrow = document.createElement('span');
+  arrow.className = 'open-in-option-arrow';
+  arrow.textContent = option.available ? '›' : '';
+
+  button.append(mark, copy, arrow);
+  button.addEventListener('click', () => void runOpenInOption(option));
+  return button;
+}
+
+function renderOpenInOptions(state: OpenInOptionsState): void {
+  openInOptions = state;
+  openInResumeOptionsEl.replaceChildren();
+  openInContinueOptionsEl.replaceChildren();
+  if (typeof state.defaultIncludeSideChat === 'boolean') {
+    openInIncludeSideChatEl.checked = state.defaultIncludeSideChat;
+  }
+  if (state.title) openInTitleEl.textContent = state.title;
+  const subtitleParts = [openInTargetLabel(state.source)];
+  if (state.projectPath) subtitleParts.push(state.projectPath);
+  openInSubtitleEl.textContent = subtitleParts.join(' · ');
+
+  for (const option of state.options) {
+    const container =
+      option.kind === 'resume'
+        ? openInResumeOptionsEl
+        : openInContinueOptionsEl;
+    container.appendChild(makeOpenInOption(option));
+  }
+  openInResumeSectionEl.hidden = openInResumeOptionsEl.childElementCount === 0;
+  openInContinueSectionEl.hidden =
+    openInContinueOptionsEl.childElementCount === 0;
+  setOpenInBusy(false);
+  setOpenInStatus(
+    state.options.length === 0
+      ? 'No supported destinations are available for this thread.'
+      : null,
+  );
+}
+
+function hideOpenIn(restoreFocus = true): void {
+  if (openInPopoverEl.hidden) return;
+  openInSequence += 1;
+  openInPopoverEl.hidden = true;
+  openInButtonEl.setAttribute('aria-expanded', 'false');
+  openInThreadId = null;
+  openInOptions = null;
+  openInBusy = false;
+  if (restoreFocus && !openInButtonEl.hidden) openInButtonEl.focus();
+}
+
+async function showOpenIn(): Promise<void> {
+  const state = latestState;
+  const session = state ? activeSession(state) : undefined;
+  if (!session) return;
+  if (!openInPopoverEl.hidden && openInThreadId === session.threadId) {
+    hideOpenIn();
+    return;
+  }
+
+  if (!accountsPopoverEl.hidden) {
+    accountsPopoverEl.hidden = true;
+    accountsButtonEl.setAttribute('aria-expanded', 'false');
+  }
+  openInThreadId = session.threadId;
+  openInOptions = null;
+  openInResumeOptionsEl.replaceChildren();
+  openInContinueOptionsEl.replaceChildren();
+  openInResumeSectionEl.hidden = true;
+  openInContinueSectionEl.hidden = true;
+  openInTitleEl.textContent = session.title || session.projectName;
+  openInSubtitleEl.textContent =
+    `${openInTargetLabel(session.source)} · ${session.projectName}`;
+  openInIncludeSideChatEl.checked = false;
+  openInIncludeSideChatEl.disabled = true;
+  setOpenInStatus('Checking available apps…');
+  openInPopoverEl.hidden = false;
+  openInButtonEl.setAttribute('aria-expanded', 'true');
+  openInCloseEl.focus();
+
+  const sequence = ++openInSequence;
+  try {
+    const options = await window.aside.getOpenInOptions(session.threadId);
+    if (
+      sequence !== openInSequence ||
+      openInThreadId !== session.threadId ||
+      options.threadId !== session.threadId
+    ) {
+      return;
+    }
+    renderOpenInOptions(options);
+  } catch (error) {
+    if (sequence !== openInSequence || openInThreadId !== session.threadId) return;
+    openInIncludeSideChatEl.disabled = false;
+    setOpenInStatus(safeErrorMessage(error), true);
+  }
+}
+
+async function runOpenInOption(option: OpenInOption): Promise<void> {
+  const threadId = openInThreadId;
+  if (
+    !threadId ||
+    !option.available ||
+    openInBusy ||
+    openInOptions?.threadId !== threadId
+  ) {
+    return;
+  }
+  setOpenInBusy(true);
+  setOpenInStatus(`Opening ${option.label}…`);
+  try {
+    const result = await window.aside.openInThread({
+      threadId,
+      optionId: option.id,
+      includeSideChat: openInIncludeSideChatEl.checked,
+    });
+    if (openInThreadId !== threadId) return;
+    if (!result.ok) {
+      setOpenInStatus(result.message || `Could not open ${option.label}.`, true);
+      setOpenInBusy(false);
+      return;
+    }
+    if (result.message) {
+      setOpenInStatus(result.message);
+      window.setTimeout(() => {
+        if (openInThreadId === threadId) hideOpenIn(false);
+      }, 650);
+      return;
+    }
+    hideOpenIn(false);
+  } catch (error) {
+    if (openInThreadId !== threadId) return;
+    setOpenInStatus(safeErrorMessage(error), true);
+    setOpenInBusy(false);
+  }
 }
 
 function renderAppUpdate(status: AppUpdateStatus): void {
@@ -424,6 +693,7 @@ function renderProviderSurfaces(): void {
 }
 
 function showAccounts(): void {
+  hideOpenIn(false);
   const onboardingCompleted = localStorage.getItem('aside:onboarding:v1') === '1';
   if (
     !settingsEl.hidden ||
@@ -1039,6 +1309,19 @@ function render(state: MenubarState): void {
           ? ` · ${subagentCount} subagents`
           : ''
       } · fleet conversation`;
+  openInButtonEl.hidden = !session;
+  openInButtonEl.setAttribute(
+    'aria-label',
+    session
+      ? `Open ${session.title || session.projectName} in another app`
+      : 'Open thread in another app',
+  );
+  if (
+    !openInPopoverEl.hidden &&
+    (!session || openInThreadId !== session.threadId)
+  ) {
+    hideOpenIn(false);
+  }
   needsCountEl.textContent =
     state.needsUserCount > 0
       ? `${state.needsUserCount} need${state.needsUserCount === 1 ? 's' : ''} you`
@@ -1136,6 +1419,7 @@ function render(state: MenubarState): void {
 }
 
 function showSettings(): void {
+  hideOpenIn(false);
   if (!accountsPopoverEl.hidden) {
     accountsPopoverEl.hidden = true;
     accountsButtonEl.setAttribute('aria-expanded', 'false');
@@ -1181,9 +1465,12 @@ formEl.addEventListener('submit', (event) => {
 });
 
 accountsButtonEl.addEventListener('click', () => {
+  hideOpenIn(false);
   if (accountsPopoverEl.hidden) showAccounts();
   else hideAccounts();
 });
+openInButtonEl.addEventListener('click', () => void showOpenIn());
+openInCloseEl.addEventListener('click', () => hideOpenIn());
 accountsCloseEl.addEventListener('click', hideAccounts);
 accountInlineEl.addEventListener('click', showAccounts);
 providerLockActionEl.addEventListener('click', showAccounts);
@@ -1241,7 +1528,29 @@ manualUpdateEl.addEventListener('click', () => {
     });
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab' && !openInPopoverEl.hidden) {
+    const focusable = openInFocusableElements();
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) {
+      event.preventDefault();
+      return;
+    }
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !openInPopoverEl.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !openInPopoverEl.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
+  if (!openInPopoverEl.hidden) {
+    hideOpenIn();
+    return;
+  }
   if (!accountsPopoverEl.hidden) {
     hideAccounts();
     return;
@@ -1249,6 +1558,13 @@ document.addEventListener('keydown', (event) => {
   if (!settingsEl.hidden) hideSettings();
 });
 document.addEventListener('mousedown', (event) => {
+  if (
+    !openInPopoverEl.hidden &&
+    !openInPopoverEl.contains(event.target as Node) &&
+    !openInButtonEl.contains(event.target as Node)
+  ) {
+    hideOpenIn(false);
+  }
   if (
     accountsPopoverEl.hidden ||
     accountsPopoverEl.contains(event.target as Node) ||

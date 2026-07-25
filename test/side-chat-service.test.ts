@@ -98,7 +98,7 @@ describe('SideChatService.ask', () => {
     const svc = new SideChatService(engine, {}, clock);
     await svc.ask("what's running?");
     expect(engine.calls).toHaveLength(1);
-    expect(engine.calls[0]!.world.focusId).toBeNull();
+    expect(engine.calls[0]!.world.focusThreadId).toBeNull();
     expect(engine.calls[0]!.world.totalSessionCount).toBe(0);
   });
 
@@ -117,16 +117,19 @@ describe('SideChatService.ask', () => {
   it('keeps independent persistent conversations for each session', async () => {
     const engine = new FakeEngine();
     const svc = new SideChatService(engine, {}, clock);
-    svc.setFocus('a');
+    svc.setFocus('a', 'claude');
     await svc.ask('about a');
-    svc.setFocus('b');
+    svc.setFocus('b', 'claude');
     await svc.ask('about b');
 
     expect(svc.getChat().map((t) => t.content)).toEqual(['about b', 'ok']);
     expect(engine.calls[1]!.history).toEqual([]);
-    svc.setFocus('a');
+    svc.setFocus('a', 'claude');
     expect(svc.getChat().map((t) => t.content)).toEqual(['about a', 'ok']);
-    expect(engine.calls.map((call) => call.threadId)).toEqual(['session:a', 'session:b']);
+    expect(engine.calls.map((call) => call.threadId)).toEqual([
+      'session:claude:a',
+      'session:claude:b',
+    ]);
   });
 
   it('records an error turn when the engine throws', async () => {
@@ -184,10 +187,10 @@ describe('SideChatService.snapshot', () => {
   it('scopes a session side thread to exactly the selected session', () => {
     const svc = new SideChatService(new FakeEngine(), {}, clock);
     svc.syncSessions([session('a'), session('b'), session('c')], new Map());
-    svc.setFocus('b');
+    svc.setFocus('b', 'claude');
     const snap = svc.snapshot();
     expect(snap.sessions.map((s) => s.id)).toEqual(['b']);
-    expect(snap.focusId).toBe('b');
+    expect(snap.focusThreadId).toBe('session:claude:b');
     expect(snap.totalSessionCount).toBe(1);
   });
 
@@ -195,7 +198,7 @@ describe('SideChatService.snapshot', () => {
     const svc = new SideChatService(new FakeEngine(), {}, clock);
     svc.syncSessions([session('a'), session('b'), session('c')], new Map());
     expect(svc.snapshot().sessions.map((s) => s.id)).toEqual(['a', 'b', 'c']);
-    expect(svc.snapshot().focusId).toBeNull();
+    expect(svc.snapshot().focusThreadId).toBeNull();
     expect(svc.snapshot().totalSessionCount).toBe(3);
   });
 
@@ -217,11 +220,11 @@ describe('SideChatService.snapshot', () => {
     expect(svc.snapshot().totalSessionCount).toBe(1);
     expect(svc.getThreads().map((thread) => thread.id)).toEqual(['fleet']);
 
-    svc.selectThread('session:worker');
+    svc.selectThread('session:codex:worker');
     expect(svc.snapshot().sessions.map((item) => item.id)).toEqual(['worker']);
     expect(svc.getThreads().map((thread) => thread.id)).toEqual([
       'fleet',
-      'session:worker',
+      'session:codex:worker',
     ]);
   });
 
@@ -267,7 +270,7 @@ describe('SideChatService.snapshot', () => {
         new Map([['old', jsonlPath]]),
       );
       expect(svc.getTranscript('old')).toEqual([]);
-      svc.selectThread('session:old');
+      svc.selectThread('session:claude:old');
       expect(svc.getTranscript('old')).toEqual([
         expect.objectContaining({ kind: 'assistant_text', preview: 'historical answer' }),
       ]);
@@ -501,7 +504,7 @@ describe('SideChatService focus', () => {
   it('round-trips the focused session', () => {
     const svc = new SideChatService(new FakeEngine(), {}, clock);
     expect(svc.getFocus()).toBeNull();
-    svc.setFocus('a');
+    svc.setFocus('a', 'claude');
     expect(svc.getFocus()).toBe('a');
     svc.setFocus(null);
     expect(svc.getFocus()).toBeNull();
@@ -523,7 +526,7 @@ describe('SideChatService focus', () => {
       model: 'haiku',
       store,
     });
-    first.setFocus('a');
+    first.setFocus('a', 'claude');
     first.setModel('ollama', 'llama3.2');
     await first.ask('remember this');
 
@@ -532,9 +535,117 @@ describe('SideChatService focus', () => {
       model: 'haiku',
       store,
     });
-    restored.setFocus('a');
+    restored.setFocus('a', 'claude');
     expect(restored.getChat().map((turn) => turn.content)).toEqual(['remember this', 'ok']);
     expect(restored.getActiveThread().provider).toBe('ollama');
     expect(restored.getActiveThread().model).toBe('llama3.2');
+  });
+});
+
+describe('SideChatService provider-qualified identity', () => {
+  class MemoryStore implements ThreadStore {
+    constructor(public threads: ChatThread[] = []) {}
+    load() {
+      return this.threads;
+    }
+    save(threads: ChatThread[]) {
+      this.threads = structuredClone(threads);
+    }
+  }
+
+  function legacyThread(sessionId: string): ChatThread {
+    return {
+      id: `session:${sessionId}`,
+      scope: { kind: 'session', sessionId },
+      provider: 'claude-cli',
+      model: 'haiku',
+      turns: [{
+        id: 't1-1',
+        role: 'user',
+        content: 'legacy side-chat history',
+        timestamp: new Date('2026-07-15T12:00:00.000Z'),
+      }],
+      thinking: false,
+      updatedAt: new Date('2026-07-15T12:00:00.000Z'),
+    };
+  }
+
+  it('keeps matching vendor session ids in independent side chats', async () => {
+    const engine = new FakeEngine();
+    const svc = new SideChatService(engine, {}, clock);
+    svc.syncSessions(
+      [
+        session('shared', { source: 'claude' }),
+        session('shared', { source: 'codex' }),
+      ],
+      new Map(),
+    );
+
+    svc.selectThread('session:claude:shared');
+    await svc.ask('about Claude');
+    svc.selectThread('session:codex:shared');
+    await svc.ask('about Codex');
+
+    expect(
+      svc.getChat('session:claude:shared').map((turn) => turn.content),
+    ).toEqual(['about Claude', 'ok']);
+    expect(
+      svc.getChat('session:codex:shared').map((turn) => turn.content),
+    ).toEqual(['about Codex', 'ok']);
+    expect(svc.snapshot('session:claude:shared').sessions[0]!.source).toBe(
+      'claude',
+    );
+    expect(svc.snapshot('session:codex:shared').sessions[0]!.source).toBe(
+      'codex',
+    );
+    expect(
+      svc.snapshot('session:claude:shared').focusThreadId,
+    ).toBe('session:claude:shared');
+    expect(
+      svc.snapshot('session:codex:shared').focusThreadId,
+    ).toBe('session:codex:shared');
+  });
+
+  it('migrates legacy history when exactly one provider owns the id', () => {
+    const store = new MemoryStore([legacyThread('old')]);
+    const svc = new SideChatService(new FakeEngine(), {}, clock, { store });
+
+    svc.syncSessions([session('old', { source: 'codex' })], new Map());
+    svc.selectThread('session:codex:old');
+
+    expect(svc.getChat().map((turn) => turn.content)).toEqual([
+      'legacy side-chat history',
+    ]);
+    expect(svc.getThreads().map((thread) => thread.id).sort()).toEqual([
+      'fleet',
+      'session:codex:old',
+    ]);
+    expect(store.threads.some((thread) => thread.id === 'session:old')).toBe(
+      false,
+    );
+  });
+
+  it('waits for an explicit provider choice when a legacy id is ambiguous', () => {
+    const store = new MemoryStore([legacyThread('shared')]);
+    const svc = new SideChatService(new FakeEngine(), {}, clock, { store });
+    svc.syncSessions(
+      [
+        session('shared', { source: 'claude' }),
+        session('shared', { source: 'codex' }),
+      ],
+      new Map(),
+    );
+
+    expect(svc.getThreads().some((thread) => thread.id === 'session:shared'))
+      .toBe(true);
+
+    svc.selectThread('session:codex:shared');
+    expect(svc.getChat().map((turn) => turn.content)).toEqual([
+      'legacy side-chat history',
+    ]);
+    svc.selectThread('session:claude:shared');
+    expect(svc.getChat()).toEqual([]);
+    expect(svc.getThreads().some((thread) => thread.id === 'session:shared'))
+      .toBe(false);
   });
 });

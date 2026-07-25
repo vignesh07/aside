@@ -15,6 +15,7 @@ import { disposeClaudeSession } from './providers/index.js';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '../config/defaults.js';
 import {
   FLEET_THREAD_ID,
+  legacySessionThreadId,
   scopeFromThreadId,
   sessionThreadId,
 } from '../types/chat.js';
@@ -60,12 +61,17 @@ export interface AskEngine {
 }
 
 export interface SideChatServiceHandlers {
-  onTranscript?: (sessionId: string) => void;
-  onActivity?: (sessionId: string, activity: string) => void;
+  onTranscript?: (sessionId: string, source: SessionSource) => void;
+  onActivity?: (
+    sessionId: string,
+    activity: string,
+    source: SessionSource,
+  ) => void;
   onAttention?: (
     sessionId: string,
     attention: SessionAttention,
     becameNeedsUser: boolean,
+    source: SessionSource,
   ) => void;
   onChat?: (threadId: string) => void;
   onThinking?: (threadId: string, thinking: boolean) => void;
@@ -80,6 +86,7 @@ export interface SideChatServiceOptions {
 
 export class SideChatService {
   private readonly tailer = new SessionTailer();
+  /** Session-scoped maps use `session:<source>:<id>` keys throughout. */
   private readonly transcripts = new Map<string, SessionEvent[]>();
   private readonly sources = new Map<string, SessionSource>();
   private readonly attention = new Map<string, SessionAttention>();
@@ -115,6 +122,8 @@ export class SideChatService {
     this.store = options.store;
 
     for (const thread of this.store?.load() ?? []) {
+      // Re-derive scope from the durable id. Old stores did not include the
+      // provider in either place; they remain unresolved until the next scan.
       const scope = scopeFromThreadId(thread.id);
       this.threads.set(thread.id, { ...thread, scope, thinking: false });
       for (const turn of thread.turns) {
@@ -134,13 +143,17 @@ export class SideChatService {
 
   /** Select the fleet thread or a concrete session thread. */
   selectThread(threadId: string): void {
-    const normalized = threadId === FLEET_THREAD_ID || threadId.startsWith('session:')
-      ? threadId
-      : FLEET_THREAD_ID;
+    const parsed = scopeFromThreadId(threadId);
+    const normalized =
+      threadId === FLEET_THREAD_ID || parsed.kind === 'session'
+        ? this.resolveLegacyThreadId(threadId, parsed)
+        : FLEET_THREAD_ID;
     this.ensureThread(normalized);
     this.activeThreadId = normalized;
     const scope = scopeFromThreadId(normalized);
-    if (scope.kind === 'session') this.hydrateSession(scope.sessionId);
+    if (scope.kind === 'session' && scope.source) {
+      this.hydrateSession(sessionThreadId(scope.source, scope.sessionId));
+    }
     this.reconcileTailers();
     this.handlers.onThread?.(normalized);
   }
@@ -161,9 +174,15 @@ export class SideChatService {
     return [...this.threads.values()];
   }
 
-  /** Backward-compatible alias: null means fleet, an id means that session's thread. */
-  setFocus(sessionId: string | null): void {
-    this.selectThread(sessionId ? sessionThreadId(sessionId) : FLEET_THREAD_ID);
+  /** Backward-compatible alias: null means fleet. New callers must include the source. */
+  setFocus(sessionId: string | null, source?: SessionSource): void {
+    this.selectThread(
+      sessionId
+        ? source
+          ? sessionThreadId(source, sessionId)
+          : legacySessionThreadId(sessionId)
+        : FLEET_THREAD_ID,
+    );
   }
 
   getFocus(): string | null {
@@ -212,8 +231,12 @@ export class SideChatService {
     for (const threadId of changed) this.handlers.onThread?.(threadId);
   }
 
-  getTranscript(sessionId: string): SessionEvent[] {
-    return this.transcripts.get(sessionId) ?? [];
+  getTranscript(
+    sessionId: string,
+    source?: SessionSource,
+  ): SessionEvent[] {
+    const key = this.resolveSessionKey(sessionId, source);
+    return key ? this.transcripts.get(key) ?? [] : [];
   }
 
   getChat(threadId = this.activeThreadId): ChatTurn[] {
@@ -224,8 +247,15 @@ export class SideChatService {
     return this.ensureThread(threadId).thinking;
   }
 
-  getSessionAttention(sessionId: string): SessionAttention {
-    return this.attention.get(sessionId) ?? { needsUser: false, reason: '' };
+  getSessionAttention(
+    sessionId: string,
+    source?: SessionSource,
+  ): SessionAttention {
+    const key = this.resolveSessionKey(sessionId, source);
+    return (key ? this.attention.get(key) : undefined) ?? {
+      needsUser: false,
+      reason: '',
+    };
   }
 
   /** Reconcile the set of tailed sessions with the currently active ones. */
@@ -236,16 +266,24 @@ export class SideChatService {
     }
     this.sessions = sessions;
     this.jsonlPaths = new Map(jsonlPaths);
+    this.migrateUnambiguousLegacyThreads();
     this.sources.clear();
     this.attentionDeferredSessions.clear();
-    const visibleIds = new Set(sessions.map((session) => session.id));
-    for (const sessionId of this.attention.keys()) {
-      if (!visibleIds.has(sessionId)) this.attention.delete(sessionId);
+    const visibleKeys = new Set(
+      sessions.map((session) => sessionThreadId(session.source, session.id)),
+    );
+    for (const sessionKey of this.attention.keys()) {
+      if (!visibleKeys.has(sessionKey)) this.attention.delete(sessionKey);
     }
-    for (const sessionId of this.attentionSeededSessions) {
-      if (!visibleIds.has(sessionId)) this.attentionSeededSessions.delete(sessionId);
+    for (const sessionKey of this.attentionSeededSessions) {
+      if (!visibleKeys.has(sessionKey)) {
+        this.attentionSeededSessions.delete(sessionKey);
+      }
     }
-    for (const session of sessions) this.sources.set(session.id, session.source);
+    for (const session of sessions) {
+      const key = sessionThreadId(session.source, session.id);
+      this.sources.set(key, session.source);
+    }
 
     this.reconcileTailers();
     if (this.seedHistoricalAttentionBatch()) this.scheduleAttentionDrain();
@@ -263,10 +301,16 @@ export class SideChatService {
     const now = this.now();
     const scopedSessionId =
       thread.scope.kind === 'session' ? thread.scope.sessionId : null;
+    const scopedSource =
+      thread.scope.kind === 'session' ? thread.scope.source : undefined;
     const sourceSessions =
       scopedSessionId === null
         ? this.fleetContextSessions(question)
-        : this.sessions.filter((session) => session.id === scopedSessionId);
+        : this.sessions.filter(
+            (session) =>
+              session.id === scopedSessionId &&
+              (!scopedSource || session.source === scopedSource),
+          );
     const sessions: SessionSnapshot[] = sourceSessions.map((session) => ({
       id: session.id,
       source: session.source,
@@ -279,7 +323,7 @@ export class SideChatService {
       currentActivity: session.currentActivity,
       contextUsedPercent: session.usedPercent,
       contextStatus: session.contextStatus,
-      transcript: this.getTranscript(session.id),
+      transcript: this.getTranscript(session.id, session.source),
     }));
     return {
       now,
@@ -288,7 +332,13 @@ export class SideChatService {
           ? this.sessions.filter((session) => !session.isInternal).length
           : sourceSessions.length,
       sessions,
-      focusId: thread.scope.kind === 'session' ? thread.scope.sessionId : null,
+      focusThreadId:
+        thread.scope.kind === 'session' && sourceSessions.length === 1
+          ? sessionThreadId(
+              sourceSessions[0]!.source,
+              sourceSessions[0]!.id,
+            )
+          : null,
     };
   }
 
@@ -334,11 +384,15 @@ export class SideChatService {
   }
 
   private ensureThread(threadId: string): ChatThread {
+    const scope = scopeFromThreadId(threadId);
+    if (scope.kind === 'session' && scope.source) {
+      this.claimLegacyThread(scope.source, scope.sessionId);
+    }
     const existing = this.threads.get(threadId);
     if (existing) return existing;
     const created: ChatThread = {
       id: threadId,
-      scope: scopeFromThreadId(threadId),
+      scope,
       provider: this.defaults.provider,
       model: this.defaults.model,
       turns: [],
@@ -347,6 +401,151 @@ export class SideChatService {
     };
     this.threads.set(threadId, created);
     return created;
+  }
+
+  /**
+   * Resolve an old `session:<id>` selection once its owning provider is known.
+   * If two providers genuinely use the same id, retain the legacy thread until
+   * the user chooses one of the qualified targets; that explicit choice then
+   * safely claims the old history.
+   */
+  private resolveLegacyThreadId(
+    threadId: string,
+    scope: ChatThread['scope'],
+  ): string {
+    if (scope.kind !== 'session') return FLEET_THREAD_ID;
+    if (scope.source) {
+      const canonical = sessionThreadId(scope.source, scope.sessionId);
+      this.claimLegacyThread(scope.source, scope.sessionId);
+      return canonical;
+    }
+
+    const sources = new Set(
+      this.sessions
+        .filter((session) => session.id === scope.sessionId)
+        .map((session) => session.source),
+    );
+    if (sources.size !== 1) return threadId;
+    const [source] = sources;
+    const canonical = sessionThreadId(source!, scope.sessionId);
+    this.claimLegacyThread(source!, scope.sessionId);
+    return canonical;
+  }
+
+  /** Migrate every legacy thread whose source can be inferred without guessing. */
+  private migrateUnambiguousLegacyThreads(): void {
+    let changed = false;
+    for (const thread of [...this.threads.values()]) {
+      const scope = scopeFromThreadId(thread.id);
+      if (scope.kind !== 'session' || scope.source) continue;
+      const sources = new Set(
+        this.sessions
+          .filter((session) => session.id === scope.sessionId)
+          .map((session) => session.source),
+      );
+      if (sources.size !== 1) continue;
+      const [source] = sources;
+      changed =
+        this.claimLegacyThread(source!, scope.sessionId, false) || changed;
+    }
+    if (changed) this.persist();
+  }
+
+  /**
+   * Move a legacy thread onto one canonical provider-qualified id. Existing
+   * canonical turns are merged by turn id so neither history can overwrite the
+   * other during an upgrade or concurrent frontend launch.
+   */
+  private claimLegacyThread(
+    source: SessionSource,
+    sessionId: string,
+    persist = true,
+  ): boolean {
+    const legacyId = legacySessionThreadId(sessionId);
+    const legacy = this.threads.get(legacyId);
+    if (!legacy) return false;
+
+    const canonicalId = sessionThreadId(source, sessionId);
+    const canonical = this.threads.get(canonicalId);
+    const newer =
+      canonical && canonical.updatedAt >= legacy.updatedAt
+        ? canonical
+        : legacy;
+    const turns = new Map(
+      (canonical?.turns ?? []).map((turn) => [turn.id, turn]),
+    );
+    for (const turn of legacy.turns) turns.set(turn.id, turn);
+
+    this.threads.set(canonicalId, {
+      ...newer,
+      id: canonicalId,
+      scope: { kind: 'session', source, sessionId },
+      turns: [...turns.values()].sort(
+        (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+      ),
+      thinking: canonical?.thinking ?? false,
+    });
+    this.threads.delete(legacyId);
+    if (this.activeThreadId === legacyId) this.activeThreadId = canonicalId;
+    if (persist) this.persist();
+    return true;
+  }
+
+  /**
+   * Compatibility lookup for old callers that only have a session id.
+   * Qualified callers never pass through this inference path.
+   */
+  private resolveSessionKey(
+    sessionId: string,
+    source?: SessionSource,
+  ): string | null {
+    if (source) return sessionThreadId(source, sessionId);
+    const sources = new Set(
+      this.sessions
+        .filter((session) => session.id === sessionId)
+        .map((session) => session.source),
+    );
+    if (sources.size === 1) {
+      return sessionThreadId([...sources][0]!, sessionId);
+    }
+
+    const keys = new Set<string>();
+    for (const key of [
+      ...this.transcripts.keys(),
+      ...this.attention.keys(),
+      ...this.sources.keys(),
+    ]) {
+      const scope = scopeFromThreadId(key);
+      if (
+        scope.kind === 'session' &&
+        scope.source &&
+        scope.sessionId === sessionId
+      ) {
+        keys.add(key);
+      }
+    }
+    return keys.size === 1 ? [...keys][0]! : null;
+  }
+
+  private sessionForKey(sessionKey: string): TrackedSession | undefined {
+    const scope = scopeFromThreadId(sessionKey);
+    if (scope.kind !== 'session') return undefined;
+    return this.sessions.find(
+      (session) =>
+        session.id === scope.sessionId &&
+        (!scope.source || session.source === scope.source),
+    );
+  }
+
+  private jsonlPathFor(
+    session: TrackedSession,
+    sessionKey = sessionThreadId(session.source, session.id),
+  ): string | undefined {
+    return (
+      this.jsonlPaths.get(sessionKey) ||
+      // Compatibility with scanner results produced before path namespacing.
+      this.jsonlPaths.get(session.id)
+    );
   }
 
   private appendTurn(thread: ChatThread, turn: ChatTurn): void {
@@ -379,33 +578,39 @@ export class SideChatService {
     this.store?.save([...this.threads.values()]);
   }
 
-  private consumeLine(sessionId: string, line: string, isSeed: boolean): void {
-    const source = this.sources.get(sessionId) ?? 'claude';
+  private consumeLine(sessionKey: string, line: string, isSeed: boolean): void {
+    const scope = scopeFromThreadId(sessionKey);
+    if (scope.kind !== 'session' || !scope.source) return;
+    const source = this.sources.get(sessionKey) ?? scope.source;
     const event = classifyLine(line, source);
     if (!event) return;
 
-    const buf = this.transcripts.get(sessionId) ?? [];
+    const buf = this.transcripts.get(sessionKey) ?? [];
     buf.push(event);
     if (buf.length > MAX_TRANSCRIPT) buf.splice(0, buf.length - MAX_TRANSCRIPT);
-    this.transcripts.set(sessionId, buf);
+    this.transcripts.set(sessionKey, buf);
 
-    this.updateAttention(sessionId, event);
+    this.updateAttention(sessionKey, event);
     if (!isSeed) {
       const activity = activityFromEvent(event);
-      if (activity) this.handlers.onActivity?.(sessionId, activity);
+      if (activity) {
+        this.handlers.onActivity?.(scope.sessionId, activity, source);
+      }
     }
-    this.handlers.onTranscript?.(sessionId);
+    this.handlers.onTranscript?.(scope.sessionId, source);
   }
 
-  private hydrateSession(sessionId: string): void {
-    if (this.hydratedSessions.has(sessionId)) return;
-    const jsonlPath = this.jsonlPaths.get(sessionId);
+  private hydrateSession(sessionKey: string): void {
+    if (this.hydratedSessions.has(sessionKey)) return;
+    const session = this.sessionForKey(sessionKey);
+    if (!session) return;
+    const jsonlPath = this.jsonlPathFor(session, sessionKey);
     if (!jsonlPath) return;
-    this.hydratedSessions.add(sessionId);
-    this.attentionSeededSessions.add(sessionId);
-    this.attentionDeferredSessions.delete(sessionId);
+    this.hydratedSessions.add(sessionKey);
+    this.attentionSeededSessions.add(sessionKey);
+    this.attentionDeferredSessions.delete(sessionKey);
     for (const line of readJsonlTailLines(jsonlPath, MAX_TRANSCRIPT)) {
-      this.consumeLine(sessionId, line, true);
+      this.consumeLine(sessionKey, line, true);
     }
   }
 
@@ -434,7 +639,7 @@ export class SideChatService {
       if (!event) continue;
       next = attentionAfterHistoricalEvent(next, event, allowHeuristic);
     }
-    this.setAttention(session.id, next);
+    this.setAttention(sessionThreadId(session.source, session.id), next);
     return true;
   }
 
@@ -442,27 +647,28 @@ export class SideChatService {
   private seedHistoricalAttentionBatch(): boolean {
     let attempts = 0;
     for (const session of this.sessions) {
+      const sessionKey = sessionThreadId(session.source, session.id);
       if (
         session.isInternal ||
         session.status !== 'history' ||
-        this.attentionSeededSessions.has(session.id) ||
-        this.attentionDeferredSessions.has(session.id)
+        this.attentionSeededSessions.has(sessionKey) ||
+        this.attentionDeferredSessions.has(sessionKey)
       ) {
         continue;
       }
 
-      const jsonlPath = this.jsonlPaths.get(session.id);
+      const jsonlPath = this.jsonlPathFor(session, sessionKey);
       if (!jsonlPath) {
-        this.attentionDeferredSessions.add(session.id);
+        this.attentionDeferredSessions.add(sessionKey);
         continue;
       }
       if (attempts >= MAX_ATTENTION_SEEDS_PER_SYNC) return true;
       attempts += 1;
 
       if (this.seedHistoricalAttention(session, jsonlPath)) {
-        this.attentionSeededSessions.add(session.id);
+        this.attentionSeededSessions.add(sessionKey);
       } else {
-        this.attentionDeferredSessions.add(session.id);
+        this.attentionDeferredSessions.add(sessionKey);
       }
     }
     return false;
@@ -500,7 +706,9 @@ export class SideChatService {
     const hydrate = selectedHistory
       .filter((candidate, index) => candidate.score > 0 || index < 3)
       .slice(0, MAX_SEARCH_HYDRATIONS);
-    for (const { session } of hydrate) this.hydrateSession(session.id);
+    for (const { session } of hydrate) {
+      this.hydrateSession(sessionThreadId(session.source, session.id));
+    }
 
     return [...recent, ...selectedHistory.map(({ session }) => session)];
   }
@@ -514,20 +722,26 @@ export class SideChatService {
     const activeScope = scopeFromThreadId(this.activeThreadId);
     const selectedSessionId =
       activeScope.kind === 'session' ? activeScope.sessionId : null;
+    const selectedSource =
+      activeScope.kind === 'session' ? activeScope.source : undefined;
     const activeIds = new Set<string>();
 
     for (const session of this.sessions) {
+      const sessionKey = sessionThreadId(session.source, session.id);
       const isLive = session.status === 'active' || session.status === 'idle';
-      if (!isLive || (session.isInternal && session.id !== selectedSessionId)) {
+      const isSelected =
+        session.id === selectedSessionId &&
+        (!selectedSource || session.source === selectedSource);
+      if (!isLive || (session.isInternal && !isSelected)) {
         continue;
       }
-      activeIds.add(session.id);
-      const jsonlPath = this.jsonlPaths.get(session.id);
-      if (jsonlPath && !this.tailer.tailedSessionIds.includes(session.id)) {
-        this.attentionSeededSessions.add(session.id);
-        this.attentionDeferredSessions.delete(session.id);
-        this.hydratedSessions.add(session.id);
-        this.tailer.startTailing(session.id, jsonlPath);
+      activeIds.add(sessionKey);
+      const jsonlPath = this.jsonlPathFor(session, sessionKey);
+      if (jsonlPath && !this.tailer.tailedSessionIds.includes(sessionKey)) {
+        this.attentionSeededSessions.add(sessionKey);
+        this.attentionDeferredSessions.delete(sessionKey);
+        this.hydratedSessions.add(sessionKey);
+        this.tailer.startTailing(sessionKey, jsonlPath);
       }
     }
 
@@ -557,7 +771,7 @@ export class SideChatService {
   }
 
   private searchableTail(session: TrackedSession): string {
-    const jsonlPath = this.jsonlPaths.get(session.id);
+    const jsonlPath = this.jsonlPathFor(session);
     if (!jsonlPath) return '';
     let stat: fs.Stats;
     try {
@@ -593,20 +807,25 @@ export class SideChatService {
     return text;
   }
 
-  private updateAttention(sessionId: string, event: SessionEvent): void {
-    const previous = this.getSessionAttention(sessionId);
+  private updateAttention(sessionKey: string, event: SessionEvent): void {
+    const previous =
+      this.attention.get(sessionKey) ?? { needsUser: false, reason: '' };
     const next = attentionAfterEvent(previous, event);
-    this.setAttention(sessionId, next);
+    this.setAttention(sessionKey, next);
   }
 
-  private setAttention(sessionId: string, next: SessionAttention): void {
-    const previous = this.getSessionAttention(sessionId);
+  private setAttention(sessionKey: string, next: SessionAttention): void {
+    const previous =
+      this.attention.get(sessionKey) ?? { needsUser: false, reason: '' };
     if (next.needsUser === previous.needsUser && next.reason === previous.reason) return;
-    this.attention.set(sessionId, next);
+    this.attention.set(sessionKey, next);
+    const scope = scopeFromThreadId(sessionKey);
+    if (scope.kind !== 'session' || !scope.source) return;
     this.handlers.onAttention?.(
-      sessionId,
+      scope.sessionId,
       next,
       !previous.needsUser && next.needsUser,
+      scope.source,
     );
   }
 }

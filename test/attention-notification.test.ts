@@ -5,7 +5,11 @@ describe('attention notification policy', () => {
   it('notifies for a newly waiting live session', () => {
     expect(
       shouldNotifyForAttention(
-        { id: 'live', status: 'active', needsUser: true },
+        {
+          threadId: 'session:codex:live',
+          status: 'active',
+          needsUser: true,
+        },
         new Set(),
       ),
     ).toBe(true);
@@ -14,7 +18,11 @@ describe('attention notification policy', () => {
   it('keeps reconstructed history in the sidebar without an OS alert', () => {
     expect(
       shouldNotifyForAttention(
-        { id: 'old', status: 'history', needsUser: true },
+        {
+          threadId: 'session:codex:old',
+          status: 'history',
+          needsUser: true,
+        },
         new Set(),
       ),
     ).toBe(false);
@@ -23,8 +31,12 @@ describe('attention notification policy', () => {
   it('does not repeat a notification for an already waiting session', () => {
     expect(
       shouldNotifyForAttention(
-        { id: 'live', status: 'idle', needsUser: true },
-        new Set(['live']),
+        {
+          threadId: 'session:codex:live',
+          status: 'idle',
+          needsUser: true,
+        },
+        new Set(['session:codex:live']),
       ),
     ).toBe(false);
   });
@@ -33,7 +45,7 @@ describe('attention notification policy', () => {
     expect(
       shouldNotifyForAttention(
         {
-          id: 'worker',
+          threadId: 'session:codex:worker',
           status: 'active',
           needsUser: true,
           isInternal: true,
@@ -41,5 +53,18 @@ describe('attention notification policy', () => {
         new Set(),
       ),
     ).toBe(false);
+  });
+
+  it('does not let one provider suppress a matching id from another provider', () => {
+    expect(
+      shouldNotifyForAttention(
+        {
+          threadId: 'session:codex:shared',
+          status: 'active',
+          needsUser: true,
+        },
+        new Set(['session:claude:shared']),
+      ),
+    ).toBe(true);
   });
 });

@@ -254,15 +254,18 @@ export class ThreadSearchWriter {
   }
 
   syncSideChats(chats: IndexableSideChat[]): void {
-    const seenSessionIds = new Set(chats.map((chat) => chat.sessionId));
+    const seenThreadKeys = new Set(
+      chats.map((chat) => `${chat.source}:${chat.sessionId}`),
+    );
     const transcriptRows = this.db
       .prepare(
-        `SELECT thread_key, session_id, sidechat_signature
+        `SELECT thread_key, session_id, source, sidechat_signature
          FROM search_transcripts`,
       )
       .all() as unknown as Array<{
       thread_key: string;
       session_id: string;
+      source: IndexableThread['source'];
       sidechat_signature: string;
     }>;
 
@@ -270,7 +273,9 @@ export class ThreadSearchWriter {
     try {
       for (const chat of chats) {
         const matching = transcriptRows.filter(
-          (row) => row.session_id === chat.sessionId,
+          (row) =>
+            row.session_id === chat.sessionId &&
+            row.source === chat.source,
         );
         const signature = sideChatSignature(chat);
         for (const row of matching) {
@@ -304,7 +309,7 @@ export class ThreadSearchWriter {
 
       for (const row of transcriptRows) {
         if (
-          seenSessionIds.has(row.session_id) ||
+          seenThreadKeys.has(`${row.source}:${row.session_id}`) ||
           row.sidechat_signature.length === 0
         ) {
           continue;

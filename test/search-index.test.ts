@@ -155,6 +155,7 @@ describe('thread content search index', () => {
     writer.syncSideChats([
       {
         sessionId: session.sessionId,
+        source: session.source,
         updatedAt: '2026-07-23T12:00:00Z',
         turns: [
           {
@@ -169,6 +170,54 @@ describe('thread content search index', () => {
     const [result] = reader.search('heliotrope');
     expect(result).toMatchObject({
       sessionId: 'sidechat',
+      kind: 'side_user',
+    });
+    writer.close();
+    reader.close();
+  });
+
+  it('keeps side chats separated when two providers reuse a session id', async () => {
+    const { root, reader, writer } = tempIndex();
+    const codex = thread(root, 'shared-id');
+    const claude: IndexableThread = {
+      ...thread(root, 'shared-id'),
+      source: 'claude',
+      jsonlPath: path.join(root, 'claude-shared-id.jsonl'),
+    };
+    fs.writeFileSync(codex.jsonlPath, `${codexLine('ordinary codex work')}\n`);
+    fs.writeFileSync(claude.jsonlPath, '{}\n');
+    await writer.syncSessions([codex, claude], () => {});
+    writer.syncSideChats([
+      {
+        sessionId: 'shared-id',
+        source: 'codex',
+        updatedAt: '2026-07-23T12:00:00Z',
+        turns: [{
+          role: 'user',
+          content: 'codex-only heliotrope',
+          timestamp: '2026-07-23T12:00:00Z',
+        }],
+      },
+      {
+        sessionId: 'shared-id',
+        source: 'claude',
+        updatedAt: '2026-07-23T12:00:01Z',
+        turns: [{
+          role: 'user',
+          content: 'claude-only periwinkle',
+          timestamp: '2026-07-23T12:00:01Z',
+        }],
+      },
+    ]);
+
+    expect(reader.search('heliotrope')[0]).toMatchObject({
+      sessionId: 'shared-id',
+      source: 'codex',
+      kind: 'side_user',
+    });
+    expect(reader.search('periwinkle')[0]).toMatchObject({
+      sessionId: 'shared-id',
+      source: 'claude',
       kind: 'side_user',
     });
     writer.close();

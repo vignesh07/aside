@@ -1,16 +1,26 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { scanAllSessions } from '../core/session-scanner.js';
 import { TIMING } from '../config/defaults.js';
-import type { TrackedSession, ScopeFilter } from '../types/session.js';
+import { sessionThreadId } from '../types/chat.js';
+import type {
+  TrackedSession,
+  ScopeFilter,
+  SessionSource,
+} from '../types/session.js';
 
 interface UseSessionsResult {
   sessions: TrackedSession[];
+  /** Provider-qualified session thread id, or null for fleet. */
   selectedId: string | null;
   /** null selects the fleet thread. */
-  selectSession: (id: string | null) => void;
+  selectSession: (threadId: string | null) => void;
   selectNext: () => void;
   selectPrev: () => void;
-  setSessionActivity: (sessionId: string, activity: string) => void;
+  setSessionActivity: (
+    sessionId: string,
+    activity: string,
+    source: SessionSource,
+  ) => void;
   jsonlPaths: Map<string, string>;
 }
 
@@ -22,9 +32,11 @@ export function useSessions(scopeFilter: ScopeFilter): UseSessionsResult {
   const refresh = useCallback(() => {
     const result = scanAllSessions(scopeFilter);
     setSessions((prev) => {
-      const prevById = new Map(prev.map((s) => [s.id, s]));
+      const prevById = new Map(
+        prev.map((s) => [sessionThreadId(s.source, s.id), s]),
+      );
       return result.sessions.map((s) => {
-        const previous = prevById.get(s.id);
+        const previous = prevById.get(sessionThreadId(s.source, s.id));
         if (!previous) return s;
         return {
           ...s,
@@ -38,7 +50,12 @@ export function useSessions(scopeFilter: ScopeFilter): UseSessionsResult {
     // Fleet is a real thread, represented by null. If a selected session
     // disappears, return to fleet rather than silently opening another chat.
     setSelectedId((prev) =>
-      prev && result.sessions.some((session) => session.id === prev) ? prev : null,
+      prev &&
+      result.sessions.some(
+        (session) => sessionThreadId(session.source, session.id) === prev,
+      )
+        ? prev
+        : null,
     );
   }, [scopeFilter]);
 
@@ -51,27 +68,43 @@ export function useSessions(scopeFilter: ScopeFilter): UseSessionsResult {
   const selectNext = useCallback(() => {
     setSelectedId((prev) => {
       if (sessions.length === 0) return null;
-      if (prev === null) return sessions[0]!.id;
-      const idx = sessions.findIndex((s) => s.id === prev);
+      if (prev === null) {
+        const first = sessions[0]!;
+        return sessionThreadId(first.source, first.id);
+      }
+      const idx = sessions.findIndex(
+        (s) => sessionThreadId(s.source, s.id) === prev,
+      );
       if (idx < 0 || idx === sessions.length - 1) return null;
-      return sessions[idx + 1]!.id;
+      const next = sessions[idx + 1]!;
+      return sessionThreadId(next.source, next.id);
     });
   }, [sessions]);
 
   const selectPrev = useCallback(() => {
     setSelectedId((prev) => {
       if (sessions.length === 0) return null;
-      if (prev === null) return sessions.at(-1)!.id;
-      const idx = sessions.findIndex((s) => s.id === prev);
+      if (prev === null) {
+        const last = sessions.at(-1)!;
+        return sessionThreadId(last.source, last.id);
+      }
+      const idx = sessions.findIndex(
+        (s) => sessionThreadId(s.source, s.id) === prev,
+      );
       if (idx <= 0) return null;
-      return sessions[idx - 1]!.id;
+      const previous = sessions[idx - 1]!;
+      return sessionThreadId(previous.source, previous.id);
     });
   }, [sessions]);
 
-  const setSessionActivity = useCallback((sessionId: string, activity: string) => {
+  const setSessionActivity = useCallback((
+    sessionId: string,
+    activity: string,
+    source: SessionSource,
+  ) => {
     setSessions((current) =>
       current.map((s) => {
-        if (s.id !== sessionId) return s;
+        if (s.id !== sessionId || s.source !== source) return s;
         return {
           ...s,
           currentActivity: activity,

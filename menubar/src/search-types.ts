@@ -19,6 +19,7 @@ export interface IndexableSideChatTurn {
 
 export interface IndexableSideChat {
   sessionId: string;
+  source: SessionSource;
   updatedAt: string;
   turns: IndexableSideChatTurn[];
 }
