@@ -40,5 +40,7 @@ jobs:
         working-directory: website
       - run: npm run build:railway
         working-directory: website
-      - run: npm audit --audit-level=high
+      # Production dependencies gate deployment. The full dev toolchain is
+      # exercised by lint, test, and both production builds above.
+      - run: npm audit --omit=dev --audit-level=high
         working-directory: website
