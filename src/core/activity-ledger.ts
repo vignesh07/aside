@@ -343,6 +343,19 @@ export class ActivityLedger {
       );
   }
 
+  getHighWaterSeq(): number {
+    return Math.max(0, this.nextSeq - 1);
+  }
+
+  getEvent(eventId: string): ActivityEventRecord | null {
+    const event = this.events.get(eventId);
+    return event ? { ...event } : null;
+  }
+
+  getCursors(): ThreadActivityCursor[] {
+    return [...this.cursors.values()].map((cursor) => ({ ...cursor }));
+  }
+
   flush(): void {
     if (this.persistImmediate) {
       clearImmediate(this.persistImmediate);

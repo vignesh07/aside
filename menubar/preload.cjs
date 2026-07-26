@@ -7,6 +7,12 @@ contextBridge.exposeInMainWorld('aside', {
   searchThreads: (query) => ipcRenderer.invoke('aside:search-threads', query),
   rebuildSearchIndex: () => ipcRenderer.invoke('aside:search-rebuild'),
   selectThread: (threadId) => ipcRenderer.invoke('aside:select-thread', threadId),
+  getToday: () => ipcRenderer.invoke('aside:today:get'),
+  generateTodayRecap: () => ipcRenderer.invoke('aside:today:generate'),
+  getThreadReview: (threadId, source) =>
+    ipcRenderer.invoke('aside:review:get', threadId, source),
+  generateThreadReview: (threadId, source) =>
+    ipcRenderer.invoke('aside:review:generate', threadId, source),
   ask: (question) => ipcRenderer.invoke('aside:ask', question),
   setModel: (provider, model) => ipcRenderer.invoke('aside:set-model', provider, model),
   getProviderAuth: () => ipcRenderer.invoke('aside:auth:get'),

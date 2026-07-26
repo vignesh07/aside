@@ -21,6 +21,7 @@ import * as path from 'node:path';
 import {
   MenubarBackend,
   type MenubarState,
+  type MenubarSessionTarget,
   type MenubarThreadTarget,
 } from './backend.js';
 import { importShellEnv, isMissingShellEnv } from './shell-env.js';
@@ -132,6 +133,8 @@ function integerFlagValue(name: string): number | null {
  *   --keep-open        render the detached-window control as active
  *   --attention        render representative attention states
  *   --attention-view   render and open the attention inbox
+ *   --today            open the local Today diary
+ *   --review           open the selected thread review
  *   --width <px>       override the window width for responsive QA
  *   --height <px>      override the window height for responsive QA
  *   --theme <mode>     force light or dark appearance for responsive QA
@@ -150,6 +153,8 @@ const CAPTURE_KEEP_OPEN = process.argv.includes('--keep-open');
 const CAPTURE_ATTENTION_VIEW = process.argv.includes('--attention-view');
 const CAPTURE_ATTENTION =
   process.argv.includes('--attention') || CAPTURE_ATTENTION_VIEW;
+const CAPTURE_TODAY = process.argv.includes('--today');
+const CAPTURE_REVIEW = process.argv.includes('--review');
 const CAPTURE_THEME = flagValue('--theme');
 const DEV_WINDOW_SIZE = parseWindowSize({
   width: integerFlagValue('--width') ?? DEFAULT_WINDOW_SIZE.width,
@@ -421,6 +426,22 @@ function threadTarget(state: MenubarState): MenubarThreadTarget {
   };
 }
 
+function sessionTarget(
+  threadId: unknown,
+  source: unknown,
+): MenubarSessionTarget | null {
+  if (
+    typeof threadId !== 'string' ||
+    !threadId.startsWith('session:') ||
+    threadId.length <= 'session:'.length ||
+    threadId.length > 500 ||
+    (source !== 'claude' && source !== 'codex' && source !== 'pi')
+  ) {
+    return null;
+  }
+  return { threadId, source };
+}
+
 function stateForRenderer(state: MenubarState | undefined): MenubarState | undefined {
   if (!state || !CAPTURE_ATTENTION) return state;
   const fixtures = [
@@ -589,6 +610,11 @@ app.whenReady().then(() => {
       activity: CAPTURE_PATH
         ? new ActivityLedger(new InMemoryActivityLedgerStore())
         : undefined,
+      // Screenshot QA must never read or replace the user's private generated
+      // recaps, even when the local activity fixture happens to match a day.
+      artifacts: CAPTURE_PATH
+        ? { load: () => [], save: () => {} }
+        : undefined,
     },
   );
   backend.start();
@@ -610,6 +636,43 @@ app.whenReady().then(() => {
       }
     }
   });
+  ipcMain.handle('aside:today:get', () => backend?.getToday());
+  ipcMain.handle('aside:today:generate', async () => {
+    if (!backend) throw new Error('Aside is still starting.');
+    const target = backend.getTodayAnalysisTarget();
+    await requireUsableProvider(
+      target.provider,
+      providerAuth,
+      'Connect the Today recap provider before generating.',
+    );
+    return backend.generateTodayRecap(target);
+  });
+  ipcMain.handle(
+    'aside:review:get',
+    (_e, threadId: unknown, source: unknown) => {
+      const selection = sessionTarget(threadId, source);
+      if (!selection || !backend) {
+        throw new Error('Choose a visible agent thread to review.');
+      }
+      return backend.getThreadReview(selection);
+    },
+  );
+  ipcMain.handle(
+    'aside:review:generate',
+    async (_e, threadId: unknown, source: unknown) => {
+      const selection = sessionTarget(threadId, source);
+      if (!selection || !backend) {
+        throw new Error('Choose a visible agent thread to review.');
+      }
+      const target = backend.getThreadReviewAnalysisTarget(selection);
+      await requireUsableProvider(
+        target.provider,
+        providerAuth,
+        'Connect this thread’s review provider before generating.',
+      );
+      return backend.generateThreadReview(selection, target);
+    },
+  );
   ipcMain.handle('aside:search-threads', (_e, query: unknown) => {
     if (typeof query !== 'string' || query.length > 500 || !backend) return [];
     return backend.searchThreads(query);
@@ -809,6 +872,8 @@ app.whenReady().then(() => {
       CAPTURE_OLDER,
       CAPTURE_SETTINGS,
       CAPTURE_ACCOUNTS,
+      CAPTURE_TODAY,
+      CAPTURE_REVIEW,
     );
   }
 });
@@ -832,6 +897,8 @@ async function captureAndQuit(
   showOlder: boolean,
   showSettings: boolean,
   showAccounts: boolean,
+  showToday: boolean,
+  showReview: boolean,
 ) {
   let exitCode = 0;
   try {
@@ -901,6 +968,20 @@ async function captureAndQuit(
         `document.querySelector('.thread.attention-smart')?.click()`,
       );
       await sleep(250);
+    }
+
+    if (showToday) {
+      await window.webContents.executeJavaScript(
+        `document.querySelector('.thread.today-smart')?.click()`,
+      );
+      await sleep(350);
+    }
+
+    if (showReview) {
+      await window.webContents.executeJavaScript(
+        `document.getElementById('review-thread')?.click()`,
+      );
+      await sleep(350);
     }
 
     if (question) {
@@ -991,6 +1072,8 @@ async function captureLayoutIssues(window: BrowserWindow): Promise<string[]> {
 
       insideViewport('sidebar', sidebar);
       insideViewport('chat', chat);
+      insideViewport('analysis', document.getElementById('analysis-view'));
+      insideViewport('review action', document.getElementById('review-thread'));
       insideViewport('composer', document.querySelector('.composer-shell'));
       insideViewport('send button', document.getElementById('send'));
       insideViewport('settings', settings);

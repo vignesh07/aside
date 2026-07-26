@@ -358,6 +358,22 @@
         color: var(--accent);
         border-color: color-mix(in srgb, var(--accent) 42%, transparent);
       }
+      .thread.today-smart {
+        min-height: 40px;
+      }
+      .thread.today-smart .source {
+        width: 20px;
+        height: 20px;
+        color: var(--secondary);
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        font-size: 9px;
+        font-variant-numeric: tabular-nums;
+      }
+      .thread.today-smart.active .source {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+      }
       .sidebar-foot {
         flex: none;
         display: flex;
@@ -444,6 +460,27 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .header-action {
+        flex: none;
+        margin-left: 10px;
+        padding: 4px 8px;
+        color: var(--secondary);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        font-size: 10px;
+        cursor: default;
+        -webkit-app-region: no-drag;
+      }
+      .header-action:hover {
+        color: var(--text);
+        border-color: var(--line-strong);
+        background: var(--surface-hover);
+      }
+      .header-action:focus { outline: 0; }
+      .header-action:focus-visible {
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+      }
       #needs-count {
         flex: none;
         margin-left: 10px;
@@ -476,6 +513,435 @@
         flex: 1;
         overflow-y: auto;
         padding: 48px 42px 24px;
+      }
+
+      /* Today and thread review */
+      #analysis-view {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+        padding: 0 max(22px, calc((100% - 760px) / 2));
+        user-select: text;
+      }
+      .analysis-content {
+        width: 100%;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 19px 0 34px;
+      }
+      .analysis-kicker {
+        margin: 0 0 11px;
+        color: var(--secondary);
+        font-size: 11px;
+        font-weight: 540;
+      }
+      .analysis-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .analysis-metric {
+        min-width: 0;
+        padding: 12px 14px 11px 0;
+      }
+      .analysis-metric + .analysis-metric {
+        padding-left: 14px;
+        border-left: 1px solid var(--line);
+      }
+      .analysis-metric strong {
+        display: block;
+        overflow: hidden;
+        color: var(--text);
+        font-size: 20px;
+        font-weight: 570;
+        letter-spacing: -.035em;
+        line-height: 1.05;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .analysis-metric span {
+        display: block;
+        overflow: hidden;
+        margin-top: 3px;
+        color: var(--secondary);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .analysis-section {
+        padding: 22px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .analysis-section-heading {
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+        margin-bottom: 12px;
+      }
+      .analysis-section-heading > div {
+        min-width: 0;
+        flex: 1;
+      }
+      .analysis-section-heading h2,
+      .diary-project-heading h2 {
+        margin: 0;
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 610;
+        letter-spacing: -.008em;
+      }
+      .analysis-section-heading p {
+        margin: 2px 0 0;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .analysis-action {
+        flex: none;
+        min-height: 25px;
+        padding: 3px 9px;
+        color: var(--secondary);
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: transparent;
+        font-size: 10px;
+        font-weight: 540;
+        cursor: default;
+      }
+      .analysis-action:hover:not(:disabled) {
+        color: var(--text);
+        background: var(--surface-hover);
+      }
+      .analysis-action.primary {
+        color: var(--window);
+        border-color: var(--text);
+        background: var(--text);
+      }
+      .analysis-action.primary:hover:not(:disabled) {
+        color: var(--window);
+        background: color-mix(in srgb, var(--text) 88%, var(--window));
+      }
+      .analysis-action:disabled {
+        opacity: .42;
+      }
+      .analysis-action:focus { outline: 0; }
+      .analysis-action:focus-visible,
+      .evidence-row:focus-visible,
+      .evidence-chip:focus-visible,
+      .diary-thread-heading:focus-visible {
+        outline: 0;
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+      }
+      .analysis-muted,
+      .analysis-footnote {
+        margin: 0;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .analysis-footnote {
+        margin-top: 10px;
+        color: var(--secondary);
+        line-height: 1.4;
+      }
+      .analysis-status {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 18px 0;
+        padding: 11px 0;
+        color: var(--secondary);
+        border-bottom: 1px solid var(--line);
+        font-size: 11px;
+      }
+      .analysis-status > span { min-width: 0; flex: 1; }
+      .analysis-status.error { color: var(--danger); }
+      .analysis-status.loading::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border: 1px solid var(--tertiary);
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin .8s linear infinite;
+      }
+      .analysis-status.empty {
+        padding: 26px 0;
+        color: var(--secondary);
+      }
+      .insight-list { border-top: 1px solid var(--line); }
+      .insight-row {
+        display: grid;
+        grid-template-columns: 7px minmax(0, 1fr);
+        gap: 10px;
+        padding: 11px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .insight-marker {
+        width: 6px;
+        height: 6px;
+        margin-top: 5px;
+        border-radius: 50%;
+        background: var(--tertiary);
+      }
+      .insight-row.severity-attention .insight-marker,
+      .insight-row.severity-warning .insight-marker {
+        background: var(--attention);
+      }
+      .insight-row.severity-error .insight-marker {
+        background: var(--danger);
+      }
+      .insight-copy { min-width: 0; }
+      .insight-copy h3 {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 590;
+      }
+      .insight-copy p {
+        margin: 2px 0 0;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .insight-meta {
+        margin-top: 4px;
+        color: var(--secondary);
+        font-size: 9px;
+      }
+      .evidence-chips {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 7px;
+      }
+      .evidence-chip,
+      .evidence-row {
+        min-width: 0;
+        color: var(--secondary);
+        border: 0;
+        background: transparent;
+        font: inherit;
+        text-align: left;
+      }
+      button.evidence-chip,
+      button.evidence-row {
+        cursor: default;
+      }
+      .evidence-chip {
+        max-width: min(100%, 240px);
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 6px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        font-size: 9px;
+      }
+      button.evidence-chip:hover {
+        color: var(--text);
+        border-color: var(--line-strong);
+        background: var(--surface-hover);
+      }
+      .evidence-chip .evidence-copy {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .evidence-citation {
+        flex: none;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+      .evidence-time {
+        flex: none;
+        color: var(--secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      .evidence-copy { min-width: 0; flex: 1; }
+      .evidence-arrow {
+        flex: none;
+        color: var(--tertiary);
+        font-size: 14px;
+        line-height: 1;
+      }
+      .generated-section .analysis-section-heading { margin-bottom: 8px; }
+      .artifact-meta {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 10px;
+        color: var(--secondary);
+        font-size: 9px;
+      }
+      .artifact-stale {
+        padding-left: 7px;
+        color: var(--attention);
+        border-left: 1px solid var(--line);
+      }
+      .artifact-prose {
+        padding-left: 11px;
+        border-left: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+        color: var(--text);
+        font-size: 11px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+      .artifact-evidence-label {
+        margin-top: 13px;
+        color: var(--secondary);
+        font-size: 9px;
+        font-weight: 560;
+        text-transform: uppercase;
+        letter-spacing: .045em;
+      }
+      .artifact-missing { margin-top: 7px; }
+      .diary-project {
+        padding-top: 15px;
+      }
+      .diary-project + .diary-project {
+        margin-top: 5px;
+        border-top: 1px solid var(--line);
+      }
+      .diary-project-heading {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding-bottom: 6px;
+      }
+      .diary-project-heading h2 {
+        min-width: 0;
+        overflow: hidden;
+        flex: 1;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diary-project-heading span {
+        flex: none;
+        color: var(--secondary);
+        font-size: 9px;
+      }
+      .diary-thread {
+        border-top: 1px solid var(--line);
+      }
+      .diary-thread-heading {
+        width: 100%;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 0 7px;
+        color: inherit;
+        border: 0;
+        background: transparent;
+        text-align: left;
+      }
+      button.diary-thread-heading { cursor: default; }
+      button.diary-thread-heading:hover strong { color: var(--accent); }
+      .diary-thread-copy {
+        min-width: 0;
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+      }
+      .diary-thread-copy strong {
+        overflow: hidden;
+        font-size: 11px;
+        font-weight: 570;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diary-thread-copy span {
+        overflow: hidden;
+        color: var(--secondary);
+        font-size: 9px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diary-thread-heading time {
+        flex: none;
+        color: var(--secondary);
+        font-size: 9px;
+        font-variant-numeric: tabular-nums;
+      }
+      .diary-subagents {
+        display: grid;
+        grid-template-columns: 66px minmax(0, 1fr);
+        gap: 0 8px;
+        padding: 0 0 7px 10px;
+        color: var(--secondary);
+        border-left: 1px solid var(--line);
+      }
+      .diary-subagents-label {
+        padding: 4px 0;
+        color: var(--secondary);
+        font-size: 9px;
+      }
+      .diary-subagent {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(80px, auto) auto;
+        align-items: baseline;
+        gap: 8px;
+        padding: 4px 5px;
+        color: var(--secondary);
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        font: inherit;
+        text-align: left;
+      }
+      button.diary-subagent { cursor: default; }
+      button.diary-subagent:hover {
+        color: var(--text);
+        background: var(--surface-hover);
+      }
+      .diary-subagent span,
+      .diary-subagent small {
+        overflow: hidden;
+        font-size: 9px;
+        font-weight: 400;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diary-subagent small { color: var(--secondary); }
+      .diary-subagent time {
+        color: var(--secondary);
+        font-size: 9px;
+        font-variant-numeric: tabular-nums;
+      }
+      .diary-evidence,
+      .observed-list {
+        padding: 0 0 8px 10px;
+        border-left: 1px solid var(--line);
+      }
+      .evidence-row {
+        width: 100%;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 4px 5px;
+        border-radius: 4px;
+        font-size: 9px;
+      }
+      button.evidence-row:hover {
+        color: var(--text);
+        background: var(--surface-hover);
+      }
+      .evidence-row .evidence-copy {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diary-more {
+        padding: 4px 5px;
+        color: var(--secondary);
+        font-size: 9px;
+      }
+      .observed-list {
+        padding-left: 0;
+        border-left: 0;
+        border-top: 1px solid var(--line);
       }
       .onboarding-inner { width: 100%; max-width: 430px; margin: 0 auto; }
       .onboarding-eyebrow {
@@ -598,7 +1064,8 @@
         to { opacity: 1; transform: translateY(0); }
       }
       @media (prefers-reduced-motion: reduce) {
-        #update-ready { animation: none; }
+        #update-ready,
+        .analysis-status.loading::before { animation: none; }
       }
       #privacy-banner {
         display: flex;
@@ -1016,7 +1483,31 @@
         .sidebar-foot { padding-inline: 8px; }
         #account-summary { max-width: 92px; }
         .scope-header { padding-inline: 14px; }
+        .header-action {
+          max-width: 86px;
+          overflow: hidden;
+          padding-inline: 7px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
         #messages { padding: 20px 18px; }
+        #analysis-view { padding-inline: 16px; }
+        .analysis-content { padding-top: 15px; }
+        .analysis-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .analysis-metric:nth-child(3) {
+          padding-left: 0;
+          border-left: 0;
+        }
+        .analysis-metric:nth-child(n + 3) { border-top: 1px solid var(--line); }
+        .analysis-section { padding-block: 18px; }
+        .analysis-section-heading { gap: 9px; }
+        .diary-project-heading span {
+          max-width: 52%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .artifact-prose { font-size: 10px; }
         #onboarding { padding: 32px 18px 20px; }
         .composer-shell { padding: 7px 14px 11px; }
         .settings-body { padding: 18px 18px 24px; }
@@ -1038,6 +1529,9 @@
 
       @media (max-height: 540px) {
         #messages { padding-block: 16px; }
+        .analysis-content { padding-top: 13px; padding-bottom: 24px; }
+        .analysis-section { padding-block: 16px; }
+        .analysis-metric { padding-top: 9px; padding-bottom: 8px; }
         #onboarding { padding-top: 24px; padding-bottom: 16px; }
         .onboarding-copy { margin-bottom: 16px; }
         .empty { margin-top: clamp(36px, 14vh, 70px); }
@@ -1102,6 +1596,13 @@
             <h1 id="scope-title">All agents</h1>
             <div id="scope-meta">Fleet conversation</div>
           </div>
+          <button
+            id="review-thread"
+            class="header-action"
+            type="button"
+            aria-label="Review this thread’s activity"
+            hidden
+          >Review thread</button>
           <span id="needs-count" hidden></span>
           <button
             id="keep-open"
@@ -1133,8 +1634,14 @@
             </p>
           </div>
         </div>
+        <div
+          id="analysis-view"
+          role="region"
+          aria-label="Activity analysis"
+          hidden
+        ></div>
         <div id="messages"></div>
-        <div class="composer-shell">
+        <div id="composer-shell" class="composer-shell">
           <div id="update-ready" role="status" aria-live="polite" hidden>
             <span id="update-ready-copy">An Aside update is ready.</span>
             <button id="update-ready-restart" type="button">Restart</button>

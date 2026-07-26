@@ -32,4 +32,34 @@ describe('menubar product surfaces', () => {
     expect(renderer).toContain('attentionOnly = !attentionOnly');
     expect(renderer).toContain("'aria-pressed'");
   });
+
+  it('keeps Today and thread review as explicit destinations', () => {
+    expect(indexHtml).toContain('id="analysis-view"');
+    expect(indexHtml).toContain('id="review-thread"');
+    expect(renderer).toContain("type ActiveView = 'thread' | 'today' | 'review'");
+    expect(renderer).toContain("title: 'Today'");
+    expect(renderer).toContain("activeView = 'review'");
+    expect(renderer).toContain("composerShellEl.hidden = activeView !== 'thread'");
+  });
+
+  it('runs generated analysis only from named user actions', () => {
+    expect(renderer).toContain("buttonId: 'write-recap'");
+    expect(renderer).toContain("buttonId: 'write-review'");
+    expect(renderer).toContain('window.aside.generateTodayRecap()');
+    expect(renderer).toContain(
+      'window.aside.generateThreadReview(threadId, source)',
+    );
+  });
+
+  it('refreshes activity views for ledger, read-state, and local-day changes', () => {
+    expect(renderer).toContain('state.activityHighWaterSeq');
+    expect(renderer).toContain('state.activityCursorRevision');
+    expect(renderer).toContain('localDateKey()');
+    expect(renderer).toContain('todayFailedRevision === revision');
+    expect(renderer).toContain('reviewFailedRevision === revision');
+  });
+
+  it('announces generated evidence citation numbers accessibly', () => {
+    expect(renderer).toContain('`Evidence ${citationNumber}, `');
+  });
 });
