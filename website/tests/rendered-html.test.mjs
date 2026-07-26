@@ -43,6 +43,13 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Ask about the work\./);
   assert.match(html, /Don(?:&#x27;|')t interrupt it\./);
   assert.match(html, /Dashboards show status\. Aside lets you ask why\./);
+  assert.match(html, /See what needs attention/);
+  assert.match(html, /Read it without clearing it/);
+  assert.match(html, /Opening a thread doesn(?:&#x27;|')t make it done\./);
+  assert.match(html, /Last turn ended/);
+  assert.match(html, /Mark reviewed/);
+  assert.match(html, /Opening alone never clears/);
+  assert.match(html, /northstar needs you/);
   assert.match(html, /Search the work, not just the title/);
   assert.match(html, /Find the thread from what happened inside it\./);
   assert.match(html, /Subagent work stays attached:/);
@@ -63,10 +70,13 @@ test("server-renders the finished Aside landing page", async () => {
     /https:\/\/aside\.vgnsh\.xyz\/download\/mac-intel/,
   );
   assert.match(html, /https:\/\/aside\.vgnsh\.xyz\/og\.png/);
+  assert.match(html, /Keep Aside Open/);
+  assert.doesNotMatch(html, /⌘O|⌘,/);
   assert.match(
     html,
     /<link rel="canonical" href="https:\/\/aside\.vgnsh\.xyz\/"\/>/,
   );
+  assert.doesNotMatch(html, /Two threads are waiting\./);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 

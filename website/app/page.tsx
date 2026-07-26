@@ -12,18 +12,18 @@ const GITHUB_REPOSITORY = "https://github.com/vignesh07/aside";
 const demoSteps = [
   {
     label: "Notice",
-    title: "Two threads need you",
-    detail: "Aside lifts direct questions out of the background.",
+    title: "See what needs attention",
+    detail: "Waiting, failed, and finished work stay in one place.",
   },
   {
     label: "Select",
-    title: "Open the right thread",
-    detail: "Its transcript and side chat stay scoped to that session.",
+    title: "Read it without clearing it",
+    detail: "Opening removes the unread state, not the follow-up.",
   },
   {
     label: "Ask",
-    title: "Get the blocker, not a recap",
-    detail: "A separate model answers without interrupting the agent.",
+    title: "Get context before you act",
+    detail: "The side chat stays scoped to that session.",
   },
 ];
 
@@ -60,6 +60,25 @@ function DownloadButtons({ inverse = false }: { inverse?: boolean }) {
       <a className="intel-link" href={INTEL_DOWNLOAD}>
         Intel Mac
       </a>
+    </div>
+  );
+}
+
+function AttentionStatusCard({ feature = false }: { feature?: boolean }) {
+  return (
+    <div className={`demo-status-card${feature ? " feature-status-card" : ""}`}>
+      <div className="demo-status-meta">
+        <span>Needs review</span>
+        <small>Waiting for 12m</small>
+      </div>
+      <strong>Last turn ended</strong>
+      <p>
+        Built and notarized the Mac release. The signed update is ready to
+        restart and verify.
+      </p>
+      <div className="demo-status-actions" aria-hidden="true">
+        <span>Mark reviewed</span>
+      </div>
     </div>
   );
 }
@@ -114,13 +133,24 @@ function AppDemo() {
                 <strong>All agents</strong>
                 <small>3 recent · 17 total</small>
               </span>
-              {step === 0 && <b className="needs-count">2</b>}
+            </button>
+
+            <button
+              className="demo-thread attention-filter filtered"
+              onClick={() => setStep(0)}
+              aria-pressed="true"
+            >
+              <span className="thread-glyph attention-glyph">◉</span>
+              <span>
+                <strong>Attention</strong>
+                <small>{step === 0 ? "2 unread · 2 total" : "1 unread · 2 total"}</small>
+              </span>
             </button>
 
             <div className="project-label">
               <span>⌄</span>
               <strong>atlas</strong>
-              <small>3</small>
+              <small>1</small>
             </div>
 
             <button
@@ -130,32 +160,37 @@ function AppDemo() {
               <span className="agent-mark codex">X</span>
               <span>
                 <strong>Prepare the release</strong>
-                <small>codex · active</small>
+                <small>Last turn ended · Waiting for 12m</small>
               </span>
-              <i className="needs-dot" title="Needs you" />
-            </button>
-
-            <button className="demo-thread" onClick={() => setStep(1)}>
-              <span className="agent-mark claude">C</span>
-              <span>
-                <strong>Audit the database</strong>
-                <small>claude · 8m</small>
+              <span
+                className={`demo-attention-badge completed${
+                  step === 0 ? " unread" : ""
+                }`}
+                title={step === 0 ? "Unread review" : "Read, still unresolved"}
+              >
+                ○
               </span>
             </button>
 
             <div className="project-label second">
               <span>⌄</span>
               <strong>northstar</strong>
-              <small>2</small>
+              <small>1</small>
             </div>
 
-            <button className="demo-thread quiet" onClick={() => setStep(1)}>
-              <span className="agent-mark codex">X</span>
+            <div className="demo-thread attention-thread-secondary">
+              <span className="agent-mark claude">C</span>
               <span>
-                <strong>Fix search indexing</strong>
-                <small>codex · 22m</small>
+                <strong>Review the migration</strong>
+                <small>Waiting for a rollback choice · 4m</small>
               </span>
-            </button>
+              <span
+                className="demo-attention-badge waiting unread"
+                title="Waiting for your input"
+              >
+                •
+              </span>
+            </div>
           </aside>
 
           <section className="demo-chat" aria-live="polite">
@@ -165,7 +200,7 @@ function AppDemo() {
                 <small>
                   {step === 0
                     ? "3 recent · 17 total · fleet conversation"
-                    : "atlas · codex · active"}
+                    : "atlas · codex · history"}
                 </small>
               </div>
               {step > 0 && <span className="read-only-pill">Read only</span>}
@@ -173,50 +208,36 @@ function AppDemo() {
 
             <div className={`demo-chat-body step-${step}`}>
               {step === 0 ? (
-                <div className="attention-view">
-                  <p className="section-kicker">Needs you</p>
-                  <h3>Two threads are waiting.</h3>
-                  <div className="attention-row">
-                    <span className="agent-mark codex">X</span>
-                    <div>
-                      <strong>Prepare the release</strong>
-                      <small>“Can I restart the signed app now?”</small>
-                    </div>
-                    <span className="waiting-time">now</span>
-                  </div>
-                  <div className="attention-row muted-row">
-                    <span className="agent-mark claude">C</span>
-                    <div>
-                      <strong>Review the migration</strong>
-                      <small>“Which rollback path should I use?”</small>
-                    </div>
-                    <span className="waiting-time">4m</span>
-                  </div>
-                </div>
-              ) : (
                 <>
-                  <div className="message observer">
+                  <div className="message user">
+                    <p>What needs me right now?</p>
+                  </div>
+                  <div className="message observer answer">
                     <span>Aside</span>
                     <p>
-                      This thread built and notarized the Mac release. It is
-                      waiting for one decision before it can finish.
+                      Prepare the release ended its latest turn 12 minutes ago.
+                      Review the migration is waiting for a rollback choice.
                     </p>
                   </div>
+                </>
+              ) : (
+                <>
                   {step === 2 && (
                     <>
                       <div className="message user">
-                        <p>What is this waiting on?</p>
+                        <p>Anything left before I restart?</p>
                       </div>
                       <div className="message observer answer">
                         <span>Aside</span>
                         <p>
-                          The signed update is downloaded. It needs your
-                          approval to restart the app and verify the new
-                          version.
+                          No. The signed update passed notarization and
+                          Gatekeeper. Restart, then verify the new version
+                          opens.
                         </p>
                       </div>
                     </>
                   )}
+                  <AttentionStatusCard />
                 </>
               )}
             </div>
@@ -353,6 +374,11 @@ export default function Home() {
                 <span>Prepare the release</span>
                 <small>agent reply</small>
               </div>
+              <div className="subagent-disclosure">
+                <span>›</span>
+                <strong>Subagents</strong>
+                <small>2</small>
+              </div>
               <div className="compact-thread">
                 <span>Fix the deployment</span>
                 <small>command</small>
@@ -368,24 +394,39 @@ export default function Home() {
           <article className="feature-row flip reveal">
             <div className="feature-index">02</div>
             <div className="feature-copy">
-              <p className="eyebrow">Start with the one that needs you</p>
-              <h3>Questions rise above activity.</h3>
+              <p className="eyebrow">Read is not resolved</p>
+              <h3>Opening a thread doesn&apos;t make it done.</h3>
               <p>
-                Direct input requests and likely questions move to the top.
-                When a live session starts waiting, Aside can send a Mac
+                Aside keeps attention items visible after you open them, with
+                the status, local context, and time waiting. Opening alone never
+                clears finished, failed, or interrupted work. Mark it reviewed
+                when you&apos;re done. Direct input stays until the agent moves
+                on.
+              </p>
+              <p className="feature-note">
+                When a live session asks for input, Aside can also send a Mac
                 notification.
               </p>
             </div>
-            <div className="feature-visual notification-visual" aria-hidden="true">
-              <div className="mac-notification">
+            <div
+              className="feature-visual attention-feature-visual"
+              aria-hidden="true"
+            >
+              <div className="feature-attention-head">
+                <span>◉</span>
+                <div>
+                  <strong>Attention</strong>
+                  <small>0 unread · 1 total</small>
+                </div>
+              </div>
+              <AttentionStatusCard feature />
+              <div className="feature-notification">
                 <span className="mini-mark">a</span>
                 <div>
-                  <p>
-                    <strong>Aside</strong>
-                    <small>now</small>
-                  </p>
-                  <b>atlas needs you</b>
-                  <span>Prepare the release is waiting for your approval.</span>
+                  <strong>northstar needs you</strong>
+                  <small>
+                    Review the migration is waiting for a rollback choice.
+                  </small>
                 </div>
               </div>
             </div>
@@ -496,13 +537,17 @@ export default function Home() {
               </div>
             </div>
             <button>
-              Open Aside <span>⌘O</span>
+              Open aside
             </button>
             <button>
-              Check for Updates <span>⌘U</span>
+              Keep Aside Open <span>✓</span>
             </button>
             <button>
-              Aside Settings <span>⌘,</span>
+              Aside Settings…
+            </button>
+            <div className="menu-separator" />
+            <button>
+              Quit aside
             </button>
           </div>
         </div>

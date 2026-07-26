@@ -3,7 +3,7 @@ import "./globals.css";
 
 const title = "Aside — Ask about the work. Don’t interrupt it.";
 const description =
-  "Search every local Codex, Claude Code, and Pi thread, then keep a persistent side chat beside the work.";
+  "Search every local Codex, Claude Code, and Pi thread, see what needs your attention, and keep a persistent side chat beside the work.";
 const siteOrigin =
   process.env.NEXT_PUBLIC_SITE_ORIGIN ?? "https://aside.vgnsh.xyz";
 
