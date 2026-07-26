@@ -53,7 +53,7 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Aside is open source\./);
   assert.match(html, /View the source on GitHub/);
   assert.match(html, /https:\/\/github\.com\/vignesh07\/aside/);
-  assert.match(html, /macOS preview · v0\.1\.6/);
+  assert.match(html, /macOS preview · v0\.1\.7/);
   assert.match(
     html,
     /https:\/\/aside\.vgnsh\.xyz\/download\/mac-arm64/,
