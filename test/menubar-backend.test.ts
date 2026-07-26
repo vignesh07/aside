@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { MenubarBackend } from '../menubar/src/backend.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  MenubarBackend,
+  type MenubarSessionTarget,
+} from '../menubar/src/backend.js';
 import { SideChatService } from '../dist/core/side-chat-service.js';
 import {
   ActivityLedger,
@@ -7,6 +10,23 @@ import {
 } from '../dist/core/activity-ledger.js';
 import type { AskParams } from '../dist/core/side-chat-engine.js';
 import type { TrackedSession } from '../dist/types/session.js';
+import type {
+  ActivityEventRecord,
+  ActivityLedgerState,
+} from '../dist/types/activity.js';
+import type {
+  GeneratedArtifact,
+  GeneratedDailyRecapArtifact,
+  GeneratedThreadReviewArtifact,
+} from '../dist/types/generated-artifact.js';
+import type {
+  GeneratedArtifactStore,
+} from '../dist/core/generated-artifact-store.js';
+import type {
+  GenerateDailyRecapRequest,
+  GenerateThreadReviewRequest,
+  ObserverAnalysisEngineLike,
+} from '../dist/core/observer-analysis-engine.js';
 import type {
   IndexableThread,
   SearchIndexStatus,
@@ -40,9 +60,20 @@ const FAKE_MODELS = [
   { provider: 'openai', model: 'gpt-4o-mini' },
 ];
 
+const ANALYSIS_NOW = new Date('2026-07-26T18:00:00.000Z');
+
+interface BackendTestDeps {
+  activity?: ActivityLedger;
+  artifacts?: GeneratedArtifactStore;
+  analysis?: ObserverAnalysisEngineLike;
+  now?: () => Date;
+  timeZone?: string;
+}
+
 function makeBackend(
   sessions: TrackedSession[],
   search?: ThreadSearchService,
+  deps: BackendTestDeps = {},
 ) {
   const setModelCalls: Array<[string, string]> = [];
   const askCalls: AskParams[] = [];
@@ -54,7 +85,12 @@ function makeBackend(
     setModel: (p: string, m: string) => setModelCalls.push([p, m]),
   });
   const states: number[] = [];
-  const activity = new ActivityLedger(new InMemoryActivityLedgerStore());
+  const activity =
+    deps.activity ??
+    new ActivityLedger(
+      new InMemoryActivityLedgerStore(),
+      deps.now,
+    );
   const backend = new MenubarBackend(
     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     () => states.push(1),
@@ -64,9 +100,124 @@ function makeBackend(
       models: () => FAKE_MODELS,
       search,
       activity,
+      artifacts: deps.artifacts ?? new MemoryArtifactStore(),
+      analysis: deps.analysis ?? analysisEngine().engine,
+      now: deps.now,
+      timeZone: deps.timeZone,
     },
   );
   return { backend, service, activity, setModelCalls, askCalls };
+}
+
+function activityEvent(
+  seq: number,
+  overrides: Partial<ActivityEventRecord> = {},
+): ActivityEventRecord {
+  const occurredAtMs = ANALYSIS_NOW.getTime() - (10 - seq) * 1_000;
+  return {
+    seq,
+    eventId: `event-${seq}`,
+    threadKey: 'codex:root',
+    source: 'codex',
+    sessionId: 'root',
+    projectName: 'aside',
+    projectPath: '/Users/vignesh/aside',
+    title: 'Ship the observer',
+    occurredAtMs,
+    observedAtMs: occurredAtMs,
+    kind: 'progress',
+    lifecycle: 'progress',
+    severity: 'info',
+    summary: `Observed event ${seq}`,
+    evidenceHash: String(seq).padStart(64, '0'),
+    seeded: false,
+    ...overrides,
+  };
+}
+
+function activityLedger(
+  events: ActivityEventRecord[],
+  now: () => Date = () => ANALYSIS_NOW,
+): ActivityLedger {
+  const state: ActivityLedgerState = { events, cursors: [] };
+  return new ActivityLedger(new InMemoryActivityLedgerStore(state), now);
+}
+
+class MemoryArtifactStore implements GeneratedArtifactStore {
+  artifacts: GeneratedArtifact[];
+  readonly saves: GeneratedArtifact[][] = [];
+
+  constructor(initial: GeneratedArtifact[] = []) {
+    this.artifacts = initial.map(cloneArtifact);
+  }
+
+  load(): GeneratedArtifact[] {
+    return this.artifacts.map(cloneArtifact);
+  }
+
+  save(artifacts: GeneratedArtifact[]): void {
+    this.artifacts = artifacts.map(cloneArtifact);
+    this.saves.push(this.artifacts.map(cloneArtifact));
+  }
+}
+
+function cloneArtifact(artifact: GeneratedArtifact): GeneratedArtifact {
+  return { ...artifact, evidenceIds: [...artifact.evidenceIds] };
+}
+
+function analysisEngine(options: {
+  onDaily?: (request: GenerateDailyRecapRequest) => Promise<GeneratedDailyRecapArtifact>;
+  onThread?: (request: GenerateThreadReviewRequest) => Promise<GeneratedThreadReviewArtifact>;
+} = {}) {
+  const generateDailyRecap = vi.fn(
+    options.onDaily ??
+      (async (request: GenerateDailyRecapRequest) =>
+        dailyArtifact(request)),
+  );
+  const generateThreadReview = vi.fn(
+    options.onThread ??
+      (async (request: GenerateThreadReviewRequest) =>
+        threadArtifact(request)),
+  );
+  const engine: ObserverAnalysisEngineLike = {
+    generateDailyRecap,
+    generateThreadReview,
+  };
+  return { engine, generateDailyRecap, generateThreadReview };
+}
+
+function dailyArtifact(
+  request: GenerateDailyRecapRequest,
+): GeneratedDailyRecapArtifact {
+  return {
+    id: `daily-${request.day}-${request.evidence.inputHash.slice(0, 8)}`,
+    kind: 'daily_recap',
+    day: request.day,
+    createdAt: ANALYSIS_NOW.toISOString(),
+    provider: request.provider,
+    model: request.model,
+    inputHighWaterSeq: request.evidence.highWaterSeq,
+    inputHash: request.evidence.inputHash,
+    evidenceIds: request.evidence.evidenceIds.slice(0, 1),
+    markdown: 'A factual recap [1]',
+  };
+}
+
+function threadArtifact(
+  request: GenerateThreadReviewRequest,
+): GeneratedThreadReviewArtifact {
+  return {
+    id: `thread-${request.evidence.inputHash.slice(0, 8)}`,
+    kind: 'thread_review',
+    threadKey: request.threadKey,
+    createdAt: ANALYSIS_NOW.toISOString(),
+    provider: request.provider,
+    model: request.model,
+    inputHighWaterSeq: request.evidence.highWaterSeq,
+    inputHash: request.evidence.inputHash,
+    evidenceIds: request.evidence.evidenceIds.slice(0, 1),
+    markdown: 'An evidence-backed review [1]',
+  };
 }
 
 describe('MenubarBackend', () => {
@@ -278,6 +429,7 @@ describe('MenubarBackend', () => {
     });
     backend.selectThread('session:done');
     expect(backend.getState().unreadAttentionCount).toBe(1);
+    const cursorRevision = backend.getState().activityCursorRevision;
 
     backend.markThreadViewed('session:done');
     expect(backend.getState()).toMatchObject({
@@ -295,6 +447,7 @@ describe('MenubarBackend', () => {
       attentionCount: 0,
       unreadAttentionCount: 0,
     });
+    expect(backend.getState().activityCursorRevision).not.toBe(cursorRevision);
   });
 
   it('merges ranked transcript matches with current metadata and drops stale rows', async () => {
@@ -424,5 +577,480 @@ describe('MenubarBackend', () => {
         needsAttention: true,
         attentionKind: 'waiting',
       });
+  });
+
+  it('builds Today deterministically without starting provider inference', () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const events = [
+      activityEvent(1, {
+        kind: 'work_started',
+        lifecycle: 'progress',
+        summary: 'Started implementation',
+      }),
+      activityEvent(2, {
+        kind: 'input_requested',
+        lifecycle: 'blocked',
+        severity: 'attention',
+        summary: 'Choose a release channel',
+      }),
+    ];
+    const activity = activityLedger(events);
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    const today = backend.getToday();
+
+    expect(today).toMatchObject({
+      provider: 'claude-cli',
+      diary: {
+        range: { dateKey: '2026-07-26', timeZone: 'UTC' },
+        projectCount: 1,
+        threadCount: 1,
+        memberThreadCount: 1,
+        counts: { eventCount: 2, waitingCount: 1 },
+      },
+      artifact: null,
+      artifactEvidence: [],
+      artifactEvidenceMissingCount: 0,
+      newEventCount: 2,
+      artifactIsStale: false,
+    });
+    expect(today.insights.map((insight) => insight.kind)).toEqual(['waiting']);
+    expect(backend.getState().activityHighWaterSeq).toBe(2);
+    expect(backend.getTodayAnalysisTarget()).toMatchObject({
+      threadId: 'fleet',
+      provider: today.provider,
+      model: today.model,
+    });
+    expect(analysis.generateDailyRecap).not.toHaveBeenCalled();
+    expect(analysis.generateThreadReview).not.toHaveBeenCalled();
+  });
+
+  it('generates Today only when asked, strips local paths, and detects later activity', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const activity = activityLedger([
+      activityEvent(1, {
+        projectName: '/opt/private-repo',
+        title: 'Edit /workspace/aside/src/main.ts',
+        summary:
+          'Wrote /Users/vignesh/My Project [Final], #1; Draft & QA/SecretRepo/main.ts and ' +
+          'file:///Users/vignesh/My Project/private.ts after using ' +
+          '"/Volumes/External Disk/Secret Repo/release.dmg" with ' +
+          'C:\\Users\\vignesh\\My Project\\secret.txt; see https://example.com/My%20Project/docs',
+      }),
+    ]);
+    const artifacts = new MemoryArtifactStore();
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity,
+      artifacts,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    expect(analysis.generateDailyRecap).not.toHaveBeenCalled();
+    const target = backend.getTodayAnalysisTarget();
+    const generated = await backend.generateTodayRecap(target);
+
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+    const request = analysis.generateDailyRecap.mock.calls[0]![0];
+    expect(request.evidence.text).toContain('[LOCAL_PATH]');
+    expect(request.evidence.text).not.toContain('/Users/vignesh');
+    expect(request.evidence.text).not.toContain('/opt/private-repo');
+    expect(request.evidence.text).not.toContain('/workspace/aside');
+    expect(request.evidence.text).not.toContain('file:///Users/vignesh');
+    expect(request.evidence.text).not.toContain('SecretRepo');
+    expect(request.evidence.text).not.toContain('[Final]');
+    expect(request.evidence.text).not.toContain('#1');
+    expect(request.evidence.text).not.toContain('; Draft');
+    expect(request.evidence.text).not.toContain('& QA');
+    expect(request.evidence.text).not.toContain('External Disk');
+    expect(request.evidence.text).not.toContain('C:\\Users\\vignesh');
+    expect(request.evidence.text).toContain(
+      'https://example.com/My%20Project/docs',
+    );
+    expect(generated).toMatchObject({
+      artifact: { kind: 'daily_recap', day: '2026-07-26' },
+      artifactEvidence: [{ eventId: 'event-1' }],
+      artifactEvidenceMissingCount: 0,
+      newEventCount: 0,
+      artifactIsStale: false,
+    });
+    expect(artifacts.saves).toHaveLength(1);
+
+    activity.recordAgentEvent({
+      sessionId: root.id,
+      source: root.source,
+      event: {
+        kind: 'assistant_text',
+        preview: 'Additional observed progress',
+        ts: '2026-07-26T18:01:00.000Z',
+      },
+      seeded: false,
+      rawLine: JSON.stringify({ id: 'later-progress' }),
+      ordinal: 0,
+    });
+
+    expect(backend.getToday()).toMatchObject({
+      newEventCount: 1,
+      artifactIsStale: true,
+    });
+  });
+
+  it('coalesces duplicate Today generation clicks into one provider call', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const activity = activityLedger([activityEvent(1)]);
+    const artifacts = new MemoryArtifactStore();
+    let finish!: (artifact: GeneratedDailyRecapArtifact) => void;
+    let captured!: GenerateDailyRecapRequest;
+    const analysis = analysisEngine({
+      onDaily: (request) => {
+        captured = request;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    const { backend } = makeBackend([root], undefined, {
+      activity,
+      artifacts,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+    const target = backend.getTodayAnalysisTarget();
+
+    const first = backend.generateTodayRecap(target);
+    const second = backend.generateTodayRecap(target);
+
+    expect(second).toBe(first);
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+    finish(dailyArtifact(captured));
+    await expect(first).resolves.toMatchObject({
+      artifact: { kind: 'daily_recap' },
+    });
+    await second;
+    expect(artifacts.saves).toHaveLength(1);
+  });
+
+  it('rejects a stale analysis authorization target before inference', () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity: activityLedger([activityEvent(1)]),
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+    const target = backend.getTodayAnalysisTarget();
+    backend.setModel('openai', 'gpt-4o-mini', target);
+
+    expect(() => backend.generateTodayRecap(target)).toThrow(
+      'thread changed',
+    );
+    expect(analysis.generateDailyRecap).not.toHaveBeenCalled();
+  });
+
+  it('rolls descendants into root reviews but keeps subagent reviews exact', () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const child = fakeSession('child');
+    child.source = 'codex';
+    child.isInternal = true;
+    child.parentSessionId = 'root';
+    const grandchild = fakeSession('grandchild');
+    grandchild.source = 'codex';
+    grandchild.isInternal = true;
+    grandchild.parentSessionId = 'child';
+    const events = [
+      activityEvent(1),
+      activityEvent(2, {
+        eventId: 'child-event',
+        threadKey: 'codex:child',
+        sessionId: 'child',
+        parentThreadKey: 'codex:root',
+        rootThreadKey: 'codex:root',
+        title: 'Search worker',
+        kind: 'tool_warning',
+        severity: 'warning',
+        summary: 'A child warning',
+      }),
+      activityEvent(3, {
+        eventId: 'grandchild-event',
+        threadKey: 'codex:grandchild',
+        sessionId: 'grandchild',
+        parentThreadKey: 'codex:child',
+        rootThreadKey: 'codex:root',
+        title: 'Nested worker',
+        kind: 'turn_completed',
+        lifecycle: 'terminal',
+        summary: 'Latest turn ended',
+      }),
+    ];
+    const analysis = analysisEngine();
+    const { backend } = makeBackend(
+      [root, child, grandchild],
+      undefined,
+      {
+        activity: activityLedger(events),
+        analysis: analysis.engine,
+        now: () => ANALYSIS_NOW,
+        timeZone: 'UTC',
+      },
+    );
+    backend.refresh();
+    const rootSelection: MenubarSessionTarget = {
+      threadId: 'session:root',
+      source: 'codex',
+    };
+    const childSelection: MenubarSessionTarget = {
+      threadId: 'session:child',
+      source: 'codex',
+    };
+
+    const rootReview = backend.getThreadReview(rootSelection);
+    const childReview = backend.getThreadReview(childSelection);
+
+    expect(rootReview).toMatchObject({
+      threadKey: 'codex:root',
+      rootThreadKey: 'codex:root',
+      isInternal: false,
+      includedThreadKeys: [
+        'codex:root',
+        'codex:child',
+        'codex:grandchild',
+      ],
+      counts: { eventCount: 3, warningCount: 1, completionCount: 1 },
+      newEventCount: 3,
+    });
+    expect(rootReview.evidence.map((event) => event.eventId)).toEqual([
+      'event-1',
+      'child-event',
+      'grandchild-event',
+    ]);
+    expect(childReview).toMatchObject({
+      threadKey: 'codex:child',
+      rootThreadKey: 'codex:root',
+      isInternal: true,
+      includedThreadKeys: ['codex:child'],
+      counts: { eventCount: 1, warningCount: 1 },
+    });
+    expect(childReview.evidence.map((event) => event.eventId)).toEqual([
+      'child-event',
+    ]);
+    expect(backend.getThreadReviewAnalysisTarget(childSelection)).toMatchObject({
+      threadId: 'session:child',
+      provider: childReview.provider,
+      model: childReview.model,
+    });
+    expect(analysis.generateThreadReview).not.toHaveBeenCalled();
+  });
+
+  it('generates a root review from only that root and its descendants', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const child = fakeSession('child');
+    child.source = 'codex';
+    child.isInternal = true;
+    child.parentSessionId = 'root';
+    const unrelated = fakeSession('unrelated');
+    unrelated.source = 'claude';
+    const artifacts = new MemoryArtifactStore();
+    const analysis = analysisEngine();
+    const { backend } = makeBackend(
+      [root, child, unrelated],
+      undefined,
+      {
+        activity: activityLedger([
+          activityEvent(1),
+          activityEvent(2, {
+            eventId: 'child-event',
+            threadKey: 'codex:child',
+            sessionId: 'child',
+            parentThreadKey: 'codex:root',
+            rootThreadKey: 'codex:root',
+          }),
+          activityEvent(3, {
+            eventId: 'foreign-event',
+            threadKey: 'claude:unrelated',
+            sessionId: 'unrelated',
+            source: 'claude',
+          }),
+        ]),
+        artifacts,
+        analysis: analysis.engine,
+        now: () => ANALYSIS_NOW,
+        timeZone: 'UTC',
+      },
+    );
+    backend.refresh();
+    const selection: MenubarSessionTarget = {
+      threadId: 'session:root',
+      source: 'codex',
+    };
+
+    const review = await backend.generateThreadReview(
+      selection,
+      backend.getThreadReviewAnalysisTarget(selection),
+    );
+
+    const request = analysis.generateThreadReview.mock.calls[0]![0];
+    expect(request.threadKey).toBe('codex:root');
+    expect(request.evidence.evidenceIds).toEqual([
+      'event-1',
+      'child-event',
+    ]);
+    expect(request.evidence.evidenceIds).not.toContain('foreign-event');
+    expect(review).toMatchObject({
+      artifact: {
+        kind: 'thread_review',
+        threadKey: 'codex:root',
+      },
+      newEventCount: 0,
+      artifactIsStale: false,
+    });
+    expect(artifacts.saves).toHaveLength(1);
+  });
+
+  it('requires a source-qualified live session for thread reviews', () => {
+    const codex = fakeSession('same-id');
+    codex.source = 'codex';
+    const claude = fakeSession('same-id');
+    claude.source = 'claude';
+    const { backend } = makeBackend([codex, claude], undefined, {
+      activity: activityLedger([
+        activityEvent(1, {
+          threadKey: 'codex:same-id',
+          sessionId: 'same-id',
+          source: 'codex',
+        }),
+        activityEvent(2, {
+          eventId: 'claude-event',
+          threadKey: 'claude:same-id',
+          sessionId: 'same-id',
+          source: 'claude',
+        }),
+      ]),
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    expect(
+      backend
+        .getThreadReview({
+          threadId: 'session:same-id',
+          source: 'codex',
+        })
+        .evidence.map((event) => event.eventId),
+    ).toEqual(['event-1']);
+    expect(() =>
+      backend.getThreadReview({
+        threadId: 'fleet',
+        source: 'codex',
+      }),
+    ).toThrow('valid agent thread');
+    expect(() =>
+      backend.getThreadReview({
+        threadId: 'session:missing',
+        source: 'codex',
+      }),
+    ).toThrow('no longer available');
+  });
+
+  it('resolves artifact citations only inside the requested review scope', () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const other = fakeSession('other');
+    other.source = 'claude';
+    const artifacts = new MemoryArtifactStore([
+      {
+        id: 'stored-review',
+        kind: 'thread_review',
+        threadKey: 'codex:root',
+        createdAt: '2026-07-26T17:00:00.000Z',
+        provider: 'claude-cli',
+        model: 'claude-sonnet-4-20250514',
+        inputHighWaterSeq: 1,
+        inputHash: 'a'.repeat(64),
+        evidenceIds: ['event-1', 'foreign-event'],
+        markdown: 'Stored review [1][2]',
+      },
+    ]);
+    const { backend } = makeBackend([root, other], undefined, {
+      activity: activityLedger([
+        activityEvent(1),
+        activityEvent(2, {
+          eventId: 'foreign-event',
+          threadKey: 'claude:other',
+          sessionId: 'other',
+          source: 'claude',
+        }),
+        activityEvent(3, { eventId: 'event-3' }),
+      ]),
+      artifacts,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    expect(
+      backend.getThreadReview({
+        threadId: 'session:root',
+        source: 'codex',
+      }),
+    ).toMatchObject({
+      artifact: { id: 'stored-review' },
+      artifactEvidence: [{ eventId: 'event-1' }],
+      artifactEvidenceMissingCount: 1,
+      newEventCount: 1,
+      artifactIsStale: true,
+    });
+  });
+
+  it('rejects an analysis artifact that escapes its requested thread scope', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const artifacts = new MemoryArtifactStore();
+    const analysis = analysisEngine({
+      onThread: async (request) => ({
+        ...threadArtifact(request),
+        threadKey: 'codex:someone-else',
+      }),
+    });
+    const { backend } = makeBackend([root], undefined, {
+      activity: activityLedger([activityEvent(1)]),
+      artifacts,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+    const selection: MenubarSessionTarget = {
+      threadId: 'session:root',
+      source: 'codex',
+    };
+
+    await expect(
+      backend.generateThreadReview(
+        selection,
+        backend.getThreadReviewAnalysisTarget(selection),
+      ),
+    ).rejects.toThrow('evidence scope');
+    expect(artifacts.saves).toHaveLength(0);
   });
 });

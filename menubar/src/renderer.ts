@@ -1,7 +1,21 @@
 // Renderer for the menubar window. It receives immutable state over the narrow
 // preload bridge; model output is always rendered with textContent.
 
-import type { MenubarState, SessionSummary } from './backend.js';
+import type {
+  MenubarState,
+  SessionSummary,
+  ThreadReviewViewState,
+  TodayViewState,
+} from './backend.js';
+import type {
+  ActivityEvidenceRef,
+  ActivityFactCounts,
+  ActivityInsight,
+  TodayDiary,
+  TodayProjectDiary,
+  TodayThreadDiary,
+} from '../../dist/types/today.js';
+import type { GeneratedArtifact } from '../../dist/types/generated-artifact.js';
 import { stripMarkdown } from '../../dist/utils/markdown.js';
 import {
   filterAttentionHierarchy,
@@ -49,6 +63,16 @@ interface AsideBridge {
   getAppVersion(): Promise<string>;
   getWindowMode(): Promise<{ keepOpen: boolean }>;
   setKeepOpen(keepOpen: boolean): Promise<{ keepOpen: boolean }>;
+  getToday(): Promise<TodayViewState>;
+  generateTodayRecap(): Promise<TodayViewState>;
+  getThreadReview(
+    threadId: string,
+    source: SessionSummary['source'],
+  ): Promise<ThreadReviewViewState>;
+  generateThreadReview(
+    threadId: string,
+    source: SessionSummary['source'],
+  ): Promise<ThreadReviewViewState>;
   getUpdateStatus(): Promise<AppUpdateStatus>;
   checkForUpdates(): Promise<AppUpdateStatus>;
   restartToUpdate(): Promise<void>;
@@ -80,6 +104,7 @@ const showSubagentThreadsEl = document.getElementById(
 ) as HTMLInputElement;
 const modelsEl = document.getElementById('models') as HTMLSelectElement;
 const messagesEl = document.getElementById('messages') as HTMLDivElement;
+const analysisViewEl = document.getElementById('analysis-view') as HTMLDivElement;
 const onboardingEl = document.getElementById('onboarding') as HTMLDivElement;
 const onboardingProvidersEl = document.getElementById('onboarding-providers') as HTMLDivElement;
 const formEl = document.getElementById('composer') as HTMLFormElement;
@@ -92,6 +117,8 @@ const scopeTitleEl = document.getElementById('scope-title') as HTMLHeadingElemen
 const scopeMetaEl = document.getElementById('scope-meta') as HTMLDivElement;
 const needsCountEl = document.getElementById('needs-count') as HTMLSpanElement;
 const keepOpenEl = document.getElementById('keep-open') as HTMLButtonElement;
+const reviewThreadEl = document.getElementById('review-thread') as HTMLButtonElement;
+const composerShellEl = document.getElementById('composer-shell') as HTMLDivElement;
 const threadCountEl = document.getElementById('thread-count') as HTMLSpanElement;
 const settingsEl = document.getElementById('settings') as HTMLDivElement;
 const settingsButtonEl = document.getElementById('settings-button') as HTMLButtonElement;
@@ -155,8 +182,40 @@ let pendingDisconnectId: ProviderAuthId | null = null;
 let lastProviderSurfaceKey = '';
 let appUpdateStatus: AppUpdateStatus | null = null;
 let keepOpen = false;
+type ActiveView = 'thread' | 'today' | 'review';
+let activeView: ActiveView = 'thread';
+let todayView: TodayViewState | null = null;
+let todayLoading = false;
+let todayGenerating = false;
+let todayError: string | null = null;
+let todayGenerationError: string | null = null;
+let todayLoadedRevision = '';
+let todayFailedRevision = '';
+let todayRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let reviewView: ThreadReviewViewState | null = null;
+let reviewThreadId: string | null = null;
+let reviewThreadSource: SessionSummary['source'] | null = null;
+let reviewLoading = false;
+let reviewGenerating = false;
+let reviewError: string | null = null;
+let reviewGenerationError: string | null = null;
+let reviewLoadedRevision = '';
+let reviewFailedRevision = '';
+let reviewRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
+
+function observerModelLabel(provider: string, model: string): string {
+  const status = providerAuth.find((item) => item.provider === provider);
+  const providerLabel = status
+    ? providerDisplayName(status.provider)
+    : provider;
+  const option = latestState?.models.find(
+    (item) => item.provider === provider && item.model === model,
+  );
+  const modelLabel = (option?.label ?? model).replace(/\s+\([^()]+\)$/, '');
+  return `${providerLabel} · ${modelLabel}`;
+}
 
 function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -187,6 +246,189 @@ function providerMark(provider: ProviderAuthId): string {
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^Error invoking remote method '[^']+':\s*/i, '').slice(0, 180);
+}
+
+function clearSearch(): void {
+  searchEl.value = '';
+  searchQuery = '';
+  searchResults = null;
+  searchInFlight = false;
+  searchError = null;
+  searchSequence += 1;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+}
+
+function selectChatThread(threadId: string): void {
+  activeView = 'thread';
+  reviewError = null;
+  reviewGenerationError = null;
+  void window.aside.selectThread(threadId);
+  if (latestState) render(latestState);
+}
+
+function sessionForActivityThreadKey(
+  state: MenubarState,
+  activityThreadKey: string,
+): SessionSummary | undefined {
+  return state.sessions.find(
+    (session) => `${session.source}:${session.id}` === activityThreadKey,
+  );
+}
+
+function openEvidenceThread(activityThreadKey: string): void {
+  if (!latestState) return;
+  const session = sessionForActivityThreadKey(latestState, activityThreadKey);
+  if (!session) return;
+  attentionOnly = false;
+  clearSearch();
+  selectChatThread(session.threadId);
+}
+
+function localDateKey(now = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function activityViewRevision(state: MenubarState): string {
+  return [
+    state.activityHighWaterSeq,
+    state.activityCursorRevision,
+    localDateKey(),
+  ].join(':');
+}
+
+function showToday(): void {
+  activeView = 'today';
+  todayError = null;
+  todayFailedRevision = '';
+  todayLoadedRevision = '';
+  if (latestState) {
+    render(latestState);
+    scheduleTodayRefresh(activityViewRevision(latestState), 0);
+  }
+}
+
+function showThreadReview(session: SessionSummary): void {
+  activeView = 'review';
+  reviewThreadId = session.threadId;
+  reviewThreadSource = session.source;
+  reviewView = null;
+  reviewError = null;
+  reviewGenerationError = null;
+  reviewLoadedRevision = '';
+  reviewFailedRevision = '';
+  if (latestState) {
+    render(latestState);
+    scheduleReviewRefresh(activityViewRevision(latestState), 0);
+  }
+}
+
+function scheduleTodayRefresh(revision: string, delayMs = 160): void {
+  if (activeView !== 'today' || todayGenerating) return;
+  if (
+    (todayView && todayLoadedRevision === revision) ||
+    todayFailedRevision === revision
+  ) {
+    return;
+  }
+  if (todayRefreshTimer) clearTimeout(todayRefreshTimer);
+  todayRefreshTimer = setTimeout(() => {
+    todayRefreshTimer = null;
+    void loadToday(revision);
+  }, delayMs);
+}
+
+async function loadToday(requestedRevision: string): Promise<void> {
+  if (todayLoading || activeView !== 'today') return;
+  todayLoading = true;
+  todayError = null;
+  renderAnalysisView();
+  try {
+    todayView = await window.aside.getToday();
+    todayLoadedRevision = requestedRevision;
+    todayFailedRevision = '';
+  } catch (error) {
+    todayError = safeErrorMessage(error);
+    todayFailedRevision = requestedRevision;
+  } finally {
+    todayLoading = false;
+    if (latestState) render(latestState);
+    else renderAnalysisView();
+    const current = latestState
+      ? activityViewRevision(latestState)
+      : requestedRevision;
+    if (activeView === 'today' && current !== todayLoadedRevision) {
+      scheduleTodayRefresh(current);
+    }
+  }
+}
+
+function scheduleReviewRefresh(revision: string, delayMs = 160): void {
+  if (
+    activeView !== 'review' ||
+    !reviewThreadId ||
+    !reviewThreadSource ||
+    reviewGenerating
+  ) {
+    return;
+  }
+  if (
+    (reviewView && reviewLoadedRevision === revision) ||
+    reviewFailedRevision === revision
+  ) {
+    return;
+  }
+  if (reviewRefreshTimer) clearTimeout(reviewRefreshTimer);
+  reviewRefreshTimer = setTimeout(() => {
+    reviewRefreshTimer = null;
+    void loadThreadReview(revision);
+  }, delayMs);
+}
+
+async function loadThreadReview(requestedRevision: string): Promise<void> {
+  const threadId = reviewThreadId;
+  const source = reviewThreadSource;
+  if (reviewLoading || activeView !== 'review' || !threadId || !source) return;
+  reviewLoading = true;
+  reviewError = null;
+  renderAnalysisView();
+  try {
+    const next = await window.aside.getThreadReview(threadId, source);
+    if (
+      activeView === 'review' &&
+      reviewThreadId === threadId &&
+      reviewThreadSource === source
+    ) {
+      reviewView = next;
+      reviewLoadedRevision = requestedRevision;
+      reviewFailedRevision = '';
+    }
+  } catch (error) {
+    if (
+      activeView === 'review' &&
+      reviewThreadId === threadId &&
+      reviewThreadSource === source
+    ) {
+      reviewError = safeErrorMessage(error);
+      reviewFailedRevision = requestedRevision;
+    }
+  } finally {
+    reviewLoading = false;
+    if (latestState) render(latestState);
+    else renderAnalysisView();
+    const current = latestState
+      ? activityViewRevision(latestState)
+      : requestedRevision;
+    if (
+      activeView === 'review' &&
+      current !== reviewLoadedRevision
+    ) {
+      scheduleReviewRefresh(current);
+    }
+  }
 }
 
 function renderAppUpdate(status: AppUpdateStatus): void {
@@ -495,12 +737,15 @@ function makeThreadButton(
     snippet?: SearchSnippetPart[];
     selected?: boolean;
     smart?: boolean;
+    today?: boolean;
     pressed?: boolean;
     onSelect?: () => void;
   },
 ): HTMLButtonElement {
   const button = document.createElement('button');
-  const selected = options.selected ?? state.activeThreadId === options.threadId;
+  const selected =
+    options.selected ??
+    (activeView !== 'today' && state.activeThreadId === options.threadId);
   const attentionKind = options.attentionKind ?? 'none';
   button.type = 'button';
   button.className = `thread${selected ? ' active' : ''}${
@@ -509,6 +754,7 @@ function makeThreadButton(
   if (options.subagent) button.classList.add('subagent');
   if (options.searchResult) button.classList.add('search-result');
   if (options.smart) button.classList.add('attention-smart');
+  if (options.today) button.classList.add('today-smart');
   if (options.pressed) button.classList.add('filtered');
   button.dataset['threadId'] = options.threadId;
   if (selected) button.setAttribute('aria-current', 'page');
@@ -576,7 +822,7 @@ function makeThreadButton(
   );
   button.addEventListener('click', () => {
     if (options.onSelect) options.onSelect();
-    else void window.aside.selectThread(options.threadId);
+    else selectChatThread(options.threadId);
   });
   return button;
 }
@@ -804,12 +1050,24 @@ function renderThreads(state: MenubarState): void {
       threadId: FLEET_THREAD_ID,
       title: 'All agents',
       subtitle: `${state.recentSessionCount} recent · ${topLevelSessions.length} threads`,
-      selected: state.activeThreadId === FLEET_THREAD_ID,
+      selected:
+        activeView === 'thread' &&
+        state.activeThreadId === FLEET_THREAD_ID,
       onSelect: () => {
         attentionOnly = false;
-        void window.aside.selectThread(FLEET_THREAD_ID);
-        if (latestState) renderThreads(latestState);
+        selectChatThread(FLEET_THREAD_ID);
       },
+    }),
+  );
+  threadsEl.appendChild(
+    makeThreadButton(state, {
+      threadId: 'today',
+      title: 'Today',
+      subtitle: 'Activity across your projects',
+      glyph: String(new Date().getDate()),
+      selected: activeView === 'today',
+      today: true,
+      onSelect: showToday,
     }),
   );
   threadsEl.appendChild(
@@ -1034,6 +1292,734 @@ function searchMatchLabel(kind: SearchMatchKind): string {
   }
 }
 
+function formatTime(timestampMs: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(timestampMs));
+}
+
+function formatTodayDate(dateKey: string): string {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  if (!year || !month || !day) return dateKey;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date(year, month - 1, day));
+}
+
+function plural(value: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${value} ${value === 1 ? singular : pluralForm}`;
+}
+
+function makeAnalysisAction(
+  label: string,
+  onClick: () => void,
+  options: { id?: string; primary?: boolean; disabled?: boolean } = {},
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `analysis-action${options.primary ? ' primary' : ''}`;
+  if (options.id) button.id = options.id;
+  button.textContent = label;
+  button.disabled = options.disabled ?? false;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function makeSectionHeading(
+  titleText: string,
+  detailText?: string,
+): HTMLDivElement {
+  const heading = document.createElement('div');
+  heading.className = 'analysis-section-heading';
+  const copy = document.createElement('div');
+  const title = document.createElement('h2');
+  title.textContent = titleText;
+  copy.appendChild(title);
+  if (detailText) {
+    const detail = document.createElement('p');
+    detail.textContent = detailText;
+    copy.appendChild(detail);
+  }
+  heading.appendChild(copy);
+  return heading;
+}
+
+function appendMetric(
+  container: HTMLElement,
+  value: number,
+  label: string,
+): void {
+  const metric = document.createElement('div');
+  metric.className = 'analysis-metric';
+  const number = document.createElement('strong');
+  number.textContent = String(value);
+  const copy = document.createElement('span');
+  copy.textContent = label;
+  metric.append(number, copy);
+  container.appendChild(metric);
+}
+
+function makeStatusMessage(
+  message: string,
+  options: {
+    kind?: 'error' | 'empty' | 'loading';
+    actionLabel?: string;
+    onAction?: () => void;
+  } = {},
+): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = `analysis-status ${options.kind ?? ''}`.trim();
+  row.setAttribute('role', options.kind === 'error' ? 'alert' : 'status');
+  const copy = document.createElement('span');
+  copy.textContent = message;
+  row.appendChild(copy);
+  if (options.actionLabel && options.onAction) {
+    row.appendChild(
+      makeAnalysisAction(options.actionLabel, options.onAction),
+    );
+  }
+  return row;
+}
+
+function makeEvidenceControl(
+  evidence: ActivityEvidenceRef,
+  compact = false,
+  citationNumber?: number,
+): HTMLElement {
+  const session = latestState
+    ? sessionForActivityThreadKey(latestState, evidence.threadKey)
+    : undefined;
+  const control = document.createElement(session ? 'button' : 'div');
+  control.className = compact ? 'evidence-chip' : 'evidence-row';
+  if (control instanceof HTMLButtonElement) {
+    control.type = 'button';
+    control.addEventListener('click', () => openEvidenceThread(evidence.threadKey));
+    control.title = 'Open this thread';
+  }
+
+  if (citationNumber !== undefined) {
+    const citation = document.createElement('span');
+    citation.className = 'evidence-citation';
+    citation.textContent = `[${citationNumber}]`;
+    control.appendChild(citation);
+  }
+  const time = document.createElement('span');
+  time.className = 'evidence-time';
+  time.textContent = formatTime(evidence.occurredAtMs);
+  const copy = document.createElement('span');
+  copy.className = 'evidence-copy';
+  copy.textContent = compact
+    ? evidence.summary
+    : `${evidence.summary} · ${evidence.kind.replaceAll('_', ' ')}`;
+  control.append(time, copy);
+  if (session) {
+    const arrow = document.createElement('span');
+    arrow.className = 'evidence-arrow';
+    arrow.textContent = '›';
+    arrow.setAttribute('aria-hidden', 'true');
+    control.appendChild(arrow);
+  }
+  control.setAttribute(
+    'aria-label',
+    `${
+      citationNumber !== undefined ? `Evidence ${citationNumber}, ` : ''
+    }${formatTime(evidence.occurredAtMs)}, ${evidence.summary}${
+      session ? `, open ${session.title || session.projectName}` : ''
+    }`,
+  );
+  return control;
+}
+
+function appendEvidenceChips(
+  container: HTMLElement,
+  evidence: ActivityEvidenceRef[],
+  limit = 3,
+): void {
+  if (evidence.length === 0) return;
+  const chips = document.createElement('div');
+  chips.className = 'evidence-chips';
+  for (const item of evidence.slice(0, limit)) {
+    chips.appendChild(makeEvidenceControl(item, true));
+  }
+  container.appendChild(chips);
+}
+
+function appendInsights(
+  container: HTMLElement,
+  insights: ActivityInsight[],
+): void {
+  const section = document.createElement('section');
+  section.className = 'analysis-section';
+  section.appendChild(
+    makeSectionHeading(
+      'Worth a look',
+      'Signals grounded in recorded activity.',
+    ),
+  );
+  if (insights.length === 0) {
+    const quiet = document.createElement('p');
+    quiet.className = 'analysis-muted';
+    quiet.textContent = 'Nothing stands out in the recorded activity.';
+    section.appendChild(quiet);
+  } else {
+    const list = document.createElement('div');
+    list.className = 'insight-list';
+    for (const insight of insights) {
+      const row = document.createElement('article');
+      row.className = `insight-row severity-${insight.severity}`;
+      const marker = document.createElement('span');
+      marker.className = 'insight-marker';
+      marker.setAttribute('aria-hidden', 'true');
+      const copy = document.createElement('div');
+      copy.className = 'insight-copy';
+      const headline = document.createElement('h3');
+      headline.textContent = insight.headline;
+      const detail = document.createElement('p');
+      detail.textContent = insight.detail;
+      const meta = document.createElement('div');
+      meta.className = 'insight-meta';
+      meta.textContent = `${insight.projectName} · ${formatTime(insight.occurredAtMs)}`;
+      copy.append(headline, detail, meta);
+      appendEvidenceChips(copy, insight.evidence);
+      row.append(marker, copy);
+      list.appendChild(row);
+    }
+    section.appendChild(list);
+  }
+  container.appendChild(section);
+}
+
+function appendArtifactEvidence(
+  container: HTMLElement,
+  artifact: GeneratedArtifact,
+  available: ActivityEvidenceRef[],
+  missingCount: number,
+): void {
+  const byId = new Map(available.map((item) => [item.eventId, item]));
+  const cited = artifact.evidenceIds.map((id, index) => ({
+    index: index + 1,
+    evidence: byId.get(id),
+  }));
+  const retained = cited.filter(
+    (item): item is { index: number; evidence: ActivityEvidenceRef } =>
+      Boolean(item.evidence),
+  );
+  if (retained.length > 0) {
+    const label = document.createElement('div');
+    label.className = 'artifact-evidence-label';
+    label.textContent = 'Evidence used';
+    container.appendChild(label);
+    const chips = document.createElement('div');
+    chips.className = 'evidence-chips artifact-evidence';
+    for (const item of retained) {
+      chips.appendChild(
+        makeEvidenceControl(item.evidence, true, item.index),
+      );
+    }
+    container.appendChild(chips);
+  }
+  if (missingCount > 0) {
+    const missing = document.createElement('p');
+    missing.className = 'analysis-footnote artifact-missing';
+    missing.textContent =
+      `${plural(missingCount, 'older citation')} no longer retained locally.`;
+    container.appendChild(missing);
+  }
+}
+
+function appendGeneratedArtifact(
+  container: HTMLElement,
+  options: {
+    title: string;
+    emptyCopy: string;
+    buttonId: string;
+    artifact: GeneratedArtifact | null;
+    evidence: ActivityEvidenceRef[];
+    artifactEvidenceMissingCount: number;
+    newEventCount: number;
+    artifactIsStale: boolean;
+    provider: string;
+    model: string;
+    generating: boolean;
+    error: string | null;
+    disabled: boolean;
+    onGenerate: () => void;
+  },
+): void {
+  const section = document.createElement('section');
+  section.className = 'analysis-section generated-section';
+  const heading = makeSectionHeading(options.title);
+  const actionLabel = options.generating
+    ? 'Writing…'
+    : options.artifact
+      ? options.title === 'Daily recap'
+        ? 'Refresh recap'
+        : 'Refresh review'
+      : options.title === 'Daily recap'
+        ? 'Write recap'
+        : 'Write review';
+  heading.appendChild(
+    makeAnalysisAction(actionLabel, options.onGenerate, {
+      id: options.buttonId,
+      primary: true,
+      disabled: options.disabled || options.generating,
+    }),
+  );
+  section.appendChild(heading);
+
+  if (options.artifact) {
+    const artifactMeta = document.createElement('div');
+    artifactMeta.className = 'artifact-meta';
+    const created = Date.parse(options.artifact.createdAt);
+    const artifactModel = observerModelLabel(
+      options.artifact.provider,
+      options.artifact.model,
+    );
+    artifactMeta.textContent = Number.isFinite(created)
+      ? `Written ${formatTime(created)} with ${artifactModel}`
+      : `Written with ${artifactModel}`;
+    if (options.artifactIsStale) {
+      const stale = document.createElement('span');
+      stale.className = 'artifact-stale';
+      stale.textContent =
+        options.newEventCount > 0
+          ? `${plural(options.newEventCount, 'new event')} since this ${
+              options.title === 'Daily recap' ? 'recap' : 'review'
+            }`
+          : `Activity changed since this ${
+              options.title === 'Daily recap' ? 'recap' : 'review'
+            }`;
+      artifactMeta.appendChild(stale);
+    }
+    section.appendChild(artifactMeta);
+
+    const prose = document.createElement('div');
+    prose.className = 'artifact-prose';
+    prose.textContent = options.artifact.markdown;
+    section.appendChild(prose);
+    appendArtifactEvidence(
+      section,
+      options.artifact,
+      options.evidence,
+      options.artifactEvidenceMissingCount,
+    );
+  } else {
+    const empty = document.createElement('p');
+    empty.className = 'analysis-muted';
+    empty.textContent = options.emptyCopy;
+    section.appendChild(empty);
+  }
+
+  if (options.error) {
+    section.appendChild(makeStatusMessage(options.error, { kind: 'error' }));
+  }
+  const privacy = document.createElement('p');
+  privacy.className = 'analysis-footnote';
+  const selectedModel = observerModelLabel(options.provider, options.model);
+  privacy.textContent =
+    options.provider === 'ollama'
+      ? `Runs ${selectedModel} on this Mac only when you click. Recent activity stays local.`
+      : `Uses ${selectedModel} only when you click. ` +
+        'Recent activity is limited and redacted before it leaves this Mac.';
+  section.appendChild(privacy);
+  container.appendChild(section);
+}
+
+function factSummary(counts: ActivityFactCounts): string {
+  const facts: string[] = [];
+  if (counts.waitingCount > 0) {
+    facts.push(plural(counts.waitingCount, 'input request'));
+  }
+  if (counts.errorCount > 0) {
+    facts.push(plural(counts.errorCount, 'turn failure'));
+  }
+  if (counts.warningCount > 0) {
+    facts.push(plural(counts.warningCount, 'warning'));
+  }
+  if (counts.completionCount > 0) {
+    facts.push(plural(counts.completionCount, 'turn ended', 'turns ended'));
+  }
+  return facts.length > 0 ? facts.join(' · ') : plural(counts.eventCount, 'event');
+}
+
+function makeThreadDiaryRow(thread: TodayThreadDiary): HTMLDivElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'diary-thread';
+  const session = latestState
+    ? sessionForActivityThreadKey(latestState, thread.threadKey)
+    : undefined;
+  const heading = document.createElement(session ? 'button' : 'div');
+  heading.className = 'diary-thread-heading';
+  if (heading instanceof HTMLButtonElement) {
+    heading.type = 'button';
+    heading.addEventListener('click', () => openEvidenceThread(thread.threadKey));
+  }
+  const copy = document.createElement('span');
+  copy.className = 'diary-thread-copy';
+  const title = document.createElement('strong');
+  title.textContent = thread.title;
+  const meta = document.createElement('span');
+  meta.textContent =
+    `${factSummary(thread.counts)}${
+      thread.subagents.length > 0
+        ? ` · ${plural(thread.subagents.length, 'subagent')}`
+        : ''
+    }`;
+  copy.append(title, meta);
+  heading.appendChild(copy);
+  if (thread.lastObservedWorkAtMs !== null) {
+    const time = document.createElement('time');
+    time.textContent = formatTime(thread.lastObservedWorkAtMs);
+    heading.appendChild(time);
+  }
+  wrapper.appendChild(heading);
+
+  if (thread.subagents.length > 0) {
+    const subagents = document.createElement('div');
+    subagents.className = 'diary-subagents';
+    const label = document.createElement('span');
+    label.className = 'diary-subagents-label';
+    label.textContent = 'Subagents';
+    subagents.appendChild(label);
+    for (const subagent of thread.subagents) {
+      const subagentSession = latestState
+        ? sessionForActivityThreadKey(latestState, subagent.threadKey)
+        : undefined;
+      const row = document.createElement(
+        subagentSession ? 'button' : 'div',
+      );
+      row.className = 'diary-subagent';
+      if (row instanceof HTMLButtonElement) {
+        row.type = 'button';
+        row.addEventListener('click', () =>
+          openEvidenceThread(subagent.threadKey),
+        );
+      }
+      const title = document.createElement('span');
+      title.textContent = subagent.title;
+      const facts = document.createElement('small');
+      facts.textContent = factSummary(subagent.counts);
+      row.append(title, facts);
+      if (subagent.lastObservedWorkAtMs !== null) {
+        const time = document.createElement('time');
+        time.textContent = formatTime(subagent.lastObservedWorkAtMs);
+        row.appendChild(time);
+      }
+      subagents.appendChild(row);
+    }
+    wrapper.appendChild(subagents);
+  }
+
+  const evidenceList = document.createElement('div');
+  evidenceList.className = 'diary-evidence';
+  for (const evidence of thread.evidence.slice(-3).reverse()) {
+    evidenceList.appendChild(makeEvidenceControl(evidence));
+  }
+  if (thread.evidence.length > 3) {
+    const remaining = document.createElement('div');
+    remaining.className = 'diary-more';
+    remaining.textContent = `${plural(thread.evidence.length - 3, 'earlier event')}`;
+    evidenceList.appendChild(remaining);
+  }
+  wrapper.appendChild(evidenceList);
+  return wrapper;
+}
+
+function appendTodayProject(
+  container: HTMLElement,
+  project: TodayProjectDiary,
+): void {
+  const section = document.createElement('section');
+  section.className = 'diary-project';
+  const heading = document.createElement('div');
+  heading.className = 'diary-project-heading';
+  const title = document.createElement('h2');
+  title.textContent = project.projectName;
+  const meta = document.createElement('span');
+  meta.textContent =
+    `${plural(project.threadCount, 'thread')} · ${factSummary(project.counts)}`;
+  heading.append(title, meta);
+  section.appendChild(heading);
+  for (const thread of project.threads) {
+    section.appendChild(makeThreadDiaryRow(thread));
+  }
+  container.appendChild(section);
+}
+
+function renderTodayContent(view: TodayViewState): void {
+  const content = document.createElement('div');
+  content.className = 'analysis-content';
+  const summary = document.createElement('section');
+  summary.className = 'today-summary';
+  const date = document.createElement('p');
+  date.className = 'analysis-kicker';
+  date.textContent = formatTodayDate(view.diary.range.dateKey);
+  const metrics = document.createElement('div');
+  metrics.className = 'analysis-metrics';
+  appendMetric(metrics, view.diary.projectCount, 'Projects');
+  appendMetric(metrics, view.diary.threadCount, 'Threads');
+  appendMetric(metrics, view.diary.counts.eventCount, 'Events');
+  appendMetric(metrics, view.diary.counts.completionCount, 'Turns ended');
+  summary.append(date, metrics);
+  content.appendChild(summary);
+
+  if (view.diary.counts.eventCount === 0) {
+    content.appendChild(
+      makeStatusMessage(
+        'No agent activity has been recorded today. Aside will fill this in as your threads move.',
+        { kind: 'empty' },
+      ),
+    );
+  } else {
+    appendInsights(content, view.insights);
+    appendGeneratedArtifact(content, {
+      title: 'Daily recap',
+      emptyCopy:
+        'Write a recap when you want a concise read of today’s activity.',
+      buttonId: 'write-recap',
+      artifact: view.artifact,
+      evidence: view.artifactEvidence,
+      artifactEvidenceMissingCount: view.artifactEvidenceMissingCount,
+      newEventCount: view.newEventCount,
+      artifactIsStale: view.artifactIsStale,
+      provider: view.provider,
+      model: view.model,
+      generating: todayGenerating,
+      error: todayGenerationError,
+      disabled:
+        authPhase !== 'ready' ||
+        !canAskWithProvider(providerAuth, view.provider),
+      onGenerate: () => void generateTodayRecap(),
+    });
+
+    const diary = document.createElement('section');
+    diary.className = 'analysis-section diary-section';
+    diary.appendChild(
+      makeSectionHeading(
+        'Activity',
+        `${factSummary(view.diary.counts)} across ${plural(
+          view.diary.projectCount,
+          'project',
+        )}.`,
+      ),
+    );
+    for (const project of view.diary.projects) {
+      appendTodayProject(diary, project);
+    }
+    content.appendChild(diary);
+  }
+  analysisViewEl.appendChild(content);
+}
+
+function renderReviewContent(view: ThreadReviewViewState): void {
+  const content = document.createElement('div');
+  content.className = 'analysis-content';
+  const evidence = view.evidence;
+  const counts = view.counts;
+  const overview = document.createElement('section');
+  overview.className = 'review-overview';
+  const metrics = document.createElement('div');
+  metrics.className = 'analysis-metrics review-metrics';
+  appendMetric(metrics, counts.eventCount, 'Events');
+  appendMetric(metrics, counts.waitingCount, 'Input requests');
+  appendMetric(metrics, counts.warningCount, 'Warnings');
+  appendMetric(metrics, counts.errorCount, 'Turn failures');
+  overview.appendChild(metrics);
+  content.appendChild(overview);
+
+  if (evidence.length === 0) {
+    content.appendChild(
+      makeStatusMessage(
+        'No recorded activity is available for this thread yet.',
+        { kind: 'empty' },
+      ),
+    );
+  } else {
+    appendInsights(content, view.insights);
+    appendGeneratedArtifact(content, {
+      title: 'Thread review',
+      emptyCopy:
+        'Write a review to summarize the goal, approach, friction, observed outcome, and a possible next step.',
+      buttonId: 'write-review',
+      artifact: view.artifact,
+      evidence: view.artifactEvidence,
+      artifactEvidenceMissingCount: view.artifactEvidenceMissingCount,
+      newEventCount: view.newEventCount,
+      artifactIsStale: view.artifactIsStale,
+      provider: view.provider,
+      model: view.model,
+      generating: reviewGenerating,
+      error: reviewGenerationError,
+      disabled:
+        authPhase !== 'ready' ||
+        !canAskWithProvider(providerAuth, view.provider),
+      onGenerate: () => void generateThreadReview(),
+    });
+
+    const observed = document.createElement('section');
+    observed.className = 'analysis-section observed-section';
+    observed.appendChild(
+      makeSectionHeading(
+        'Observed activity',
+        'The latest recorded activity in this thread.',
+      ),
+    );
+    const list = document.createElement('div');
+    list.className = 'observed-list';
+    for (const item of evidence.slice(-16).reverse()) {
+      list.appendChild(makeEvidenceControl(item));
+    }
+    observed.appendChild(list);
+    content.appendChild(observed);
+  }
+  analysisViewEl.appendChild(content);
+}
+
+async function generateTodayRecap(): Promise<void> {
+  if (todayGenerating || !todayView) return;
+  todayGenerating = true;
+  todayGenerationError = null;
+  renderAnalysisView();
+  const requestedRevision = latestState
+    ? activityViewRevision(latestState)
+    : todayLoadedRevision;
+  try {
+    todayView = await window.aside.generateTodayRecap();
+    todayLoadedRevision = requestedRevision;
+    todayFailedRevision = '';
+  } catch (error) {
+    todayGenerationError = safeErrorMessage(error);
+  } finally {
+    todayGenerating = false;
+    if (latestState) render(latestState);
+    else renderAnalysisView();
+    const current = latestState
+      ? activityViewRevision(latestState)
+      : requestedRevision;
+    if (activeView === 'today' && current !== todayLoadedRevision) {
+      scheduleTodayRefresh(current);
+    }
+  }
+}
+
+async function generateThreadReview(): Promise<void> {
+  const threadId = reviewThreadId;
+  const source = reviewThreadSource;
+  if (reviewGenerating || !reviewView || !threadId || !source) return;
+  reviewGenerating = true;
+  reviewGenerationError = null;
+  renderAnalysisView();
+  const requestedRevision = latestState
+    ? activityViewRevision(latestState)
+    : reviewLoadedRevision;
+  try {
+    const next = await window.aside.generateThreadReview(threadId, source);
+    if (
+      activeView === 'review' &&
+      reviewThreadId === threadId &&
+      reviewThreadSource === source
+    ) {
+      reviewView = next;
+      reviewLoadedRevision = requestedRevision;
+      reviewFailedRevision = '';
+    }
+  } catch (error) {
+    if (
+      activeView === 'review' &&
+      reviewThreadId === threadId &&
+      reviewThreadSource === source
+    ) {
+      reviewGenerationError = safeErrorMessage(error);
+    }
+  } finally {
+    reviewGenerating = false;
+    if (latestState) render(latestState);
+    else renderAnalysisView();
+    const current = latestState
+      ? activityViewRevision(latestState)
+      : requestedRevision;
+    if (activeView === 'review' && current !== reviewLoadedRevision) {
+      scheduleReviewRefresh(current);
+    }
+  }
+}
+
+function renderAnalysisView(): void {
+  analysisViewEl.replaceChildren();
+  analysisViewEl.hidden = activeView === 'thread';
+  if (activeView === 'thread') return;
+
+  if (activeView === 'today') {
+    if (todayLoading && !todayView) {
+      analysisViewEl.appendChild(
+        makeStatusMessage('Reading today’s local activity…', { kind: 'loading' }),
+      );
+      return;
+    }
+    if (todayError && !todayView) {
+      analysisViewEl.appendChild(
+        makeStatusMessage(todayError, {
+          kind: 'error',
+          actionLabel: 'Try again',
+          onAction: () => {
+            todayFailedRevision = '';
+            const revision = latestState
+              ? activityViewRevision(latestState)
+              : localDateKey();
+            void loadToday(revision);
+          },
+        }),
+      );
+      return;
+    }
+    if (todayView) {
+      if (todayLoading) {
+        analysisViewEl.appendChild(
+          makeStatusMessage('Updating activity…', { kind: 'loading' }),
+        );
+      }
+      renderTodayContent(todayView);
+    }
+    return;
+  }
+
+  if (reviewLoading && !reviewView) {
+    analysisViewEl.appendChild(
+      makeStatusMessage('Reading this thread’s local activity…', {
+        kind: 'loading',
+      }),
+    );
+    return;
+  }
+  if (reviewError && !reviewView) {
+    analysisViewEl.appendChild(
+      makeStatusMessage(reviewError, {
+        kind: 'error',
+        actionLabel: 'Try again',
+        onAction: () => {
+          reviewFailedRevision = '';
+          const revision = latestState
+            ? activityViewRevision(latestState)
+            : localDateKey();
+          void loadThreadReview(revision);
+        },
+      }),
+    );
+    return;
+  }
+  if (reviewView) {
+    if (reviewLoading) {
+      analysisViewEl.appendChild(
+        makeStatusMessage('Updating activity…', { kind: 'loading' }),
+      );
+    }
+    renderReviewContent(reviewView);
+  }
+}
+
 function scheduleThreadSearch(delayMs = 65): void {
   if (searchTimer) clearTimeout(searchTimer);
   const query = searchQuery.trim();
@@ -1255,6 +2241,27 @@ function makeAttentionCard(session: SessionSummary): HTMLElement {
 function render(state: MenubarState): void {
   latestState = state;
   if (
+    activeView === 'review' &&
+    (!reviewThreadId ||
+      !reviewThreadSource ||
+      !state.sessions.some(
+        (item) =>
+          item.threadId === reviewThreadId &&
+          item.source === reviewThreadSource,
+      ))
+  ) {
+    activeView = 'thread';
+    reviewView = null;
+    reviewThreadId = null;
+    reviewThreadSource = null;
+    reviewError = null;
+    reviewGenerationError = null;
+    reviewLoadedRevision = '';
+    reviewFailedRevision = '';
+    if (reviewRefreshTimer) clearTimeout(reviewRefreshTimer);
+    reviewRefreshTimer = null;
+  }
+  if (
     searchQuery.trim().length >= 3 &&
     state.searchIndex.indexedThreads !== lastIndexedThreadCount &&
     !searchInFlight &&
@@ -1268,21 +2275,49 @@ function render(state: MenubarState): void {
     (item) => !item.isInternal,
   ).length;
   const subagentCount = state.sessions.length - topLevelCount;
-  scopeTitleEl.textContent = session?.title || session?.projectName || 'All agents';
-  scopeMetaEl.textContent = session
-    ? `${session.projectName} · ${session.isInternal ? 'subagent · ' : ''}${
-        session.source
-      } · ${session.status} · persistent thread`
-    : `${state.recentSessionCount} recent · ${topLevelCount} threads${
-        showSubagentThreads && subagentCount > 0
-          ? ` · ${subagentCount} subagents`
-          : ''
-      } · fleet conversation`;
+  if (activeView === 'today') {
+    scopeTitleEl.textContent = 'Today';
+    scopeMetaEl.textContent = todayView
+      ? `${plural(todayView.diary.projectCount, 'project')} · ${plural(
+          todayView.diary.threadCount,
+          'thread',
+        )} · local activity`
+      : 'Activity across your projects';
+  } else if (activeView === 'review') {
+    scopeTitleEl.textContent =
+      `${reviewView?.title || session?.title || session?.projectName || 'Thread'} review`;
+    scopeMetaEl.textContent = reviewView
+      ? `${reviewView.projectName} · evidence-linked review`
+      : 'Reading local activity';
+  } else {
+    scopeTitleEl.textContent = session?.title || session?.projectName || 'All agents';
+    scopeMetaEl.textContent = session
+      ? `${session.projectName} · ${session.isInternal ? 'subagent · ' : ''}${
+          session.source
+        } · ${session.status} · persistent thread`
+      : `${state.recentSessionCount} recent · ${topLevelCount} threads${
+          showSubagentThreads && subagentCount > 0
+            ? ` · ${subagentCount} subagents`
+            : ''
+        } · fleet conversation`;
+  }
   needsCountEl.textContent =
     state.attentionCount > 0
       ? `${state.attentionCount} need attention`
       : '';
-  needsCountEl.hidden = state.attentionCount === 0;
+  needsCountEl.hidden =
+    activeView !== 'thread' || state.attentionCount === 0;
+  reviewThreadEl.hidden =
+    activeView === 'today' ||
+    (activeView === 'thread' && !session);
+  reviewThreadEl.textContent =
+    activeView === 'review' ? 'Back to chat' : 'Review thread';
+  reviewThreadEl.setAttribute(
+    'aria-label',
+    activeView === 'review'
+      ? 'Return to this thread’s side chat'
+      : 'Review this thread’s activity',
+  );
   threadCountEl.textContent = String(topLevelCount);
   const activeAuth = providerAuth.find((status) => status.provider === state.provider);
   const activeProviderLabel = activeAuth
@@ -1295,8 +2330,9 @@ function render(state: MenubarState): void {
   const firstRun =
     authPhase === 'ready' &&
     shouldShowFirstRun(providerAuth, onboardingCompleted);
-  onboardingEl.hidden = !firstRun;
-  messagesEl.hidden = firstRun;
+  onboardingEl.hidden = activeView !== 'thread' || !firstRun;
+  messagesEl.hidden = activeView !== 'thread' || firstRun;
+  composerShellEl.hidden = activeView !== 'thread';
   accountsButtonEl.hidden = firstRun;
   observerLabelEl.hidden = !firstRun;
   if (firstRun && !accountsPopoverEl.hidden) {
@@ -1366,7 +2402,13 @@ function render(state: MenubarState): void {
   renderModels(state);
   if (firstRun) modelsEl.disabled = true;
   renderMessages(state);
+  renderAnalysisView();
   renderProviderSurfaces();
+  if (activeView === 'today') {
+    scheduleTodayRefresh(activityViewRevision(state));
+  } else if (activeView === 'review') {
+    scheduleReviewRefresh(activityViewRevision(state));
+  }
 }
 
 function showSettings(): void {
@@ -1435,6 +2477,17 @@ keepOpenEl.addEventListener('click', () => {
     .finally(() => {
       keepOpenEl.disabled = false;
     });
+});
+
+reviewThreadEl.addEventListener('click', () => {
+  if (activeView === 'review') {
+    activeView = 'thread';
+    if (latestState) render(latestState);
+    return;
+  }
+  if (!latestState) return;
+  const session = activeSession(latestState);
+  if (session) showThreadReview(session);
 });
 
 accountsButtonEl.addEventListener('click', () => {

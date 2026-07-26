@@ -12,7 +12,21 @@ import { FileThreadStore } from '../../dist/core/thread-store.js';
 import {
   ActivityLedger,
   InMemoryActivityLedgerStore,
+  threadKey,
 } from '../../dist/core/activity-ledger.js';
+import {
+  activityEvidenceRef,
+  buildTodayDiary,
+  countFacts,
+} from '../../dist/core/today-diary.js';
+import { buildActivityInsights } from '../../dist/core/activity-insights.js';
+import { packActivityEvidence } from '../../dist/core/activity-evidence-pack.js';
+import {
+  FileGeneratedArtifactStore,
+} from '../../dist/core/generated-artifact-store.js';
+import {
+  ObserverAnalysisEngine,
+} from '../../dist/core/observer-analysis-engine.js';
 import { TIMING } from '../../dist/config/defaults.js';
 import {
   flattenModelCatalog,
@@ -22,7 +36,28 @@ import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
-import type { ThreadAttentionKind } from '../../dist/types/activity.js';
+import type {
+  ActivityEventRecord,
+  ThreadActivityCursor,
+  ThreadAttentionKind,
+} from '../../dist/types/activity.js';
+import type {
+  ActivityEvidenceRef,
+  ActivityFactCounts,
+  ActivityInsight,
+  TodayDiary,
+} from '../../dist/types/today.js';
+import type {
+  GeneratedArtifact,
+  GeneratedDailyRecapArtifact,
+  GeneratedThreadReviewArtifact,
+} from '../../dist/types/generated-artifact.js';
+import type {
+  GeneratedArtifactStore,
+} from '../../dist/core/generated-artifact-store.js';
+import type {
+  ObserverAnalysisEngineLike,
+} from '../../dist/core/observer-analysis-engine.js';
 import type {
   IndexableSideChat,
   SearchIndexStatus,
@@ -84,6 +119,10 @@ export interface MenubarState {
   models: ModelOption[];
   /** Local transcript-content indexing progress. */
   searchIndex: SearchIndexStatus;
+  /** Monotonic ledger watermark used to refresh deterministic activity views. */
+  activityHighWaterSeq: number;
+  /** Changes when viewed/resolved cursors advance without a new event. */
+  activityCursorRevision: string;
 }
 
 export interface BackendConfig {
@@ -97,6 +136,54 @@ export interface MenubarThreadTarget {
   model: string;
 }
 
+/**
+ * Collision-safe identity for a watched agent session.
+ *
+ * Side-chat IDs predate multi-agent-source discovery and contain only the
+ * vendor session ID. Requiring the source here prevents a Codex and Claude
+ * session with the same ID from being silently conflated in activity reports.
+ */
+export interface MenubarSessionTarget {
+  threadId: string;
+  source: TrackedSession['source'];
+}
+
+export interface TodayViewState {
+  diary: TodayDiary;
+  insights: ActivityInsight[];
+  provider: string;
+  model: string;
+  artifact: GeneratedDailyRecapArtifact | null;
+  /** Evidence cited by the artifact and still present in today's ledger scope. */
+  artifactEvidence: ActivityEvidenceRef[];
+  artifactEvidenceMissingCount: number;
+  newEventCount: number;
+  artifactIsStale: boolean;
+}
+
+export interface ThreadReviewViewState {
+  selection: MenubarSessionTarget;
+  threadKey: string;
+  rootThreadKey: string;
+  isInternal: boolean;
+  projectName: string;
+  title: string;
+  provider: string;
+  model: string;
+  /** Root reviews include current descendants; subagent reviews stay exact. */
+  includedThreadKeys: string[];
+  counts: ActivityFactCounts;
+  insights: ActivityInsight[];
+  /** Newest normalized facts only; raw transcript records are never returned. */
+  evidence: ActivityEvidenceRef[];
+  artifact: GeneratedThreadReviewArtifact | null;
+  /** Evidence cited by the artifact and still present in this review scope. */
+  artifactEvidence: ActivityEvidenceRef[];
+  artifactEvidenceMissingCount: number;
+  newEventCount: number;
+  artifactIsStale: boolean;
+}
+
 /** Injection seam for tests (defaults wire up the real core). */
 export interface BackendDeps {
   scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
@@ -104,7 +191,13 @@ export interface BackendDeps {
   models?: () => ModelOption[];
   search?: ThreadSearchService;
   activity?: ActivityLedger;
+  artifacts?: GeneratedArtifactStore;
+  analysis?: ObserverAnalysisEngineLike;
+  now?: () => Date;
+  timeZone?: string;
 }
+
+const THREAD_REVIEW_EVIDENCE_LIMIT = 240;
 
 export class MenubarBackend {
   private readonly service: SideChatService;
@@ -115,7 +208,13 @@ export class MenubarBackend {
   private readonly storagePath: string;
   private readonly search?: ThreadSearchService;
   private readonly activity: ActivityLedger;
+  private readonly artifactStore: GeneratedArtifactStore;
+  private readonly analysis: ObserverAnalysisEngineLike;
+  private readonly now: () => Date;
+  private readonly timeZone?: string;
   private readonly unsubscribeSearchStatus?: () => void;
+  private artifacts: GeneratedArtifact[];
+  private readonly analysisInFlight = new Map<string, Promise<unknown>>();
   private sessions: TrackedSession[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -124,6 +223,8 @@ export class MenubarBackend {
     private readonly onUpdate: (state: MenubarState) => void,
     deps: BackendDeps = {},
   ) {
+    this.now = deps.now ?? (() => new Date());
+    this.timeZone = deps.timeZone;
     this.scan =
       deps.scan ??
       (() => scanAllSessions({}, { includeInternal: true }));
@@ -135,9 +236,16 @@ export class MenubarBackend {
       deps.activity ??
       new ActivityLedger(
         createActivityStore(),
-        () => new Date(),
+        this.now,
         () => this.emit(),
       );
+    this.artifactStore =
+      deps.artifacts ??
+      new FileGeneratedArtifactStore();
+    this.artifacts = this.artifactStore.load();
+    this.analysis =
+      deps.analysis ??
+      new ObserverAnalysisEngine(undefined, undefined, this.now);
     const store = new FileThreadStore();
     this.storagePath = store.location;
     this.service =
@@ -261,6 +369,122 @@ export class MenubarBackend {
       );
     }
     return this.service.ask(question, target?.threadId);
+  }
+
+  /**
+   * The model/account the explicit Today generation action must authorize.
+   * Callers should capture this, complete their provider auth guard, then pass
+   * the same target to `generateTodayRecap`.
+   */
+  getTodayAnalysisTarget(): MenubarThreadTarget {
+    return this.analysisTargetFor(FLEET_THREAD_ID);
+  }
+
+  /**
+   * The selected session side-chat owns the model used for its explicit review.
+   * Resolving the source as well as the side-chat ID prevents vendor-ID
+   * collisions from selecting another agent's activity.
+   */
+  getThreadReviewAnalysisTarget(
+    selection: MenubarSessionTarget,
+  ): MenubarThreadTarget {
+    const session = this.resolveReviewSession(selection);
+    return this.analysisTargetFor(sessionThreadId(session.id));
+  }
+
+  /** Deterministic local Today state. This never calls a provider. */
+  getToday(): TodayViewState {
+    return this.buildTodayView(this.now().getTime());
+  }
+
+  /** Deterministic local review state. This never calls a provider. */
+  getThreadReview(
+    selection: MenubarSessionTarget,
+  ): ThreadReviewViewState {
+    const session = this.resolveReviewSession(selection);
+    return this.buildThreadReviewView(selection, session);
+  }
+
+  /**
+   * Generate one evidence-backed recap after an explicit UI action.
+   * Repeated clicks for the same local day share one in-flight operation.
+   */
+  generateTodayRecap(
+    target: MenubarThreadTarget,
+  ): Promise<TodayViewState> {
+    const nowMs = this.now().getTime();
+    const before = this.buildTodayView(nowMs);
+    const scope = `daily:${before.diary.range.dateKey}`;
+    this.assertAnalysisTarget(FLEET_THREAD_ID, target);
+    const existing = this.analysisInFlight.get(scope);
+    if (existing) return existing as Promise<TodayViewState>;
+
+    const events = this.todayEvents(before.diary);
+    const evidence = packActivityEvidence(
+      events.map(providerSafeActivityEvent),
+    );
+    const task = (async () => {
+      const artifact = await this.analysis.generateDailyRecap({
+        day: before.diary.range.dateKey,
+        provider: target.provider,
+        model: target.model,
+        evidence,
+      });
+      assertGeneratedArtifactMatches(artifact, {
+        kind: 'daily_recap',
+        scope: before.diary.range.dateKey,
+        target,
+        highWaterSeq: evidence.highWaterSeq,
+        inputHash: evidence.inputHash,
+        evidenceIds: evidence.evidenceIds,
+      });
+      this.persistArtifact(artifact);
+      return this.buildTodayView(nowMs);
+    })();
+    this.trackAnalysis(scope, task);
+    return task;
+  }
+
+  /**
+   * Generate one evidence-backed review after an explicit UI action.
+   * Root reviews include descendant activity; subagent reviews stay exact.
+   */
+  generateThreadReview(
+    selection: MenubarSessionTarget,
+    target: MenubarThreadTarget,
+  ): Promise<ThreadReviewViewState> {
+    const session = this.resolveReviewSession(selection);
+    const resolvedThreadId = sessionThreadId(session.id);
+    const key = threadKey(session.source, session.id);
+    const scope = `thread:${key}`;
+    this.assertAnalysisTarget(resolvedThreadId, target);
+    const existing = this.analysisInFlight.get(scope);
+    if (existing) return existing as Promise<ThreadReviewViewState>;
+
+    const events = this.threadReviewEvents(session);
+    const evidence = packActivityEvidence(
+      events.map(providerSafeActivityEvent),
+    );
+    const task = (async () => {
+      const artifact = await this.analysis.generateThreadReview({
+        threadKey: key,
+        provider: target.provider,
+        model: target.model,
+        evidence,
+      });
+      assertGeneratedArtifactMatches(artifact, {
+        kind: 'thread_review',
+        scope: key,
+        target,
+        highWaterSeq: evidence.highWaterSeq,
+        inputHash: evidence.inputHash,
+        evidenceIds: evidence.evidenceIds,
+      });
+      this.persistArtifact(artifact);
+      return this.buildThreadReviewView(selection, session);
+    })();
+    this.trackAnalysis(scope, task);
+    return task;
   }
 
   /**
@@ -410,6 +634,8 @@ export class MenubarBackend {
         indexedBytes: 0,
         totalBytes: 0,
       },
+      activityHighWaterSeq: this.activity.getHighWaterSeq(),
+      activityCursorRevision: cursorRevision(this.activity.getCursors()),
     };
   }
 
@@ -448,6 +674,286 @@ export class MenubarBackend {
       this.service.selectThread(FLEET_THREAD_ID);
     }
     this.emit();
+  }
+
+  private buildTodayView(nowMs: number): TodayViewState {
+    const allEvents = this.activity.getEvents();
+    const diary = buildTodayDiary(allEvents, {
+      nowMs,
+      timeZone: this.timeZone,
+    });
+    const events = this.todayEvents(diary);
+    const insights = buildActivityInsights(events, {
+      nowMs,
+      cursors: this.activity.getCursors(),
+    });
+    const artifact = this.latestDailyArtifact(diary.range.dateKey);
+    const artifactEvidence = this.resolveArtifactEvidence(artifact, events);
+    const analysisTarget = this.getTodayAnalysisTarget();
+    const artifactEvidenceMissingCount = artifact
+      ? artifact.evidenceIds.length - artifactEvidence.length
+      : 0;
+    const newEventCount = countEventsAfterArtifact(events, artifact);
+    return {
+      diary,
+      insights,
+      provider: analysisTarget.provider,
+      model: analysisTarget.model,
+      artifact,
+      artifactEvidence,
+      artifactEvidenceMissingCount,
+      newEventCount,
+      artifactIsStale:
+        artifact !== null &&
+        (newEventCount > 0 || artifactEvidenceMissingCount > 0),
+    };
+  }
+
+  private todayEvents(diary: TodayDiary): ActivityEventRecord[] {
+    return this.activity.getEvents({
+      sinceMs: diary.range.startMs,
+      untilMs: diary.range.endMs,
+    });
+  }
+
+  private buildThreadReviewView(
+    selection: MenubarSessionTarget,
+    session: TrackedSession,
+  ): ThreadReviewViewState {
+    const key = threadKey(session.source, session.id);
+    const events = this.threadReviewEvents(session);
+    const rootThreadKey = this.rootThreadKeyFor(session, events);
+    const includedThreadKeys = [...new Set(events.map((event) => event.threadKey))]
+      .sort((left, right) => {
+        if (left === key) return -1;
+        if (right === key) return 1;
+        return left.localeCompare(right);
+      });
+    if (!includedThreadKeys.includes(key)) includedThreadKeys.unshift(key);
+    const artifact = this.latestThreadArtifact(key);
+    const analysisTarget = this.analysisTargetFor(sessionThreadId(session.id));
+    const artifactEvidence = this.resolveArtifactEvidence(artifact, events);
+    const artifactEvidenceMissingCount = artifact
+      ? artifact.evidenceIds.length - artifactEvidence.length
+      : 0;
+    const newEventCount = countEventsAfterArtifact(events, artifact);
+    return {
+      selection: { ...selection },
+      threadKey: key,
+      rootThreadKey,
+      isInternal: session.isInternal ?? false,
+      projectName: session.projectName,
+      title: session.title ?? '',
+      provider: analysisTarget.provider,
+      model: analysisTarget.model,
+      includedThreadKeys,
+      counts: countFacts(events),
+      insights: buildActivityInsights(events, {
+        nowMs: this.now().getTime(),
+        cursors: this.activity.getCursors(),
+      }),
+      evidence: events
+        .slice(-THREAD_REVIEW_EVIDENCE_LIMIT)
+        .map(activityEvidenceRef),
+      artifact,
+      artifactEvidence,
+      artifactEvidenceMissingCount,
+      newEventCount,
+      artifactIsStale:
+        artifact !== null &&
+        (newEventCount > 0 || artifactEvidenceMissingCount > 0),
+    };
+  }
+
+  private threadReviewEvents(session: TrackedSession): ActivityEventRecord[] {
+    const key = threadKey(session.source, session.id);
+    if (session.isInternal || session.parentSessionId) {
+      return this.activity.getEvents({ threadKey: key });
+    }
+
+    const descendants = this.currentDescendantKeys(session);
+    return this.activity
+      .getEvents()
+      .filter(
+        (event) =>
+          event.threadKey === key ||
+          event.rootThreadKey === key ||
+          descendants.has(event.threadKey),
+      );
+  }
+
+  private currentDescendantKeys(root: TrackedSession): Set<string> {
+    const rootKey = threadKey(root.source, root.id);
+    const descendants = new Set<string>([rootKey]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const candidate of this.sessions) {
+        if (
+          candidate.source !== root.source ||
+          !candidate.parentSessionId ||
+          descendants.has(threadKey(candidate.source, candidate.id))
+        ) {
+          continue;
+        }
+        const parentKey = threadKey(
+          candidate.source,
+          candidate.parentSessionId,
+        );
+        if (!descendants.has(parentKey)) continue;
+        descendants.add(threadKey(candidate.source, candidate.id));
+        changed = true;
+      }
+    }
+    return descendants;
+  }
+
+  private rootThreadKeyFor(
+    session: TrackedSession,
+    events: ReadonlyArray<ActivityEventRecord>,
+  ): string {
+    const key = threadKey(session.source, session.id);
+    if (!session.isInternal && !session.parentSessionId) return key;
+    const recorded = [...events]
+      .reverse()
+      .find((event) => event.threadKey === key)?.rootThreadKey;
+    if (recorded) return recorded;
+
+    let current = session;
+    let rootKey = key;
+    const seen = new Set<string>([key]);
+    while (current.parentSessionId) {
+      const parentKey = threadKey(current.source, current.parentSessionId);
+      if (seen.has(parentKey)) break;
+      seen.add(parentKey);
+      rootKey = parentKey;
+      const parent = this.sessions.find(
+        (candidate) =>
+          candidate.source === current.source &&
+          candidate.id === current.parentSessionId,
+      );
+      if (!parent) break;
+      current = parent;
+    }
+    return rootKey;
+  }
+
+  private resolveReviewSession(
+    selection: MenubarSessionTarget,
+  ): TrackedSession {
+    if (
+      !selection ||
+      !['claude', 'codex', 'pi'].includes(selection.source) ||
+      typeof selection.threadId !== 'string' ||
+      !selection.threadId.startsWith('session:')
+    ) {
+      throw new Error('Choose a valid agent thread to review.');
+    }
+    const sessionId = selection.threadId.slice('session:'.length);
+    if (!sessionId || sessionThreadId(sessionId) !== selection.threadId) {
+      throw new Error('Choose a valid agent thread to review.');
+    }
+    const matches = this.sessions.filter(
+      (session) =>
+        session.id === sessionId &&
+        session.source === selection.source,
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? 'That agent thread is no longer available.'
+          : 'That agent thread identity is ambiguous.',
+      );
+    }
+    return matches[0]!;
+  }
+
+  private analysisTargetFor(threadId: string): MenubarThreadTarget {
+    const thread = this.service.getThread(threadId);
+    return {
+      threadId: thread.id,
+      provider: thread.provider,
+      model: thread.model,
+    };
+  }
+
+  private assertAnalysisTarget(
+    expectedThreadId: string,
+    target: MenubarThreadTarget,
+  ): void {
+    if (
+      target.threadId !== expectedThreadId ||
+      !this.threadStillMatches(target)
+    ) {
+      throw new Error(
+        'This thread changed before the observer analysis could start.',
+      );
+    }
+  }
+
+  private latestDailyArtifact(
+    day: string,
+  ): GeneratedDailyRecapArtifact | null {
+    return latestArtifact(
+      this.artifacts.filter(
+        (artifact): artifact is GeneratedDailyRecapArtifact =>
+          artifact.kind === 'daily_recap' && artifact.day === day,
+      ),
+    );
+  }
+
+  private latestThreadArtifact(
+    key: string,
+  ): GeneratedThreadReviewArtifact | null {
+    return latestArtifact(
+      this.artifacts.filter(
+        (artifact): artifact is GeneratedThreadReviewArtifact =>
+          artifact.kind === 'thread_review' &&
+          artifact.threadKey === key,
+      ),
+    );
+  }
+
+  private resolveArtifactEvidence(
+    artifact:
+      | GeneratedDailyRecapArtifact
+      | GeneratedThreadReviewArtifact
+      | null,
+    scopedEvents: ReadonlyArray<ActivityEventRecord>,
+  ): ActivityEvidenceRef[] {
+    if (!artifact) return [];
+    const scopedIds = new Set(scopedEvents.map((event) => event.eventId));
+    const resolved: ActivityEvidenceRef[] = [];
+    const seen = new Set<string>();
+    for (const eventId of artifact.evidenceIds) {
+      if (seen.has(eventId) || !scopedIds.has(eventId)) continue;
+      seen.add(eventId);
+      const event = this.activity.getEvent(eventId);
+      if (event) resolved.push(activityEvidenceRef(event));
+    }
+    return resolved;
+  }
+
+  private persistArtifact(artifact: GeneratedArtifact): void {
+    const next = [
+      ...this.artifacts.filter((current) => current.id !== artifact.id),
+      artifact,
+    ];
+    this.artifactStore.save(next);
+    // The durable store applies its retention/size bounds. Mirror the
+    // installed snapshot so a long-running app cannot keep an unbounded
+    // pre-prune array in memory.
+    this.artifacts = this.artifactStore.load();
+  }
+
+  private trackAnalysis<T>(scope: string, task: Promise<T>): void {
+    this.analysisInFlight.set(scope, task);
+    const clear = () => {
+      if (this.analysisInFlight.get(scope) === task) {
+        this.analysisInFlight.delete(scope);
+      }
+    };
+    task.then(clear, clear);
   }
 
   private emit(): void {
@@ -492,5 +998,245 @@ function createActivityStore() {
       error instanceof Error ? error.message : 'unknown error',
     );
     return new InMemoryActivityLedgerStore();
+  }
+}
+
+function latestArtifact<T extends GeneratedArtifact>(
+  artifacts: ReadonlyArray<T>,
+): T | null {
+  let latest: T | null = null;
+  for (const artifact of artifacts) {
+    if (
+      !latest ||
+      artifact.createdAt > latest.createdAt ||
+      (artifact.createdAt === latest.createdAt && artifact.id > latest.id)
+    ) {
+      latest = artifact;
+    }
+  }
+  return latest;
+}
+
+function countEventsAfterArtifact(
+  events: ReadonlyArray<ActivityEventRecord>,
+  artifact: GeneratedArtifact | null,
+): number {
+  const highWaterSeq = artifact?.inputHighWaterSeq ?? 0;
+  return events.filter((event) => event.seq > highWaterSeq).length;
+}
+
+function cursorRevision(
+  cursors: ReadonlyArray<ThreadActivityCursor>,
+): string {
+  let revision = 0n;
+  for (const cursor of cursors) {
+    revision += BigInt(cursor.viewedThroughSeq);
+    revision += BigInt(cursor.resolvedThroughSeq);
+  }
+  return revision.toString();
+}
+
+/**
+ * Provider-bound evidence should identify projects and activity without
+ * disclosing the user's local home, temp, or volume layout. The shared packer
+ * still performs credential redaction and clamps every field after this pass.
+ */
+function providerSafeActivityEvent(
+  event: ActivityEventRecord,
+): ActivityEventRecord {
+  return {
+    ...event,
+    projectName: redactLocalPaths(event.projectName),
+    title: redactLocalPaths(event.title),
+    summary: redactLocalPaths(event.summary),
+  };
+}
+
+function redactLocalPaths(value: string): string {
+  const delimited = value
+    .replace(
+      /"((?:file:(?:\/\/[^/\s"]*)?\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^"\r\n]+)"/gi,
+      '"[LOCAL_PATH]"',
+    )
+    .replace(
+      /'((?:file:(?:\/\/[^/\s']*)?\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^'\r\n]+)'/gi,
+      "'[LOCAL_PATH]'",
+    )
+    .replace(
+      /`((?:file:(?:\/\/[^/\s`]*)?\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^`\r\n]+)`/gi,
+      '`[LOCAL_PATH]`',
+    )
+    .replace(
+      /<((?:file:(?:\/\/[^/\s>]*)?\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^>\r\n]+)>/gi,
+      '<[LOCAL_PATH]>',
+    );
+  return redactUnquotedLocalPaths(delimited);
+}
+
+const LOCAL_PATH_LEFT_BOUNDARY =
+  /(^|[\s("'`=:[,])(?:file:(?:\/\/[^/\s"'`]*)?\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)/gi;
+const LOCAL_PATH_HARD_STOP = /[\r\n"'`]/;
+const PATH_TRAILING_EXTENSION = /\.[A-Za-z0-9_-]{1,16}(?::\d+(?::\d+)?)?$/;
+const PATH_PROSE_BOUNDARIES = new Set([
+  'after',
+  'and',
+  'at',
+  'before',
+  'because',
+  'but',
+  'by',
+  'completed',
+  'continue',
+  'continued',
+  'contains',
+  'during',
+  'exists',
+  'failed',
+  'finished',
+  'for',
+  'from',
+  'had',
+  'has',
+  'into',
+  'is',
+  'missing',
+  'now',
+  'on',
+  'or',
+  'ready',
+  'reported',
+  'returned',
+  'ran',
+  'run',
+  'saved',
+  'see',
+  'so',
+  'started',
+  'succeeded',
+  'successfully',
+  'then',
+  'to',
+  'using',
+  'via',
+  'was',
+  'were',
+  'when',
+  'while',
+  'with',
+  'wrote',
+]);
+
+function redactUnquotedLocalPaths(value: string): string {
+  LOCAL_PATH_LEFT_BOUNDARY.lastIndex = 0;
+  let output = '';
+  let copiedThrough = 0;
+  let match: RegExpExecArray | null;
+  while ((match = LOCAL_PATH_LEFT_BOUNDARY.exec(value)) !== null) {
+    const prefix = match[1] ?? '';
+    const pathStart = match.index + prefix.length;
+    if (pathStart < copiedThrough) continue;
+    const pathEnd = unquotedLocalPathEnd(value, pathStart);
+    output += value.slice(copiedThrough, pathStart);
+    output += '[LOCAL_PATH]';
+    copiedThrough = pathEnd;
+    LOCAL_PATH_LEFT_BOUNDARY.lastIndex = pathEnd;
+  }
+  return output + value.slice(copiedThrough);
+}
+
+function unquotedLocalPathEnd(value: string, start: number): number {
+  let index = start;
+  while (index < value.length) {
+    const char = value[index]!;
+    if (LOCAL_PATH_HARD_STOP.test(char)) break;
+    if (
+      char === ';' &&
+      !pathSyntaxBeforeProseBoundary(value.slice(index + 1).trimStart())
+    ) {
+      break;
+    }
+    if (!/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char !== ' ' && char !== '\t') break;
+    if (index > start && value[index - 1] === '\\') {
+      index += 1;
+      continue;
+    }
+
+    let nextStart = index;
+    while (value[nextStart] === ' ' || value[nextStart] === '\t') {
+      nextStart += 1;
+    }
+    let nextEnd = nextStart;
+    while (
+      nextEnd < value.length &&
+      !/\s/.test(value[nextEnd]!) &&
+      !LOCAL_PATH_HARD_STOP.test(value[nextEnd]!)
+    ) {
+      nextEnd += 1;
+    }
+    const nextWord = value.slice(nextStart, nextEnd);
+    if (!nextWord) break;
+    const normalizedWord = nextWord.toLocaleLowerCase().replace(/[.:]+$/, '');
+    if (PATH_PROSE_BOUNDARIES.has(normalizedWord)) break;
+
+    const currentPath = value.slice(start, index).replace(/\\ /g, ' ');
+    const remainingLine = value.slice(nextStart).split(/[\r\n"'`]/, 1)[0] ?? '';
+    const hasPathProof =
+      /[\\/]/.test(nextWord) ||
+      PATH_TRAILING_EXTENSION.test(nextWord) ||
+      pathSyntaxBeforeProseBoundary(remainingLine);
+    if (PATH_TRAILING_EXTENSION.test(currentPath) && !hasPathProof) break;
+    index = nextStart;
+  }
+  return index;
+}
+
+function pathSyntaxBeforeProseBoundary(value: string): boolean {
+  const words = value.split(/\s+/);
+  const candidate: string[] = [];
+  for (const word of words) {
+    const normalized = word.toLocaleLowerCase().replace(/[.:]+$/, '');
+    if (PATH_PROSE_BOUNDARIES.has(normalized)) break;
+    candidate.push(word);
+  }
+  return /[\\/]/.test(candidate.join(' ')) ||
+    candidate.some((word) => PATH_TRAILING_EXTENSION.test(word));
+}
+
+interface ExpectedGeneratedArtifact {
+  kind: GeneratedArtifact['kind'];
+  scope: string;
+  target: MenubarThreadTarget;
+  highWaterSeq: number;
+  inputHash: string;
+  evidenceIds: string[];
+}
+
+function assertGeneratedArtifactMatches(
+  artifact: GeneratedArtifact,
+  expected: ExpectedGeneratedArtifact,
+): void {
+  const scopeMatches =
+    (expected.kind === 'daily_recap' &&
+      artifact.kind === 'daily_recap' &&
+      artifact.day === expected.scope) ||
+    (expected.kind === 'thread_review' &&
+      artifact.kind === 'thread_review' &&
+      artifact.threadKey === expected.scope);
+  const allowedEvidence = new Set(expected.evidenceIds);
+  if (
+    !scopeMatches ||
+    artifact.provider !== expected.target.provider ||
+    artifact.model !== expected.target.model ||
+    artifact.inputHighWaterSeq !== expected.highWaterSeq ||
+    artifact.inputHash !== expected.inputHash ||
+    artifact.evidenceIds.some((eventId) => !allowedEvidence.has(eventId))
+  ) {
+    throw new Error(
+      'The observer analysis did not match the requested evidence scope.',
+    );
   }
 }
