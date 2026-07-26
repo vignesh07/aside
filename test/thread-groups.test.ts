@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  filterAttentionHierarchy,
   OLDER_AFTER_MS,
   groupSubagentsByRoot,
   groupThreadsByProject,
@@ -46,6 +47,17 @@ describe('menubar thread hierarchy', () => {
     expect(group?.sessions.map((item) => item.id)).toEqual(['waiting', 'quiet']);
   });
 
+  it('sorts every richer attention state ahead of ordinary recency', () => {
+    const [group] = groupThreadsByProject([
+      { ...thread('quiet', 'app', '/app', 10), needsAttention: false },
+      { ...thread('completed', 'app', '/app', 50), needsAttention: true },
+    ]);
+    expect(group?.sessions.map((item) => item.id)).toEqual([
+      'completed',
+      'quiet',
+    ]);
+  });
+
   it('folds nested subagents beneath their user-owned root', () => {
     const base = {
       projectName: 'app',
@@ -85,5 +97,54 @@ describe('menubar thread hierarchy', () => {
         .get('codex:root')
         ?.map((session) => session.id),
     ).toEqual(['grandchild', 'child']);
+  });
+
+  it('keeps quiet roots as context for attentive subagents and removes unrelated workers', () => {
+    const base = {
+      projectName: 'app',
+      projectPath: '/app',
+      needsUser: false,
+    };
+    const quietRoot = {
+      ...base,
+      id: 'quiet-root',
+      source: 'codex',
+      idleForMs: 30,
+      isInternal: false,
+      needsAttention: false,
+    };
+    const attentiveRoot = {
+      ...quietRoot,
+      id: 'attentive-root',
+      needsAttention: true,
+    };
+    const attentiveChild = {
+      ...quietRoot,
+      id: 'attentive-child',
+      isInternal: true,
+      parentSessionId: 'quiet-root',
+      needsAttention: true,
+    };
+    const quietChild = {
+      ...attentiveChild,
+      id: 'quiet-child',
+      needsAttention: false,
+    };
+    const attention = filterAttentionHierarchy(
+      [quietRoot, attentiveRoot],
+      new Map([
+        ['codex:quiet-root', [attentiveChild, quietChild]],
+      ]),
+    );
+
+    expect(attention.roots.map((session) => session.id)).toEqual([
+      'quiet-root',
+      'attentive-root',
+    ]);
+    expect(
+      attention.subagentsByRoot
+        .get('codex:quiet-root')
+        ?.map((session) => session.id),
+    ).toEqual(['attentive-child']);
   });
 });

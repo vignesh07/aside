@@ -293,13 +293,70 @@
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
       }
-      .thread.needs-user .thread-subtitle { color: var(--attention); }
-      .attention-dot {
-        width: 7px;
-        height: 7px;
+      .thread.needs-attention .thread-subtitle { color: var(--secondary); }
+      .thread.attention-waiting .thread-subtitle,
+      .thread.attention-stalled .thread-subtitle { color: var(--attention); }
+      .thread.attention-failed .thread-subtitle { color: var(--danger); }
+      .thread.attention-completed .thread-subtitle { color: var(--accent); }
+      .attention-badge {
+        width: 14px;
+        height: 14px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-strong);
         border-radius: 50%;
+        color: var(--secondary);
+        background: transparent;
+        font-size: 8px;
+        font-weight: 700;
+        line-height: 1;
+      }
+      .attention-badge.waiting {
+        color: var(--attention);
+        border-color: color-mix(in srgb, var(--attention) 50%, transparent);
+      }
+      .attention-badge.failed {
+        color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 52%, transparent);
+      }
+      .attention-badge.interrupted,
+      .attention-badge.stalled {
+        color: var(--attention);
+        border-color: color-mix(in srgb, var(--attention) 42%, transparent);
+      }
+      .attention-badge.completed {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+      }
+      .attention-badge.forgotten {
+        color: var(--tertiary);
+        border-color: var(--line-strong);
+      }
+      .attention-badge.unread.waiting {
+        color: var(--window);
         background: var(--attention);
-        color: transparent;
+        border-color: var(--attention);
+      }
+      .attention-badge.unread.failed {
+        color: #fff;
+        background: var(--danger);
+        border-color: var(--danger);
+      }
+      .attention-badge.unread.completed {
+        color: #fff;
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+      .thread.attention-smart {
+        min-height: 40px;
+        margin-bottom: 5px;
+      }
+      .thread.attention-smart.filtered {
+        background: var(--surface-hover);
+      }
+      .thread.attention-smart.filtered .source {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 42%, transparent);
       }
       .sidebar-foot {
         flex: none;
@@ -354,6 +411,10 @@
         -webkit-app-region: no-drag;
       }
       .icon-button:hover { color: var(--text); background: var(--surface-hover); }
+      .icon-button:focus { outline: 0; }
+      .icon-button:focus-visible {
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+      }
 
       /* Conversation */
       .chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -376,13 +437,32 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      #scope-meta { color: var(--secondary); font-size: 10px; }
+      #scope-meta {
+        overflow: hidden;
+        color: var(--secondary);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       #needs-count {
         flex: none;
-        margin-left: auto;
+        margin-left: 10px;
         color: var(--attention);
         font-size: 11px;
         font-weight: 530;
+      }
+      #keep-open {
+        flex: none;
+        margin-left: 8px;
+      }
+      #keep-open svg {
+        width: 13px;
+        height: 13px;
+        pointer-events: none;
+      }
+      #keep-open[aria-pressed="true"] {
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
       }
       #messages {
         min-height: 0;
@@ -523,25 +603,43 @@
       #privacy-banner {
         display: flex;
         align-items: center;
-        gap: 7px;
-        padding: 0 3px 8px;
+        gap: 6px;
+        padding: 0 4px 7px;
+        color: var(--tertiary);
+        font-size: 9px;
+      }
+      #privacy-banner strong { color: var(--secondary); font-weight: 540; }
+      #privacy-banner .privacy-mark {
+        width: 12px;
+        height: 12px;
+        display: grid;
+        place-items: center;
         color: var(--secondary);
         font-size: 10px;
       }
-      #privacy-banner strong { color: var(--secondary); font-weight: 560; }
       #privacy-banner button {
         margin-left: auto;
         padding: 0;
-        color: var(--accent);
+        color: var(--tertiary);
         border: 0;
         background: transparent;
+        font-size: 13px;
+        line-height: 1;
         white-space: nowrap;
         cursor: default;
       }
+      #privacy-banner button:hover { color: var(--text); }
       .composer-card {
-        border: 1px solid var(--line-strong);
-        border-radius: 12px;
-        background: var(--window);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface);
+        box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent);
+        transition: border-color .14s ease, box-shadow .14s ease;
+      }
+      .composer-card:focus-within {
+        border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent);
       }
       #provider-lock {
         min-height: 34px;
@@ -560,7 +658,7 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      #provider-lock-action, #account-inline {
+      #provider-lock-action {
         padding: 0;
         color: var(--accent);
         border: 0;
@@ -568,53 +666,68 @@
         white-space: nowrap;
         cursor: default;
       }
-      #composer { display: flex; align-items: center; min-height: 45px; padding: 5px 6px 5px 11px; }
+      #composer {
+        display: flex;
+        align-items: flex-end;
+        min-height: 42px;
+        padding: 6px 6px 5px 10px;
+      }
       #input {
         min-width: 0;
+        min-height: 27px;
+        max-height: 104px;
+        overflow-y: auto;
         flex: 1;
-        padding: 6px 0;
+        resize: none;
+        padding: 5px 2px 4px 0;
         color: var(--text);
         border: 0;
         outline: 0;
         background: transparent;
+        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
         user-select: text;
       }
       #input::placeholder { color: var(--tertiary); }
       #send {
-        width: 29px;
-        height: 29px;
+        width: 27px;
+        height: 27px;
         display: grid;
         place-items: center;
-        padding: 0 0 2px;
-        color: var(--window);
-        border: 0;
-        border-radius: 50%;
-        background: var(--text);
-        font-size: 16px;
+        flex: none;
+        margin-left: 7px;
+        padding: 0 0 1px;
+        color: #fff;
+        border: 1px solid color-mix(in srgb, var(--accent) 72%, #000);
+        border-radius: 7px;
+        background: var(--accent);
+        font-size: 15px;
         line-height: 1;
         cursor: default;
       }
-      #send:disabled { opacity: .26; }
+      #send:hover:not(:disabled) { filter: brightness(1.07); }
+      #send:disabled {
+        color: var(--tertiary);
+        border-color: transparent;
+        background: var(--line);
+      }
       .composer-meta {
-        min-height: 28px;
+        min-height: 24px;
         display: flex;
         align-items: center;
-        gap: 5px;
-        padding: 0 10px;
-        border-top: 1px solid var(--line);
+        padding: 0 9px 5px;
         color: var(--secondary);
-        font-size: 10px;
+        font-size: 9px;
       }
       #models {
         min-width: 0;
-        max-width: 285px;
+        max-width: min(100%, 330px);
+        padding: 1px 15px 1px 0;
         color: var(--secondary);
         border: 0;
         outline: 0;
         background: transparent;
-        font-size: 10px;
+        font-size: 9px;
       }
-      .composer-meta .spacer { flex: 1; }
 
       /* Accounts popover */
       .accounts-popover {
@@ -990,6 +1103,18 @@
             <div id="scope-meta">Fleet conversation</div>
           </div>
           <span id="needs-count" hidden></span>
+          <button
+            id="keep-open"
+            class="icon-button"
+            type="button"
+            aria-label="Keep Aside open when switching apps"
+            aria-pressed="false"
+            title="Keep Aside open when switching apps"
+          >
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M5.4 2.5h5.2l-.8 3 2.2 2.2v1H8.7V13L8 14l-.7-1V8.7H4v-1l2.2-2.2-.8-3Z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"></path>
+            </svg>
+          </button>
         </header>
         <div id="onboarding" hidden>
           <div class="onboarding-inner">
@@ -1015,8 +1140,9 @@
             <button id="update-ready-restart" type="button">Restart</button>
           </div>
           <div id="privacy-banner">
-            <span><strong>Cloud context is scoped.</strong> Credential patterns are redacted first, but sensitive prose can be missed.</span>
-            <button id="privacy-dismiss" type="button">Dismiss</button>
+            <span class="privacy-mark" aria-hidden="true">◈</span>
+            <span><strong>Scoped context.</strong> Common credentials are redacted before cloud inference.</span>
+            <button id="privacy-dismiss" type="button" aria-label="Dismiss privacy note">×</button>
           </div>
           <div class="composer-card">
             <div id="provider-lock" hidden>
@@ -1024,13 +1150,18 @@
               <button id="provider-lock-action" type="button">Connect…</button>
             </div>
             <form id="composer">
-              <input id="input" placeholder="Ask across all agents…" autocomplete="off" />
+              <textarea
+                id="input"
+                rows="1"
+                placeholder="Ask across all agents…"
+                autocomplete="off"
+                spellcheck="true"
+                aria-label="Message Aside"
+              ></textarea>
               <button id="send" type="submit" aria-label="Send">↑</button>
             </form>
             <div class="composer-meta">
               <select id="models" title="Observer model for this thread"></select>
-              <span class="spacer"></span>
-              <button id="account-inline" type="button">Account settings</button>
             </div>
           </div>
         </div>

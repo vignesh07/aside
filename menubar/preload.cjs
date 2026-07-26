@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('aside', {
   disconnectProvider: (provider) => ipcRenderer.invoke('aside:auth:disconnect', provider),
   openProviderHelp: (provider) => ipcRenderer.invoke('aside:auth:help', provider),
   getAppVersion: () => ipcRenderer.invoke('aside:app-version'),
+  getWindowMode: () => ipcRenderer.invoke('aside:window-mode:get'),
+  setKeepOpen: (keepOpen) => ipcRenderer.invoke('aside:window-mode:set', keepOpen),
   getUpdateStatus: () => ipcRenderer.invoke('aside:update:get'),
   checkForUpdates: () => ipcRenderer.invoke('aside:update:check'),
   restartToUpdate: () => ipcRenderer.invoke('aside:update:restart'),
@@ -40,5 +42,10 @@ contextBridge.exposeInMainWorld('aside', {
     const listener = () => callback();
     ipcRenderer.on('aside:show-settings', listener);
     return () => ipcRenderer.removeListener('aside:show-settings', listener);
+  },
+  onWindowMode: (callback) => {
+    const listener = (_event, mode) => callback(mode);
+    ipcRenderer.on('aside:window-mode', listener);
+    return () => ipcRenderer.removeListener('aside:window-mode', listener);
   },
 });

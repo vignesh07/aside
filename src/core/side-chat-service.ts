@@ -10,7 +10,7 @@ import {
   tryReadJsonlTailLines,
 } from './session-tailer.js';
 import * as fs from 'node:fs';
-import { classifyLine, activityFromEvent } from './event-classifier.js';
+import { classifyEvents, activityFromEvent } from './event-classifier.js';
 import { disposeClaudeSession } from './providers/index.js';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '../config/defaults.js';
 import {
@@ -70,6 +70,15 @@ export interface SideChatServiceHandlers {
   onChat?: (threadId: string) => void;
   onThinking?: (threadId: string, thinking: boolean) => void;
   onThread?: (threadId: string) => void;
+  /** Every normalized agent event, including restart-time transcript seeds. */
+  onEvent?: (
+    sessionId: string,
+    source: SessionSource,
+    event: SessionEvent,
+    isSeed: boolean,
+    rawLine: string,
+    ordinal: number,
+  ) => void;
 }
 
 export interface SideChatServiceOptions {
@@ -381,19 +390,21 @@ export class SideChatService {
 
   private consumeLine(sessionId: string, line: string, isSeed: boolean): void {
     const source = this.sources.get(sessionId) ?? 'claude';
-    const event = classifyLine(line, source);
-    if (!event) return;
+    const events = classifyEvents(line, source);
+    if (events.length === 0) return;
 
     const buf = this.transcripts.get(sessionId) ?? [];
-    buf.push(event);
+    for (const [ordinal, event] of events.entries()) {
+      buf.push(event);
+      this.handlers.onEvent?.(sessionId, source, event, isSeed, line, ordinal);
+      this.updateAttention(sessionId, event);
+      if (!isSeed) {
+        const activity = activityFromEvent(event);
+        if (activity) this.handlers.onActivity?.(sessionId, activity);
+      }
+    }
     if (buf.length > MAX_TRANSCRIPT) buf.splice(0, buf.length - MAX_TRANSCRIPT);
     this.transcripts.set(sessionId, buf);
-
-    this.updateAttention(sessionId, event);
-    if (!isSeed) {
-      const activity = activityFromEvent(event);
-      if (activity) this.handlers.onActivity?.(sessionId, activity);
-    }
     this.handlers.onTranscript?.(sessionId);
   }
 
@@ -430,9 +441,17 @@ export class SideChatService {
       HISTORICAL_HEURISTIC_MAX_AGE_MS;
     let next: SessionAttention = { needsUser: false, reason: '' };
     for (const line of result.lines) {
-      const event = classifyLine(line, session.source);
-      if (!event) continue;
-      next = attentionAfterHistoricalEvent(next, event, allowHeuristic);
+      for (const [ordinal, event] of classifyEvents(line, session.source).entries()) {
+        this.handlers.onEvent?.(
+          session.id,
+          session.source,
+          event,
+          true,
+          line,
+          ordinal,
+        );
+        next = attentionAfterHistoricalEvent(next, event, allowHeuristic);
+      }
     }
     this.setAttention(session.id, next);
     return true;
@@ -630,6 +649,9 @@ export function attentionAfterEvent(
   }
   if (event.kind === 'turn_complete' || event.kind === 'context_health') {
     return current;
+  }
+  if (event.kind === 'turn_failed' || event.kind === 'turn_interrupted') {
+    return { needsUser: false, reason: '' };
   }
   if (
     event.kind === 'session_started' ||

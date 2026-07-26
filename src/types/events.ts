@@ -12,5 +12,7 @@ export type SessionEvent =
   | { kind: 'file_written'; path: string; ts: string }
   | { kind: 'file_edited'; path: string; ts: string }
   | { kind: 'turn_complete'; durationMs: number; ts: string }
+  | { kind: 'turn_failed'; error: string; ts: string }
+  | { kind: 'turn_interrupted'; reason: string; ts: string }
   | { kind: 'context_health'; usedPercent: number; status: string; ts: string }
   | { kind: 'unknown'; raw: string; ts: string };

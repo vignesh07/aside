@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { MenubarBackend } from '../menubar/src/backend.js';
 import { SideChatService } from '../dist/core/side-chat-service.js';
+import {
+  ActivityLedger,
+  InMemoryActivityLedgerStore,
+} from '../dist/core/activity-ledger.js';
 import type { AskParams } from '../dist/core/side-chat-engine.js';
 import type { TrackedSession } from '../dist/types/session.js';
 import type {
@@ -50,6 +54,7 @@ function makeBackend(
     setModel: (p: string, m: string) => setModelCalls.push([p, m]),
   });
   const states: number[] = [];
+  const activity = new ActivityLedger(new InMemoryActivityLedgerStore());
   const backend = new MenubarBackend(
     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     () => states.push(1),
@@ -58,9 +63,10 @@ function makeBackend(
       service,
       models: () => FAKE_MODELS,
       search,
+      activity,
     },
   );
-  return { backend, service, setModelCalls, askCalls };
+  return { backend, service, activity, setModelCalls, askCalls };
 }
 
 describe('MenubarBackend', () => {
@@ -228,6 +234,40 @@ describe('MenubarBackend', () => {
     expect(backend.getState().sessions[0]!.idleForMs).toBeGreaterThan(0);
   });
 
+  it('keeps a hidden selection unread until the visible UI marks it viewed', () => {
+    const session = fakeSession('done');
+    session.source = 'codex';
+    session.lastEventTime = new Date(Date.now() - 1_000);
+    const { backend, activity } = makeBackend([session]);
+    backend.refresh();
+    activity.recordAgentEvent({
+      sessionId: session.id,
+      source: session.source,
+      event: {
+        kind: 'turn_complete',
+        durationMs: 10,
+        ts: new Date(Date.now() + 1_000).toISOString(),
+      },
+      seeded: false,
+      rawLine: JSON.stringify({ id: 'done-1', type: 'task_complete' }),
+      ordinal: 0,
+    });
+
+    expect(backend.getState()).toMatchObject({
+      attentionCount: 1,
+      unreadAttentionCount: 1,
+      attentionCounts: { completed: 1 },
+    });
+    backend.selectThread('session:done');
+    expect(backend.getState().unreadAttentionCount).toBe(1);
+
+    backend.markThreadViewed('session:done');
+    expect(backend.getState()).toMatchObject({
+      attentionCount: 0,
+      unreadAttentionCount: 0,
+    });
+  });
+
   it('merges ranked transcript matches with current metadata and drops stale rows', async () => {
     const a = fakeSession('a');
     a.title = 'Needle migration';
@@ -268,7 +308,7 @@ describe('MenubarBackend', () => {
     expect(backend.getState().searchIndex).toBe(status);
   });
 
-  it('keeps subagents directly searchable without counting them as top-level attention', async () => {
+  it('keeps subagents directly searchable', async () => {
     const parent = fakeSession('parent');
     parent.source = 'codex';
     const child = fakeSession('child');
@@ -317,5 +357,43 @@ describe('MenubarBackend', () => {
       snippet: [{ text: 'hidden worker answer', match: true }],
       score: -12,
     }]);
+  });
+
+  it('counts an attentive subagent in the inbox hierarchy', () => {
+    const parent = fakeSession('parent');
+    parent.source = 'codex';
+    parent.lastEventTime = new Date(Date.now() - 2_000);
+    const child = fakeSession('child');
+    child.source = 'codex';
+    child.isInternal = true;
+    child.parentSessionId = 'parent';
+    child.lastEventTime = new Date(Date.now() - 1_000);
+    const { backend, activity } = makeBackend([parent, child]);
+    backend.refresh();
+
+    activity.recordAgentEvent({
+      sessionId: child.id,
+      source: child.source,
+      event: {
+        kind: 'needs_input',
+        reason: 'Review the worker result',
+        ts: new Date().toISOString(),
+      },
+      seeded: false,
+      rawLine: JSON.stringify({ id: 'child-wait', type: 'needs_input' }),
+      ordinal: 0,
+    });
+
+    expect(backend.getState()).toMatchObject({
+      attentionCount: 1,
+      unreadAttentionCount: 1,
+      attentionCounts: { waiting: 1 },
+    });
+    expect(backend.getState().sessions.find((session) => session.id === 'child'))
+      .toMatchObject({
+        isInternal: true,
+        needsAttention: true,
+        attentionKind: 'waiting',
+      });
   });
 });

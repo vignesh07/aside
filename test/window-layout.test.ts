@@ -3,6 +3,7 @@ import {
   DEFAULT_WINDOW_SIZE,
   MIN_WINDOW_SIZE,
   parseWindowSize,
+  windowBoundsAtPosition,
   windowBoundsBelowTray,
   windowSizeForWorkArea,
 } from '../menubar/src/window-layout.js';
@@ -91,6 +92,28 @@ describe('windowSizeForWorkArea', () => {
         { x: 0, y: 0, width: 500, height: 400 },
       ),
     ).toEqual(MIN_WINDOW_SIZE);
+  });
+});
+
+describe('windowBoundsAtPosition', () => {
+  it('restores a detached window at its remembered point', () => {
+    expect(
+      windowBoundsAtPosition(
+        { width: 900, height: 700 },
+        { x: 240, y: 90 },
+        { x: 0, y: 25, width: 1440, height: 875 },
+      ),
+    ).toEqual({ x: 240, y: 90, width: 900, height: 700 });
+  });
+
+  it('clamps a stale point to the nearest usable display area', () => {
+    expect(
+      windowBoundsAtPosition(
+        { width: 900, height: 700 },
+        { x: 9000, y: -9000 },
+        { x: -1440, y: 25, width: 1440, height: 875 },
+      ),
+    ).toEqual({ x: -908, y: 33, width: 900, height: 700 });
   });
 });
 

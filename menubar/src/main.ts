@@ -48,7 +48,10 @@ import {
   type AppUpdateStatus,
   type AutoUpdaterLike,
 } from './app-update.js';
-import { shouldNotifyForAttention } from './attention-notification.js';
+import {
+  attentionNotificationKey,
+  shouldNotifyForAttention,
+} from './attention-notification.js';
 import {
   makeAvailableOnCurrentSpace,
   WindowRecoveryController,
@@ -57,12 +60,25 @@ import {
   DEFAULT_WINDOW_SIZE,
   MIN_WINDOW_SIZE,
   parseWindowSize,
+  windowBoundsAtPosition,
   windowBoundsBelowTray,
   windowSizeForWorkArea,
   type WindowSize,
 } from './window-layout.js';
 import { FileWindowSizeStore } from './window-size-store.js';
+import {
+  FileWindowModeStore,
+  type WindowPosition,
+} from './window-mode-store.js';
+import {
+  shouldHideOnBlur,
+  shouldRestoreDetachedPosition,
+} from './window-presentation.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
+import {
+  ActivityLedger,
+  InMemoryActivityLedgerStore,
+} from '../../dist/core/activity-ledger.js';
 import { createThreadSearchService } from './search-coordinator.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -113,6 +129,9 @@ function integerFlagValue(name: string): number | null {
  *   --older            expand and scroll to the 7d+ section before capture
  *   --settings         open settings before capture
  *   --accounts         open the account popover before capture
+ *   --keep-open        render the detached-window control as active
+ *   --attention        render representative attention states
+ *   --attention-view   render and open the attention inbox
  *   --width <px>       override the window width for responsive QA
  *   --height <px>      override the window height for responsive QA
  *   --theme <mode>     force light or dark appearance for responsive QA
@@ -127,6 +146,10 @@ const CAPTURE_SEARCH = flagValue('--search');
 const CAPTURE_OLDER = process.argv.includes('--older');
 const CAPTURE_SETTINGS = process.argv.includes('--settings');
 const CAPTURE_ACCOUNTS = process.argv.includes('--accounts');
+const CAPTURE_KEEP_OPEN = process.argv.includes('--keep-open');
+const CAPTURE_ATTENTION_VIEW = process.argv.includes('--attention-view');
+const CAPTURE_ATTENTION =
+  process.argv.includes('--attention') || CAPTURE_ATTENTION_VIEW;
 const CAPTURE_THEME = flagValue('--theme');
 const DEV_WINDOW_SIZE = parseWindowSize({
   width: integerFlagValue('--width') ?? DEFAULT_WINDOW_SIZE.width,
@@ -138,13 +161,16 @@ let win: BrowserWindow | null = null;
 let backend: MenubarBackend | null = null;
 let providerAuth: ProviderAuthCoordinator | null = null;
 let appUpdates: AppUpdateController | null = null;
-let lastNeedsUser = new Set<string>();
+let lastNotifiedAttention = new Set<string>();
 let attentionInitialized = false;
 let authFlowActive = false;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 let windowSizeStore: FileWindowSizeStore | null = null;
+let windowModeStore: FileWindowModeStore | null = null;
 let preferredWindowSize: WindowSize = { ...DEFAULT_WINDOW_SIZE };
+let keepOpen = false;
+let rememberedWindowPosition: WindowPosition | null = null;
 
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 const windowRecovery = new WindowRecoveryController(() => showWindow());
@@ -210,11 +236,15 @@ function createWindow(initialSize: WindowSize): BrowserWindow {
     if (!url.startsWith('aside://app/')) event.preventDefault();
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  if (!DEV_SHOW) {
-    window.on('blur', () => {
-      if (!authFlowActive) window.hide();
-    });
-  }
+  window.on('blur', () => {
+    if (shouldHideOnBlur({
+      authFlowActive,
+      keepOpen,
+      developmentShow: DEV_SHOW,
+    })) {
+      window.hide();
+    }
+  });
   let manualResizePending = false;
   window.on('will-resize', () => {
     // Electron only emits will-resize for an interactive edge/corner drag.
@@ -234,21 +264,71 @@ function createWindow(initialSize: WindowSize): BrowserWindow {
     preferredWindowSize = next;
     windowSizeStore?.save(next);
   });
+  window.on('focus', () => {
+    backend?.markThreadViewed();
+  });
+  window.on('moved', () => {
+    if (!keepOpen) return;
+    const bounds = window.getBounds();
+    rememberedWindowPosition = { x: bounds.x, y: bounds.y };
+    persistWindowMode();
+  });
   return window;
 }
 
-/** Drop the window just under the tray icon. */
+/** Restore a detached window, or drop the transient popover under the tray. */
 function positionWindow(window: BrowserWindow, trayInstance: Tray): void {
   const trayBounds = trayInstance.getBounds();
-  const display = screen.getDisplayNearestPoint({ x: trayBounds.x, y: trayBounds.y });
+  const restoreDetached = shouldRestoreDetachedPosition(
+    keepOpen,
+    rememberedWindowPosition !== null,
+  );
+  const anchor = restoreDetached && rememberedWindowPosition
+    ? rememberedWindowPosition
+    : { x: trayBounds.x, y: trayBounds.y };
+  const display = screen.getDisplayNearestPoint(anchor);
   window.setBounds(
-    windowBoundsBelowTray(
-      preferredWindowSize,
-      trayBounds,
-      display.workArea,
-    ),
+    restoreDetached && rememberedWindowPosition
+      ? windowBoundsAtPosition(
+          preferredWindowSize,
+          rememberedWindowPosition,
+          display.workArea,
+        )
+      : windowBoundsBelowTray(
+          preferredWindowSize,
+          trayBounds,
+          display.workArea,
+        ),
     false,
   );
+}
+
+function persistWindowMode(): void {
+  windowModeStore?.save({
+    keepOpen,
+    position: rememberedWindowPosition,
+  });
+}
+
+function broadcastWindowMode(): void {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('aside:window-mode', { keepOpen });
+  }
+}
+
+function setKeepOpen(next: boolean): { keepOpen: boolean } {
+  keepOpen = next;
+  if (win && !win.isDestroyed()) {
+    if (keepOpen) {
+      const bounds = win.getBounds();
+      rememberedWindowPosition = { x: bounds.x, y: bounds.y };
+    } else if (tray) {
+      positionWindow(win, tray);
+    }
+  }
+  persistWindowMode();
+  broadcastWindowMode();
+  return { keepOpen };
 }
 
 function toggleWindow(): void {
@@ -260,7 +340,7 @@ function toggleWindow(): void {
   positionWindow(win, tray);
   win.show();
   win.focus();
-  win.webContents.send('aside:update', backend?.getState());
+  win.webContents.send('aside:update', stateForRenderer(backend?.getState()));
   void refreshProviderAuth();
 }
 
@@ -269,7 +349,8 @@ function showWindow(openSettings = false, refreshAuth = true): boolean {
   positionWindow(win, tray);
   win.show();
   win.focus();
-  win.webContents.send('aside:update', backend?.getState());
+  win.webContents.send('aside:update', stateForRenderer(backend?.getState()));
+  broadcastWindowMode();
   if (refreshAuth) void refreshProviderAuth();
   if (openSettings) win.webContents.send('aside:show-settings');
   return true;
@@ -298,8 +379,8 @@ function updateTrayToolTip(state = backend?.getState()): void {
     return;
   }
   tray.setToolTip(
-    state && state.needsUserCount > 0
-      ? `aside — ${state.needsUserCount} session${state.needsUserCount === 1 ? '' : 's'} need you`
+    state && state.attentionCount > 0
+      ? `aside — ${state.attentionCount} thread${state.attentionCount === 1 ? '' : 's'} need attention`
       : 'aside — your agent threads, one side chat away',
   );
 }
@@ -340,23 +421,82 @@ function threadTarget(state: MenubarState): MenubarThreadTarget {
   };
 }
 
+function stateForRenderer(state: MenubarState | undefined): MenubarState | undefined {
+  if (!state || !CAPTURE_ATTENTION) return state;
+  const fixtures = [
+    ['waiting', 'Approve the production deployment?', true],
+    ['completed', 'Latest turn ended — ready to review', true],
+    ['failed', 'Provider reported a terminal error', true],
+    ['interrupted', 'Turn was interrupted', true],
+    ['stalled', 'Observed work is still quiet', true],
+    ['forgotten', 'A completed turn has been waiting for review', true],
+  ] as const;
+  let index = 0;
+  const sessions = state.sessions.map((session) => {
+    if (session.isInternal || index >= fixtures.length) return session;
+    const [kind, reason, unread] = fixtures[index++]!;
+    return {
+      ...session,
+      needsUser: kind === 'waiting',
+      needsAttention: true,
+      attentionKind: kind,
+      attentionUnread: unread,
+      attentionObservedLive: true,
+      attentionSince: Date.now() - index * 60_000,
+      attentionReason: reason,
+    };
+  });
+  const attentionCounts = {
+    waiting: sessions.filter((session) => session.attentionKind === 'waiting' && !session.isInternal).length,
+    failed: sessions.filter((session) => session.attentionKind === 'failed' && !session.isInternal).length,
+    interrupted: sessions.filter((session) => session.attentionKind === 'interrupted' && !session.isInternal).length,
+    completed: sessions.filter((session) => session.attentionKind === 'completed' && !session.isInternal).length,
+    stalled: sessions.filter((session) => session.attentionKind === 'stalled' && !session.isInternal).length,
+    forgotten: sessions.filter((session) => session.attentionKind === 'forgotten' && !session.isInternal).length,
+  };
+  const attentionCount = Object.values(attentionCounts).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  return {
+    ...state,
+    sessions,
+    needsUserCount: attentionCounts.waiting,
+    attentionCount,
+    unreadAttentionCount: attentionCount,
+    attentionCounts,
+  };
+}
+
 function handleBackendUpdate(state: MenubarState): void {
-  if (win && !win.isDestroyed()) win.webContents.send('aside:update', state);
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('aside:update', stateForRenderer(state));
+  }
   updateTrayToolTip(state);
 
   const next = new Set(
-    state.sessions
-      .filter((session) => !session.isInternal && session.needsUser)
-      .map((session) => session.id),
+    state.sessions.flatMap((session) => {
+      if (session.isInternal) return [];
+      const key = attentionNotificationKey(session);
+      return key ? [key] : [];
+    }),
   );
   if (attentionInitialized && Notification.isSupported()) {
     for (const session of state.sessions) {
       if (session.isInternal) continue;
       // Historical reconstruction powers the sidebar inbox, but must never
       // manufacture a delayed macOS alert for a stale thread after launch.
-      if (!shouldNotifyForAttention(session, lastNeedsUser)) continue;
+      if (!shouldNotifyForAttention(session, lastNotifiedAttention)) continue;
+      const title =
+        session.attentionKind === 'completed'
+          ? `${session.projectName} is ready to review`
+          : session.attentionKind === 'failed'
+            ? `${session.projectName} hit a terminal error`
+            : session.attentionKind === 'interrupted'
+              ? `${session.projectName} was interrupted`
+              : `${session.projectName} needs you`;
       const notification = new Notification({
-        title: `${session.projectName} needs you`,
+        title,
         body: session.attentionReason || 'This agent is waiting for your input.',
         silent: false,
       });
@@ -368,7 +508,7 @@ function handleBackendUpdate(state: MenubarState): void {
     }
   }
   attentionInitialized = true;
-  lastNeedsUser = next;
+  lastNotifiedAttention = next;
 }
 
 app.whenReady().then(() => {
@@ -426,8 +566,13 @@ app.whenReady().then(() => {
   if (!CAPTURE_PATH && !DEV_SHOW) {
     windowSizeStore = new FileWindowSizeStore();
     preferredWindowSize = windowSizeStore.load();
+    windowModeStore = new FileWindowModeStore();
+    const mode = windowModeStore.load();
+    keepOpen = mode.keepOpen;
+    rememberedWindowPosition = mode.position;
   } else {
     preferredWindowSize = DEV_WINDOW_SIZE ?? { ...DEFAULT_WINDOW_SIZE };
+    keepOpen = CAPTURE_KEEP_OPEN;
   }
   win = createWindow(
     windowSizeForWorkArea(
@@ -439,7 +584,12 @@ app.whenReady().then(() => {
   backend = new MenubarBackend(
     { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
     handleBackendUpdate,
-    { search: createThreadSearchService() },
+    {
+      search: createThreadSearchService(),
+      activity: CAPTURE_PATH
+        ? new ActivityLedger(new InMemoryActivityLedgerStore())
+        : undefined,
+    },
   );
   backend.start();
   providerAuth = new ProviderAuthCoordinator();
@@ -451,10 +601,13 @@ app.whenReady().then(() => {
     onStatus: broadcastAppUpdate,
   });
 
-  ipcMain.handle('aside:get-state', () => backend?.getState());
+  ipcMain.handle('aside:get-state', () => stateForRenderer(backend?.getState()));
   ipcMain.handle('aside:select-thread', (_e, threadId: unknown) => {
     if (typeof threadId === 'string' && threadId.length <= 500) {
       backend?.selectThread(threadId);
+      if (win?.isVisible() && win.isFocused()) {
+        backend?.markThreadViewed(threadId);
+      }
     }
   });
   ipcMain.handle('aside:search-threads', (_e, query: unknown) => {
@@ -555,6 +708,13 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('aside:app-version', () => app.getVersion());
+  ipcMain.handle('aside:window-mode:get', () => ({ keepOpen }));
+  ipcMain.handle('aside:window-mode:set', (_e, value: unknown) => {
+    if (typeof value !== 'boolean') {
+      throw new Error('Keep Open must be on or off.');
+    }
+    return setKeepOpen(value);
+  });
   ipcMain.handle('aside:update:get', () => appUpdates?.getStatus());
   ipcMain.handle('aside:update:check', () => appUpdates?.checkForUpdates());
   ipcMain.handle('aside:update:restart', () => appUpdates?.restartToInstall());
@@ -588,6 +748,12 @@ app.whenReady().then(() => {
     const update = appUpdates?.getStatus();
     const menu = Menu.buildFromTemplate([
       { label: 'Open aside', click: () => showWindow() },
+      {
+        label: 'Keep Aside Open',
+        type: 'checkbox',
+        checked: keepOpen,
+        click: (item) => setKeepOpen(item.checked),
+      },
       { label: 'Aside Settings…', click: () => showWindow(true) },
       ...(update?.phase === 'ready'
         ? [
@@ -612,10 +778,13 @@ app.whenReady().then(() => {
   }
 
   if (DEV_SHOW || CAPTURE_PATH) {
-    win.setPosition(DEV_SHOW_POSITION.x, DEV_SHOW_POSITION.y, false);
+    if (!keepOpen || !rememberedWindowPosition) {
+      win.setPosition(DEV_SHOW_POSITION.x, DEV_SHOW_POSITION.y, false);
+    }
     win.show();
     win.webContents.once('did-finish-load', () => {
-      win?.webContents.send('aside:update', backend?.getState());
+      win?.webContents.send('aside:update', stateForRenderer(backend?.getState()));
+      broadcastWindowMode();
     });
   }
 
@@ -723,6 +892,13 @@ async function captureAndQuit(
     if (showAccounts) {
       await window.webContents.executeJavaScript(
         `document.getElementById('accounts-button')?.click()`,
+      );
+      await sleep(250);
+    }
+
+    if (CAPTURE_ATTENTION_VIEW) {
+      await window.webContents.executeJavaScript(
+        `document.querySelector('.thread.attention-smart')?.click()`,
       );
       await sleep(250);
     }

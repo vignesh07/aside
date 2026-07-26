@@ -48,6 +48,14 @@ export function classifyCodexLine(raw: string): SessionEvent | null {
       return { kind: 'turn_complete', durationMs: 0, ts };
     }
 
+    if (eventType === 'turn_aborted') {
+      return {
+        kind: 'turn_interrupted',
+        reason: String(payload['reason'] || 'Turn was interrupted'),
+        ts,
+      };
+    }
+
     return null;
   }
 

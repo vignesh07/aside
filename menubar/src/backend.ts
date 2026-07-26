@@ -9,6 +9,10 @@ import { scanAllSessions } from '../../dist/core/session-scanner.js';
 import { SideChatService } from '../../dist/core/side-chat-service.js';
 import { SideChatEngine } from '../../dist/core/side-chat-engine.js';
 import { FileThreadStore } from '../../dist/core/thread-store.js';
+import {
+  ActivityLedger,
+  InMemoryActivityLedgerStore,
+} from '../../dist/core/activity-ledger.js';
 import { TIMING } from '../../dist/config/defaults.js';
 import {
   flattenModelCatalog,
@@ -18,12 +22,14 @@ import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
 import type { ModelOption } from '../../dist/config/model-catalog.js';
 import type { TrackedSession } from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
+import type { ThreadAttentionKind } from '../../dist/types/activity.js';
 import type {
   IndexableSideChat,
   SearchIndexStatus,
   ThreadSearchResult,
   ThreadSearchService,
 } from './search-types.js';
+import { ActivityDatabase } from './activity-database.js';
 
 export interface SessionSummary {
   id: string;
@@ -40,6 +46,11 @@ export interface SessionSummary {
   idleForMs: number;
   threadId: string;
   needsUser: boolean;
+  needsAttention: boolean;
+  attentionKind: ThreadAttentionKind;
+  attentionUnread: boolean;
+  attentionObservedLive: boolean;
+  attentionSince: number | null;
   attentionReason: string;
 }
 
@@ -53,6 +64,16 @@ export interface MenubarState {
   provider: string;
   model: string;
   needsUserCount: number;
+  attentionCount: number;
+  unreadAttentionCount: number;
+  attentionCounts: {
+    waiting: number;
+    failed: number;
+    interrupted: number;
+    completed: number;
+    stalled: number;
+    forgotten: number;
+  };
   /** Threads whose transcript changed within the recent-activity window. */
   recentSessionCount: number;
   /** Where aside's own durable chats live. Agent/project files remain untouched. */
@@ -80,6 +101,7 @@ export interface BackendDeps {
   service?: SideChatService;
   models?: () => ModelOption[];
   search?: ThreadSearchService;
+  activity?: ActivityLedger;
 }
 
 export class MenubarBackend {
@@ -90,6 +112,7 @@ export class MenubarBackend {
   private readonly loadModels: (() => Promise<ModelOption[]>) | null;
   private readonly storagePath: string;
   private readonly search?: ThreadSearchService;
+  private readonly activity: ActivityLedger;
   private readonly unsubscribeSearchStatus?: () => void;
   private sessions: TrackedSession[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -106,6 +129,13 @@ export class MenubarBackend {
     this.unsubscribeSearchStatus = this.search?.onStatus(() => this.emit());
     this.models = (deps.models ?? flattenModelCatalog)();
     this.loadModels = deps.models ? null : flattenModelCatalogWithLocal;
+    this.activity =
+      deps.activity ??
+      new ActivityLedger(
+        createActivityStore(),
+        () => new Date(),
+        () => this.emit(),
+      );
     const store = new FileThreadStore();
     this.storagePath = store.location;
     this.service =
@@ -129,6 +159,16 @@ export class MenubarBackend {
             }
             this.emit();
           },
+          onEvent: (id, source, event, seeded, rawLine, ordinal) => {
+            this.activity.recordAgentEvent({
+              sessionId: id,
+              source,
+              event,
+              seeded,
+              rawLine,
+              ordinal,
+            });
+          },
         },
         () => new Date(),
         { ...config, store },
@@ -145,6 +185,7 @@ export class MenubarBackend {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.service.dispose();
+    this.activity.dispose();
     this.unsubscribeSearchStatus?.();
     this.search?.dispose();
   }
@@ -154,8 +195,17 @@ export class MenubarBackend {
     const valid =
       threadId === FLEET_THREAD_ID ||
       this.sessions.some((session) => sessionThreadId(session.id) === threadId);
-    this.service.selectThread(valid ? threadId : FLEET_THREAD_ID);
+    const nextThreadId = valid ? threadId : FLEET_THREAD_ID;
+    this.service.selectThread(nextThreadId);
     this.emit();
+  }
+
+  /** Mark evidence read only once the corresponding UI is actually visible. */
+  markThreadViewed(threadId = this.service.getActiveThreadId()): void {
+    if (!threadId.startsWith('session:')) return;
+    const sessionId = threadId.slice('session:'.length);
+    const selected = this.sessions.find((session) => session.id === sessionId);
+    if (selected) this.activity.markViewed(selected);
   }
 
   setModel(
@@ -216,8 +266,12 @@ export class MenubarBackend {
     if (!trimmed || trimmed.length > 500) return [];
     const normalized = trimmed.toLocaleLowerCase();
     const metadata = this.sessions
-      .filter((session) =>
-        [
+      .filter((session) => {
+        const attention = this.activity.attentionFor(
+          session,
+          this.service.getSessionAttention(session.id),
+        );
+        return [
           session.projectName,
           session.cwd || session.projectDir,
           session.title ?? '',
@@ -225,9 +279,10 @@ export class MenubarBackend {
           session.id,
           session.status,
           session.currentActivity,
-          this.service.getSessionAttention(session.id).reason,
-        ].some((value) => value.toLocaleLowerCase().includes(normalized)),
-      )
+          attention.kind,
+          attention.reason,
+        ].some((value) => value.toLocaleLowerCase().includes(normalized));
+      })
       .map(
         (session): ThreadSearchResult => ({
           sessionId: session.id,
@@ -264,7 +319,8 @@ export class MenubarBackend {
     const now = Date.now();
     const active = this.service.getActiveThread();
     const sessions = this.sessions.map((s) => {
-      const attention = this.service.getSessionAttention(s.id);
+      const explicit = this.service.getSessionAttention(s.id);
+      const attention = this.activity.attentionFor(s, explicit);
       return {
         id: s.id,
         source: s.source,
@@ -277,10 +333,35 @@ export class MenubarBackend {
         currentActivity: s.currentActivity,
         idleForMs: Math.max(0, now - s.lastEventTime.getTime()),
         threadId: sessionThreadId(s.id),
-        needsUser: attention.needsUser,
+        needsUser: explicit.needsUser,
+        needsAttention: attention.kind !== 'none',
+        attentionKind: attention.kind,
+        attentionUnread: attention.unread,
+        attentionObservedLive: attention.observedLive,
+        attentionSince: attention.sinceMs,
         attentionReason: attention.reason,
       };
     });
+    const attentionCounts = {
+      waiting: sessions.filter(
+        (session) => session.attentionKind === 'waiting',
+      ).length,
+      failed: sessions.filter(
+        (session) => session.attentionKind === 'failed',
+      ).length,
+      interrupted: sessions.filter(
+        (session) => session.attentionKind === 'interrupted',
+      ).length,
+      completed: sessions.filter(
+        (session) => session.attentionKind === 'completed',
+      ).length,
+      stalled: sessions.filter(
+        (session) => session.attentionKind === 'stalled',
+      ).length,
+      forgotten: sessions.filter(
+        (session) => session.attentionKind === 'forgotten',
+      ).length,
+    };
     return {
       sessions,
       activeThreadId: active.id,
@@ -291,6 +372,16 @@ export class MenubarBackend {
       needsUserCount: sessions.filter(
         (session) => !session.isInternal && session.needsUser,
       ).length,
+      attentionCount: Object.values(attentionCounts).reduce(
+        (total, count) => total + count,
+        0,
+      ),
+      unreadAttentionCount: sessions.filter(
+        (session) =>
+          session.needsAttention &&
+          session.attentionUnread,
+      ).length,
+      attentionCounts,
       recentSessionCount: sessions.filter(
         (session) =>
           !session.isInternal &&
@@ -318,6 +409,7 @@ export class MenubarBackend {
         ? { ...session, currentActivity: prior.currentActivity }
         : session;
     });
+    this.activity.syncSessions(this.sessions);
     this.service.syncSessions(this.sessions, jsonlPaths);
     this.search?.syncSessions(
       this.sessions.map((session) => ({
@@ -374,5 +466,17 @@ export class MenubarBackend {
       thread.provider === target.provider &&
       thread.model === target.model
     );
+  }
+}
+
+function createActivityStore() {
+  try {
+    return new ActivityDatabase();
+  } catch (error) {
+    console.warn(
+      '  • durable activity history unavailable:',
+      error instanceof Error ? error.message : 'unknown error',
+    );
+    return new InMemoryActivityLedgerStore();
   }
 }

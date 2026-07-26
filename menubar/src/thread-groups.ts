@@ -5,6 +5,7 @@ export interface GroupableThread {
   projectPath: string;
   idleForMs: number;
   needsUser: boolean;
+  needsAttention?: boolean;
 }
 
 export interface HierarchicalThread extends GroupableThread {
@@ -60,7 +61,8 @@ export function groupThreadsByProject<T extends GroupableThread>(
           : group.name,
       sessions: [...group.sessions].sort(
         (a, b) =>
-          Number(b.needsUser) - Number(a.needsUser) ||
+          Number(b.needsAttention ?? b.needsUser) -
+            Number(a.needsAttention ?? a.needsUser) ||
           a.idleForMs - b.idleForMs,
       ),
     }))
@@ -109,6 +111,29 @@ export function groupSubagentsByRoot<T extends HierarchicalThread>(
     children.sort((a, b) => a.idleForMs - b.idleForMs);
   }
   return grouped;
+}
+
+/**
+ * Keep an attentive root or the quiet root that owns an attentive subagent,
+ * while removing unrelated workers from the focused Attention view.
+ */
+export function filterAttentionHierarchy<T extends HierarchicalThread>(
+  roots: T[],
+  subagentsByRoot: Map<string, T[]>,
+): { roots: T[]; subagentsByRoot: Map<string, T[]> } {
+  const attentiveSubagents = new Map<string, T[]>();
+  for (const [rootKey, subagents] of subagentsByRoot) {
+    const filtered = subagents.filter((session) => session.needsAttention);
+    if (filtered.length > 0) attentiveSubagents.set(rootKey, filtered);
+  }
+  return {
+    roots: roots.filter(
+      (session) =>
+        session.needsAttention ||
+        attentiveSubagents.has(threadKey(session)),
+    ),
+    subagentsByRoot: attentiveSubagents,
+  };
 }
 
 export function threadKey(thread: Pick<HierarchicalThread, 'id' | 'source'>): string {

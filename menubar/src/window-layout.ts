@@ -8,6 +8,11 @@ export interface WindowRect extends WindowSize {
   y: number;
 }
 
+export interface WindowPoint {
+  x: number;
+  y: number;
+}
+
 export const DEFAULT_WINDOW_SIZE: Readonly<WindowSize> = {
   width: 760,
   height: 620,
@@ -129,6 +134,27 @@ export function windowSizeForWorkArea(
         ),
       ),
     ),
+  };
+}
+
+/**
+ * Restore a detached window near its remembered point while guaranteeing that
+ * the complete usable surface remains on the nearest display.
+ */
+export function windowBoundsAtPosition(
+  preferred: WindowSize,
+  point: WindowPoint,
+  workArea: WindowRect,
+): WindowRect {
+  const size = windowSizeForWorkArea(preferred, workArea);
+  const minX = workArea.x + WINDOW_SCREEN_MARGIN;
+  const minY = workArea.y + WINDOW_SCREEN_MARGIN;
+  const maxX = workArea.x + workArea.width - size.width - WINDOW_SCREEN_MARGIN;
+  const maxY = workArea.y + workArea.height - size.height - WINDOW_SCREEN_MARGIN;
+  return {
+    x: Math.round(maxX < minX ? workArea.x : clamp(point.x, minX, maxX)),
+    y: Math.round(maxY < minY ? workArea.y : clamp(point.y, minY, maxY)),
+    ...size,
   };
 }
 

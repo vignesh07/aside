@@ -95,14 +95,60 @@ export function classifyClaudeLine(raw: string): SessionEvent | null {
 
   if (type === 'system') {
     const subtype = parsed['subtype'] as string;
-    if (subtype === 'turn_response') {
+    if (subtype === 'turn_response' || subtype === 'turn_duration') {
       const durationMs = (parsed['durationMs'] as number) || 0;
       return { kind: 'turn_complete', durationMs, ts };
+    }
+    if (subtype === 'api_error') {
+      const rawError = parsed['error'];
+      const error =
+        typeof rawError === 'string'
+          ? rawError
+          : rawError && typeof rawError === 'object'
+            ? String(
+                (rawError as Record<string, unknown>)['message'] ??
+                (rawError as Record<string, unknown>)['type'] ??
+                'Claude API error',
+              )
+            : 'Claude API error';
+      const summary = truncate(error, TRUNCATE.prose);
+      if (claudeApiErrorIsTerminal(parsed)) {
+        return { kind: 'turn_failed', error: summary, ts };
+      }
+      return {
+        kind: 'tool_result_error',
+        tool: 'Claude API',
+        error: summary,
+        ts,
+      };
     }
     return null;
   }
 
   return null;
+}
+
+function claudeApiErrorIsTerminal(
+  record: Record<string, unknown>,
+): boolean {
+  if (
+    record['terminal'] === true ||
+    record['isTerminal'] === true ||
+    record['willRetry'] === false
+  ) {
+    return true;
+  }
+  const retryAttempt = finiteNumber(record['retryAttempt']);
+  const maxRetries = finiteNumber(record['maxRetries']);
+  return (
+    retryAttempt !== null &&
+    maxRetries !== null &&
+    retryAttempt >= maxRetries
+  );
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function extractToolTarget(tool: string, input?: Record<string, unknown>): string {

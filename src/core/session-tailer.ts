@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { TIMING } from '../config/defaults.js';
 
+const MAX_PENDING_RECORD_BYTES = 32 * 1024 * 1024;
+
 export interface TailEvent {
   sessionId: string;
   line: string;
@@ -13,7 +15,12 @@ export interface TailEvent {
  * Uses fs.watch with stat-polling fallback.
  */
 export class SessionTailer extends EventEmitter {
-  private watchers = new Map<string, { watcher: fs.FSWatcher; offset: number; pollTimer?: NodeJS.Timeout }>();
+  private watchers = new Map<string, {
+    watcher: fs.FSWatcher;
+    offset: number;
+    pending: string;
+    pollTimer?: NodeJS.Timeout;
+  }>();
 
   /**
    * Start tailing a session JSONL file.
@@ -23,11 +30,13 @@ export class SessionTailer extends EventEmitter {
     if (this.watchers.has(sessionId)) return;
 
     let offset: number;
+    let pending = '';
     try {
       const stat = fs.statSync(jsonlPath);
       for (const line of readJsonlTailLines(jsonlPath, TIMING.seedLines)) {
         this.emit('line', { sessionId, line, isSeed: true } satisfies TailEvent);
       }
+      pending = readTrailingPartialRecord(jsonlPath, stat.size);
       // Set offset to end of file for tailing
       offset = stat.size;
     } catch {
@@ -50,7 +59,7 @@ export class SessionTailer extends EventEmitter {
       this.readNewLines(sessionId, jsonlPath);
     }, TIMING.tailPollMs);
 
-    this.watchers.set(sessionId, { watcher, offset, pollTimer });
+    this.watchers.set(sessionId, { watcher, offset, pending, pollTimer });
   }
 
   stopTailing(sessionId: string): void {
@@ -83,7 +92,11 @@ export class SessionTailer extends EventEmitter {
       return;
     }
 
-    if (stat.size <= entry.offset) return;
+    if (stat.size < entry.offset) {
+      entry.offset = 0;
+      entry.pending = '';
+    }
+    if (stat.size === entry.offset) return;
 
     const bytesToRead = stat.size - entry.offset;
     if (bytesToRead <= 0) return;
@@ -96,8 +109,15 @@ export class SessionTailer extends EventEmitter {
 
       entry.offset = stat.size;
 
-      const text = buf.toString('utf-8');
-      const lines = text.split('\n').filter(Boolean);
+      const text = entry.pending + buf.toString('utf-8');
+      const complete = text.endsWith('\n');
+      const parts = text.split('\n');
+      entry.pending = complete ? '' : (parts.pop() ?? '');
+      // A corrupt or hostile unterminated record must not grow forever.
+      if (Buffer.byteLength(entry.pending, 'utf8') > MAX_PENDING_RECORD_BYTES) {
+        entry.pending = '';
+      }
+      const lines = parts.filter(Boolean);
 
       for (const line of lines) {
         this.emit('line', { sessionId, line, isSeed: false } satisfies TailEvent);
@@ -147,16 +167,41 @@ export function tryReadJsonlTailLines(
           return newline === -1 ? text.length : newline + 1;
         })()
       : 0;
+    const completeText = text.slice(firstComplete);
+    const parts = completeText.split('\n');
+    if (!completeText.endsWith('\n')) parts.pop();
     return {
-      lines: text
-        .slice(firstComplete)
-        .split('\n')
-        .filter(Boolean)
-        .slice(-maxLines),
+      lines: parts.filter(Boolean).slice(-maxLines),
       success: true,
     };
   } catch {
     return { lines: [], success: false };
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+function readTrailingPartialRecord(
+  jsonlPath: string,
+  size: number,
+): string {
+  if (size <= 0) return '';
+  const bytes = Math.min(size, MAX_PENDING_RECORD_BYTES);
+  const offset = size - bytes;
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(jsonlPath, 'r');
+    const buf = Buffer.alloc(bytes);
+    fs.readSync(fd, buf, 0, bytes, offset);
+    const text = buf.toString('utf8');
+    if (text.endsWith('\n')) return '';
+    const lastNewline = text.lastIndexOf('\n');
+    if (lastNewline !== -1) return text.slice(lastNewline + 1);
+    return offset === 0 ? text : '';
+  } catch {
+    return '';
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch { /* ignore */ }

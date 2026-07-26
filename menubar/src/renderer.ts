@@ -4,6 +4,7 @@
 import type { MenubarState, SessionSummary } from './backend.js';
 import { stripMarkdown } from '../../dist/utils/markdown.js';
 import {
+  filterAttentionHierarchy,
   groupSubagentsByRoot,
   groupThreadsByProject,
   splitThreadsByAge,
@@ -20,6 +21,7 @@ import type {
   SearchSnippetPart,
   ThreadSearchResult,
 } from './search-types.js';
+import type { ThreadAttentionKind } from '../../dist/types/activity.js';
 import {
   canDisconnectProvider,
   canAskWithProvider,
@@ -44,6 +46,8 @@ interface AsideBridge {
   disconnectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
   openProviderHelp(provider: ProviderAuthId): Promise<void>;
   getAppVersion(): Promise<string>;
+  getWindowMode(): Promise<{ keepOpen: boolean }>;
+  setKeepOpen(keepOpen: boolean): Promise<{ keepOpen: boolean }>;
   getUpdateStatus(): Promise<AppUpdateStatus>;
   checkForUpdates(): Promise<AppUpdateStatus>;
   restartToUpdate(): Promise<void>;
@@ -54,6 +58,7 @@ interface AsideBridge {
   onProviderAuthUpdate(callback: (state: ProviderAuthStatus[]) => void): () => void;
   onAppUpdate(callback: (status: AppUpdateStatus) => void): () => void;
   onShowSettings(callback: () => void): () => void;
+  onWindowMode(callback: (mode: { keepOpen: boolean }) => void): () => void;
 }
 
 declare global {
@@ -76,7 +81,7 @@ const messagesEl = document.getElementById('messages') as HTMLDivElement;
 const onboardingEl = document.getElementById('onboarding') as HTMLDivElement;
 const onboardingProvidersEl = document.getElementById('onboarding-providers') as HTMLDivElement;
 const formEl = document.getElementById('composer') as HTMLFormElement;
-const inputEl = document.getElementById('input') as HTMLInputElement;
+const inputEl = document.getElementById('input') as HTMLTextAreaElement;
 const sendEl = document.getElementById('send') as HTMLButtonElement;
 const providerLockEl = document.getElementById('provider-lock') as HTMLDivElement;
 const providerLockCopyEl = document.getElementById('provider-lock-copy') as HTMLSpanElement;
@@ -84,6 +89,7 @@ const providerLockActionEl = document.getElementById('provider-lock-action') as 
 const scopeTitleEl = document.getElementById('scope-title') as HTMLHeadingElement;
 const scopeMetaEl = document.getElementById('scope-meta') as HTMLDivElement;
 const needsCountEl = document.getElementById('needs-count') as HTMLSpanElement;
+const keepOpenEl = document.getElementById('keep-open') as HTMLButtonElement;
 const threadCountEl = document.getElementById('thread-count') as HTMLSpanElement;
 const settingsEl = document.getElementById('settings') as HTMLDivElement;
 const settingsButtonEl = document.getElementById('settings-button') as HTMLButtonElement;
@@ -98,7 +104,6 @@ const privacyDismissEl = document.getElementById('privacy-dismiss') as HTMLButto
 const accountsButtonEl = document.getElementById('accounts-button') as HTMLButtonElement;
 const observerLabelEl = document.getElementById('observer-label') as HTMLSpanElement;
 const accountSummaryEl = document.getElementById('account-summary') as HTMLSpanElement;
-const accountInlineEl = document.getElementById('account-inline') as HTMLButtonElement;
 const accountsPopoverEl = document.getElementById('accounts-popover') as HTMLElement;
 const accountsCloseEl = document.getElementById('accounts-close') as HTMLButtonElement;
 const accountsProvidersEl = document.getElementById('accounts-providers') as HTMLDivElement;
@@ -128,9 +133,12 @@ let searchSequence = 0;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let lastIndexedThreadCount = -1;
 let olderCollapsed = true;
+let attentionOnly = false;
 const collapsedProjects = new Set<string>();
+const collapsedAttentionProjects = new Set<string>();
 const expandedOlderProjects = new Set<string>();
 const expandedSubagentRoots = new Set<string>();
+const collapsedAttentionSubagentRoots = new Set<string>();
 const showSubagentsStorageKey = 'aside:show-subagent-threads';
 let showSubagentThreads =
   localStorage.getItem(showSubagentsStorageKey) !== '0';
@@ -141,6 +149,7 @@ let busyProviderId: ProviderAuthId | null = null;
 let pendingDisconnectId: ProviderAuthId | null = null;
 let lastProviderSurfaceKey = '';
 let appUpdateStatus: AppUpdateStatus | null = null;
+let keepOpen = false;
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
@@ -211,6 +220,20 @@ function renderAppUpdate(status: AppUpdateStatus): void {
   } else {
     updateStatusEl.textContent = 'Updates download automatically.';
   }
+}
+
+function renderWindowMode(mode: { keepOpen: boolean }): void {
+  keepOpen = mode.keepOpen;
+  keepOpenEl.setAttribute('aria-pressed', String(keepOpen));
+  keepOpenEl.title = keepOpen
+    ? 'Return Aside to menu-bar behavior'
+    : 'Keep Aside open when switching apps';
+  keepOpenEl.setAttribute('aria-label', keepOpenEl.title);
+}
+
+function resizeComposerInput(): void {
+  inputEl.style.height = '0';
+  inputEl.style.height = `${Math.min(inputEl.scrollHeight, 104)}px`;
 }
 
 async function restartToUpdate(): Promise<void> {
@@ -455,27 +478,45 @@ function makeThreadButton(
     title: string;
     subtitle: string;
     source?: string;
-    needsUser?: boolean;
+    glyph?: string;
+    needsAttention?: boolean;
+    attentionKind?: ThreadAttentionKind;
+    attentionUnread?: boolean;
     reason?: string;
     nested?: boolean;
     subagent?: boolean;
     searchResult?: boolean;
     subtitlePrefix?: string;
     snippet?: SearchSnippetPart[];
+    selected?: boolean;
+    smart?: boolean;
+    pressed?: boolean;
+    onSelect?: () => void;
   },
 ): HTMLButtonElement {
   const button = document.createElement('button');
+  const selected = options.selected ?? state.activeThreadId === options.threadId;
+  const attentionKind = options.attentionKind ?? 'none';
   button.type = 'button';
-  button.className = `thread${state.activeThreadId === options.threadId ? ' active' : ''}${
-    options.needsUser ? ' needs-user' : ''
+  button.className = `thread${selected ? ' active' : ''}${
+    options.needsAttention ? ` needs-attention attention-${attentionKind}` : ''
   }${options.nested ? ' nested' : ''}`;
   if (options.subagent) button.classList.add('subagent');
   if (options.searchResult) button.classList.add('search-result');
+  if (options.smart) button.classList.add('attention-smart');
+  if (options.pressed) button.classList.add('filtered');
   button.dataset['threadId'] = options.threadId;
+  if (selected) button.setAttribute('aria-current', 'page');
+  if (options.smart) {
+    button.setAttribute('aria-pressed', String(options.pressed ?? false));
+  }
 
   const icon = document.createElement('span');
   icon.className = options.source ? `source source-${options.source}` : 'source fleet';
-  icon.textContent = options.source ? sourceGlyph(options.source) : '⌘';
+  icon.textContent = options.source
+    ? sourceGlyph(options.source)
+    : (options.glyph ?? '⌘');
+  icon.setAttribute('aria-hidden', 'true');
 
   const copy = document.createElement('span');
   copy.className = 'thread-copy';
@@ -484,7 +525,7 @@ function makeThreadButton(
   title.textContent = options.title;
   const subtitle = document.createElement('span');
   subtitle.className = 'thread-subtitle';
-  if (options.needsUser && !options.searchResult) {
+  if (options.needsAttention && !options.searchResult && !options.smart) {
     subtitle.textContent = options.reason || 'Waiting for your input';
   } else {
     subtitle.textContent = options.subtitle;
@@ -510,15 +551,53 @@ function makeThreadButton(
   }
 
   button.append(icon, copy);
-  if (options.needsUser) {
+  if (options.needsAttention && attentionKind !== 'none') {
     const badge = document.createElement('span');
-    badge.className = 'attention-dot';
-    badge.title = 'Needs you';
-    badge.textContent = '';
+    badge.className = `attention-badge ${attentionKind}${
+      options.attentionUnread ? ' unread' : ''
+    }`;
+    badge.title = attentionLabel(attentionKind);
+    badge.textContent = attentionGlyph(attentionKind);
+    badge.setAttribute('aria-hidden', 'true');
     button.appendChild(badge);
   }
-  button.addEventListener('click', () => void window.aside.selectThread(options.threadId));
+  const accessibleDetail =
+    options.needsAttention && !options.searchResult && !options.smart
+      ? options.reason || attentionLabel(attentionKind)
+      : options.subtitle;
+  button.setAttribute(
+    'aria-label',
+    `${options.title}${accessibleDetail ? `, ${accessibleDetail}` : ''}`,
+  );
+  button.addEventListener('click', () => {
+    if (options.onSelect) options.onSelect();
+    else void window.aside.selectThread(options.threadId);
+  });
   return button;
+}
+
+function attentionLabel(kind: ThreadAttentionKind): string {
+  switch (kind) {
+    case 'waiting': return 'Waiting for you';
+    case 'failed': return 'Turn failed';
+    case 'interrupted': return 'Turn interrupted';
+    case 'completed': return 'Turn ready to review';
+    case 'stalled': return 'Work may be stalled';
+    case 'forgotten': return 'Unreviewed work';
+    default: return '';
+  }
+}
+
+function attentionGlyph(kind: ThreadAttentionKind): string {
+  switch (kind) {
+    case 'waiting': return '•';
+    case 'failed': return '!';
+    case 'interrupted': return '–';
+    case 'completed': return '✓';
+    case 'stalled': return '…';
+    case 'forgotten': return '·';
+    default: return '';
+  }
 }
 
 function makeGroupButton(
@@ -587,16 +666,25 @@ function appendProjectGroups(
   subagentsByRoot: Map<string, SessionSummary[]>,
   searching: boolean,
   defaultCollapsed = false,
+  attentionMode = false,
 ): void {
   for (const group of groups) {
     const collapsed =
       !searching &&
-      (defaultCollapsed
-        ? !expandedOlderProjects.has(group.key)
-        : collapsedProjects.has(group.key));
+      (attentionMode
+        ? collapsedAttentionProjects.has(group.key)
+        : defaultCollapsed
+          ? !expandedOlderProjects.has(group.key)
+          : collapsedProjects.has(group.key));
     threadsEl.appendChild(
       makeGroupButton(group, collapsed, () => {
-        if (defaultCollapsed) {
+        if (attentionMode) {
+          if (collapsedAttentionProjects.has(group.key)) {
+            collapsedAttentionProjects.delete(group.key);
+          } else {
+            collapsedAttentionProjects.add(group.key);
+          }
+        } else if (defaultCollapsed) {
           if (expandedOlderProjects.has(group.key)) expandedOlderProjects.delete(group.key);
           else expandedOlderProjects.add(group.key);
         } else if (collapsedProjects.has(group.key)) {
@@ -623,17 +711,27 @@ function appendProjectGroups(
                 session.status === 'active' ? '' : ` · ${formatDuration(session.idleForMs)}`
               }`,
           source: session.source,
-          needsUser: session.needsUser,
+          needsAttention: session.needsAttention,
+          attentionKind: session.attentionKind,
+          attentionUnread: session.attentionUnread,
           reason: session.attentionReason,
           nested: true,
         }),
       );
       const subagents = subagentsByRoot.get(rootKey) ?? [];
       if (!showSubagentThreads || subagents.length === 0) continue;
-      const expanded = expandedSubagentRoots.has(rootKey);
+      const expanded = attentionMode
+        ? !collapsedAttentionSubagentRoots.has(rootKey)
+        : expandedSubagentRoots.has(rootKey);
       threadsEl.appendChild(
         makeSubagentGroupButton(subagents, !expanded, () => {
-          if (expandedSubagentRoots.has(rootKey)) {
+          if (attentionMode) {
+            if (collapsedAttentionSubagentRoots.has(rootKey)) {
+              collapsedAttentionSubagentRoots.delete(rootKey);
+            } else {
+              collapsedAttentionSubagentRoots.add(rootKey);
+            }
+          } else if (expandedSubagentRoots.has(rootKey)) {
             expandedSubagentRoots.delete(rootKey);
           } else {
             expandedSubagentRoots.add(rootKey);
@@ -653,7 +751,9 @@ function appendProjectGroups(
                 : ` · ${formatDuration(subagent.idleForMs)}`
             }`,
             source: subagent.source,
-            needsUser: subagent.needsUser,
+            needsAttention: subagent.needsAttention,
+            attentionKind: subagent.attentionKind,
+            attentionUnread: subagent.attentionUnread,
             reason: subagent.attentionReason,
             nested: true,
             subagent: true,
@@ -675,15 +775,33 @@ function renderThreads(state: MenubarState): void {
     makeThreadButton(state, {
       threadId: FLEET_THREAD_ID,
       title: 'All agents',
+      subtitle: `${state.recentSessionCount} recent · ${topLevelSessions.length} threads`,
+      selected: state.activeThreadId === FLEET_THREAD_ID,
+      onSelect: () => {
+        attentionOnly = false;
+        void window.aside.selectThread(FLEET_THREAD_ID);
+        if (latestState) renderThreads(latestState);
+      },
+    }),
+  );
+  threadsEl.appendChild(
+    makeThreadButton(state, {
+      threadId: 'attention',
+      title: 'Attention',
       subtitle:
-        state.needsUserCount > 0
-          ? `${state.needsUserCount} waiting for you`
-          : `${state.recentSessionCount} recent · ${topLevelSessions.length} threads`,
-      needsUser: state.needsUserCount > 0,
-      reason:
-        state.needsUserCount > 0
-          ? `${state.needsUserCount} session${state.needsUserCount === 1 ? '' : 's'} need you`
-          : undefined,
+        state.attentionCount === 0
+          ? 'All caught up'
+          : state.unreadAttentionCount > 0
+            ? `${state.unreadAttentionCount} unread · ${state.attentionCount} total`
+            : `${state.attentionCount} waiting for follow-up`,
+      glyph: '◉',
+      selected: false,
+      smart: true,
+      pressed: attentionOnly,
+      onSelect: () => {
+        attentionOnly = !attentionOnly;
+        if (latestState) renderThreads(latestState);
+      },
     }),
   );
 
@@ -694,6 +812,28 @@ function renderThreads(state: MenubarState): void {
   }
   searchStatusEl.hidden = true;
   searchStatusEl.classList.remove('error');
+  if (attentionOnly) {
+    const attention = filterAttentionHierarchy(
+      topLevelSessions,
+      subagentsByRoot,
+    );
+    if (attention.roots.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'no-thread-results';
+      empty.textContent = 'Nothing needs your attention';
+      threadsEl.appendChild(empty);
+      return;
+    }
+    appendProjectGroups(
+      state,
+      groupThreadsByProject(attention.roots),
+      attention.subagentsByRoot,
+      false,
+      false,
+      true,
+    );
+    return;
+  }
   const { recent, older } = splitThreadsByAge(topLevelSessions);
   appendProjectGroups(
     state,
@@ -825,7 +965,9 @@ function renderSearchResults(state: MenubarState, query: string): void {
         subtitlePrefix: session.isInternal ? `${matchLabel} · ` : '',
         snippet: result.kind === 'metadata' ? [] : result.snippet,
         source: session.source,
-        needsUser: session.needsUser,
+        needsAttention: session.needsAttention,
+        attentionKind: session.attentionKind,
+        attentionUnread: session.attentionUnread,
         reason: session.attentionReason,
         searchResult: true,
       }),
@@ -1040,10 +1182,10 @@ function render(state: MenubarState): void {
           : ''
       } · fleet conversation`;
   needsCountEl.textContent =
-    state.needsUserCount > 0
-      ? `${state.needsUserCount} need${state.needsUserCount === 1 ? 's' : ''} you`
+    state.attentionCount > 0
+      ? `${state.attentionCount} need attention`
       : '';
-  needsCountEl.hidden = state.needsUserCount === 0;
+  needsCountEl.hidden = state.attentionCount === 0;
   threadCountEl.textContent = String(topLevelCount);
   const activeAuth = providerAuth.find((status) => status.provider === state.provider);
   const activeProviderLabel = activeAuth
@@ -1060,7 +1202,6 @@ function render(state: MenubarState): void {
   messagesEl.hidden = firstRun;
   accountsButtonEl.hidden = firstRun;
   observerLabelEl.hidden = !firstRun;
-  accountInlineEl.hidden = firstRun;
   if (firstRun && !accountsPopoverEl.hidden) {
     accountsPopoverEl.hidden = true;
     accountsButtonEl.setAttribute('aria-expanded', 'false');
@@ -1105,14 +1246,10 @@ function render(state: MenubarState): void {
         : usable.length === 1
           ? providerDisplayName(usable[0]!.provider)
           : `${usable.length} accounts`;
-  accountInlineEl.textContent =
-    usable.length === 0
-      ? 'Connect an account'
-      : `${usable.length} account${usable.length === 1 ? '' : 's'}`;
   storagePathEl.textContent = state.storagePath;
   diagnosticsEl.textContent =
     `${topLevelCount} threads · ${subagentCount} subagents · ${state.recentSessionCount} recent · ` +
-    `${state.needsUserCount} need you · ` +
+    `${state.attentionCount} need attention · ` +
     `${state.provider}/${state.model} · ` +
     `${usable.length} connected`;
   searchIndexStatusEl.textContent =
@@ -1177,7 +1314,30 @@ formEl.addEventListener('submit', (event) => {
     return;
   }
   inputEl.value = '';
+  resizeComposerInput();
   void window.aside.ask(question).catch(() => void refreshProviderAuth());
+});
+
+inputEl.addEventListener('input', resizeComposerInput);
+inputEl.addEventListener('keydown', (event) => {
+  if (
+    event.key === 'Enter' &&
+    !event.shiftKey &&
+    !event.isComposing
+  ) {
+    event.preventDefault();
+    formEl.requestSubmit();
+  }
+});
+
+keepOpenEl.addEventListener('click', () => {
+  keepOpenEl.disabled = true;
+  void window.aside
+    .setKeepOpen(!keepOpen)
+    .then(renderWindowMode)
+    .finally(() => {
+      keepOpenEl.disabled = false;
+    });
 });
 
 accountsButtonEl.addEventListener('click', () => {
@@ -1185,7 +1345,6 @@ accountsButtonEl.addEventListener('click', () => {
   else hideAccounts();
 });
 accountsCloseEl.addEventListener('click', hideAccounts);
-accountInlineEl.addEventListener('click', showAccounts);
 providerLockActionEl.addEventListener('click', showAccounts);
 accountsSettingsEl.addEventListener('click', () => {
   hideAccounts();
@@ -1253,7 +1412,6 @@ document.addEventListener('mousedown', (event) => {
     accountsPopoverEl.hidden ||
     accountsPopoverEl.contains(event.target as Node) ||
     accountsButtonEl.contains(event.target as Node) ||
-    accountInlineEl.contains(event.target as Node) ||
     providerLockActionEl.contains(event.target as Node)
   ) {
     return;
@@ -1297,7 +1455,9 @@ window.aside.onUpdate(render);
 window.aside.onProviderAuthUpdate(updateProviderAuth);
 window.aside.onAppUpdate(renderAppUpdate);
 window.aside.onShowSettings(showSettings);
+window.aside.onWindowMode(renderWindowMode);
 void window.aside.getState().then(render);
+void window.aside.getWindowMode().then(renderWindowMode);
 void window.aside
   .getUpdateStatus()
   .then(renderAppUpdate)
