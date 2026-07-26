@@ -211,6 +211,23 @@ export class ActivityLedger {
     const newestSeq = this.latestEvent(key)?.seq ?? cursor.viewedThroughSeq;
     if (newestSeq <= cursor.viewedThroughSeq) return;
     cursor.viewedThroughSeq = newestSeq;
+    this.cursorsDirty = true;
+    this.schedulePersist();
+    this.scheduleChange();
+  }
+
+  /** Explicitly clear reviewed evidence; merely opening a thread never calls this. */
+  markResolved(session: Pick<TrackedSession, 'id' | 'source'>): void {
+    const key = threadKey(session.source, session.id);
+    const cursor = this.cursorFor(key);
+    const newestSeq = this.latestEvent(key)?.seq ?? cursor.resolvedThroughSeq;
+    if (
+      newestSeq <= cursor.resolvedThroughSeq &&
+      newestSeq <= cursor.viewedThroughSeq
+    ) {
+      return;
+    }
+    cursor.viewedThroughSeq = Math.max(cursor.viewedThroughSeq, newestSeq);
     cursor.resolvedThroughSeq = Math.max(cursor.resolvedThroughSeq, newestSeq);
     this.cursorsDirty = true;
     this.schedulePersist();
@@ -229,21 +246,30 @@ export class ActivityLedger {
     const beyondBaseline =
       phase !== null &&
       (!phase.seeded || phase.occurredAtMs > cursor.baselineAtMs);
-    const unread =
-      beyondBaseline &&
-      latestSeq > Math.max(cursor.viewedThroughSeq, cursor.resolvedThroughSeq);
+    const unresolved =
+      beyondBaseline && latestSeq > cursor.resolvedThroughSeq;
+    const unread = beyondBaseline && latestSeq > cursor.viewedThroughSeq;
     const observedLive =
       phase !== null &&
       !phase.seeded &&
       phase.observedAtMs >= this.startedAtMs;
 
     if (explicitWaiting?.needsUser) {
+      const evidence = latestWaitingEvidence(events, explicitWaiting.reason);
+      const reason = clamp(
+        explicitWaiting.reason ||
+        evidence?.summary ||
+        'The agent is waiting for your input.',
+      );
       return {
         kind: 'waiting',
-        reason: explicitWaiting.reason || 'Waiting for your input',
-        sinceMs: phase?.kind === 'input_requested'
-          ? phase.occurredAtMs
-          : session.lastEventTime.getTime(),
+        headline: 'Waiting for you',
+        context: reason,
+        reason,
+        sinceMs:
+          evidence?.occurredAtMs ??
+          phase?.occurredAtMs ??
+          session.lastEventTime.getTime(),
         unread,
         inferred: false,
         observedLive,
@@ -252,6 +278,8 @@ export class ActivityLedger {
     if (phase?.kind === 'input_requested') {
       return {
         kind: 'waiting',
+        headline: 'Waiting for you',
+        context: phase.summary,
         reason: phase.summary,
         sinceMs: phase.occurredAtMs,
         unread,
@@ -260,31 +288,38 @@ export class ActivityLedger {
       };
     }
 
-    if (!unread || !phase) return noAttention();
+    if (!unresolved || !phase) return noAttention();
     const quietForMs = Math.max(0, this.now().getTime() - phase.occurredAtMs);
 
     if (phase.kind === 'turn_failed') {
-      return attentionFromEvent('failed', phase, observedLive);
+      return attentionFromEvent('failed', phase, unread, observedLive);
     }
     if (phase.kind === 'turn_interrupted') {
-      return attentionFromEvent('interrupted', phase, observedLive);
+      return attentionFromEvent('interrupted', phase, unread, observedLive);
     }
     if (phase.kind === 'turn_completed') {
+      const context =
+        contextBefore(events, phase) ||
+        'The latest agent turn is ready for review.';
       if (quietForMs >= FORGOTTEN_AFTER_MS) {
         return {
           kind: 'forgotten',
+          headline: 'Still waiting for review',
+          context,
           reason: 'A completed turn has been waiting for review',
           sinceMs: phase.occurredAtMs,
-          unread: true,
+          unread,
           inferred: true,
           observedLive,
         };
       }
       return {
         kind: 'completed',
+        headline: 'Last turn ended',
+        context,
         reason: 'Latest turn ended — ready to review',
         sinceMs: phase.occurredAtMs,
-        unread: true,
+        unread,
         inferred: false,
         observedLive,
       };
@@ -300,20 +335,30 @@ export class ActivityLedger {
       if (quietForMs >= FORGOTTEN_AFTER_MS) {
         return {
           kind: 'forgotten',
+          headline: 'Still waiting for review',
+          context:
+            session.currentActivity ||
+            phase.summary ||
+            'Observed work has been quiet without an outcome.',
           reason: 'Observed work has been quiet for a day without an outcome',
           sinceMs: phase.occurredAtMs,
-          unread: true,
+          unread,
           inferred: true,
           observedLive,
         };
       }
       return {
         kind: 'stalled',
+        headline: 'Work may be stalled',
+        context:
+          session.currentActivity ||
+          phase.summary ||
+          'Observed work has been quiet without an outcome.',
         reason: session.currentActivity
           ? `No outcome after 20 minutes · ${session.currentActivity}`
           : 'No outcome after 20 minutes',
         sinceMs: phase.occurredAtMs,
-        unread: true,
+        unread,
         inferred: true,
         observedLive,
       };
@@ -617,13 +662,16 @@ function reduceLifecycle(events: ActivityEventRecord[]): ActivityEventRecord | n
 function attentionFromEvent(
   kind: 'failed' | 'interrupted',
   event: ActivityEventRecord,
+  unread: boolean,
   observedLive = false,
 ): ThreadAttentionState {
   return {
     kind,
+    headline: kind === 'failed' ? 'Turn failed' : 'Turn interrupted',
+    context: event.summary,
     reason: event.summary,
     sinceMs: event.occurredAtMs,
-    unread: true,
+    unread,
     inferred: false,
     observedLive,
   };
@@ -632,12 +680,78 @@ function attentionFromEvent(
 function noAttention(): ThreadAttentionState {
   return {
     kind: 'none',
+    headline: '',
+    context: '',
     reason: '',
     sinceMs: null,
     unread: false,
     inferred: false,
     observedLive: false,
   };
+}
+
+function latestWaitingEvidence(
+  events: ActivityEventRecord[],
+  reason: string,
+): ActivityEventRecord | null {
+  const expected = clamp(reason);
+  let crossedCurrentTerminal = false;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (
+      event.kind === 'turn_completed' ||
+      event.kind === 'turn_failed' ||
+      event.kind === 'turn_interrupted'
+    ) {
+      if (crossedCurrentTerminal) return null;
+      crossedCurrentTerminal = true;
+      continue;
+    }
+    if (event.kind === 'prompt' || event.kind === 'session_started') {
+      return null;
+    }
+    if (
+      (event.kind === 'input_requested' &&
+        (!expected || event.summary === expected)) ||
+      (event.kind === 'progress' &&
+        expected.length > 0 &&
+        event.summary === expected)
+    ) {
+      return event;
+    }
+  }
+  return null;
+}
+
+function contextBefore(
+  events: ActivityEventRecord[],
+  phase: ActivityEventRecord,
+): string {
+  let fallback = '';
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.seq >= phase.seq) continue;
+    if (
+      event.kind === 'turn_completed' ||
+      event.kind === 'turn_failed' ||
+      event.kind === 'turn_interrupted'
+    ) {
+      return fallback;
+    }
+    if (event.kind === 'progress' || event.kind === 'input_requested') {
+      return event.summary;
+    }
+    if (
+      event.kind === 'work_started' ||
+      event.kind === 'tool_warning'
+    ) {
+      fallback ||= event.summary;
+    }
+    if (event.kind === 'prompt' || event.kind === 'session_started') {
+      return fallback || event.summary;
+    }
+  }
+  return fallback;
 }
 
 function resolveRootThreadKey(

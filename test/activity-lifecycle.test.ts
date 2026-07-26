@@ -224,6 +224,9 @@ describe('activity ledger lifecycle and attention', () => {
 
     expect(ledger.attentionFor(session)).toMatchObject({
       kind: 'waiting',
+      headline: 'Waiting for you',
+      context: 'Approve production deployment?',
+      sinceMs: BASE_MS,
       unread: true,
       inferred: false,
     });
@@ -233,6 +236,79 @@ describe('activity ledger lifecycle and attention', () => {
       unread: false,
       inferred: false,
     });
+    ledger.dispose();
+  });
+
+  it('keeps an input request anchored to its log timestamp after turn completion', () => {
+    const { ledger } = newLedger();
+    const session = trackedSession('waiting-after-turn');
+    ledger.syncSessions([session]);
+    record(ledger, session, {
+      kind: 'needs_input',
+      reason: 'Approve access to the signing key?',
+      ts: new Date(BASE_MS).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 200,
+      ts: new Date(BASE_MS + 200).toISOString(),
+    });
+
+    expect(
+      ledger.attentionFor(session, {
+        needsUser: true,
+        reason: 'Approve access to the signing key?',
+      }),
+    ).toMatchObject({
+      kind: 'waiting',
+      headline: 'Waiting for you',
+      context: 'Approve access to the signing key?',
+      sinceMs: BASE_MS,
+    });
+    ledger.dispose();
+  });
+
+  it('does not anchor a long current request to an older turn', () => {
+    const { ledger } = newLedger();
+    const session = trackedSession('long-current-wait');
+    ledger.syncSessions([session]);
+    record(ledger, session, {
+      kind: 'needs_input',
+      reason: 'Old approval request',
+      ts: new Date(BASE_MS).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 10,
+      ts: new Date(BASE_MS + 10).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'user_prompt',
+      summary: 'Start another task',
+      ts: new Date(BASE_MS + 20).toISOString(),
+    });
+    const longReason = `${'Review this deployment detail carefully. '.repeat(9)}Proceed?`;
+    record(ledger, session, {
+      kind: 'assistant_text',
+      preview: longReason,
+      ts: new Date(BASE_MS + 30).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 10,
+      ts: new Date(BASE_MS + 40).toISOString(),
+    });
+
+    const attention = ledger.attentionFor(session, {
+      needsUser: true,
+      reason: longReason,
+    });
+    expect(attention).toMatchObject({
+      kind: 'waiting',
+      sinceMs: BASE_MS + 30,
+    });
+    expect(attention.context).toMatch(/^Review this deployment detail/);
+    expect(attention.context.length).toBeLessThanOrEqual(240);
     ledger.dispose();
   });
 
@@ -274,25 +350,68 @@ describe('activity ledger lifecycle and attention', () => {
     ledger.dispose();
   });
 
-  it('markViewed clears completed unread attention', () => {
+  it('marks completed attention read without resolving it', () => {
     const { ledger } = newLedger();
     const session = trackedSession('reviewed');
     ledger.syncSessions([session]);
     record(ledger, session, {
-      kind: 'turn_complete',
-      durationMs: 20,
+      kind: 'assistant_text',
+      preview: 'Implemented the requested window resizing and verified it.',
       ts: new Date(BASE_MS).toISOString(),
     });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 20,
+      ts: new Date(BASE_MS + 20).toISOString(),
+    });
 
-    expect(ledger.attentionFor(session).kind).toBe('completed');
+    expect(ledger.attentionFor(session)).toMatchObject({
+      kind: 'completed',
+      headline: 'Last turn ended',
+      context: 'Implemented the requested window resizing and verified it.',
+      sinceMs: BASE_MS + 20,
+      unread: true,
+    });
     ledger.markViewed(session);
-    expect(ledger.attentionFor(session)).toEqual({
-      kind: 'none',
-      reason: '',
-      sinceMs: null,
+    expect(ledger.attentionFor(session)).toMatchObject({
+      kind: 'completed',
+      headline: 'Last turn ended',
+      context: 'Implemented the requested window resizing and verified it.',
       unread: false,
-      inferred: false,
-      observedLive: false,
+    });
+    ledger.markResolved(session);
+    expect(ledger.attentionFor(session).kind).toBe('none');
+    ledger.dispose();
+  });
+
+  it('never borrows completion context from an older turn', () => {
+    const { ledger } = newLedger();
+    const session = trackedSession('bounded-context');
+    ledger.syncSessions([session]);
+    record(ledger, session, {
+      kind: 'assistant_text',
+      preview: 'Old turn summary that must not leak forward.',
+      ts: new Date(BASE_MS).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 20,
+      ts: new Date(BASE_MS + 20).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'user_prompt',
+      summary: 'Check the new release candidate',
+      ts: new Date(BASE_MS + 30).toISOString(),
+    });
+    record(ledger, session, {
+      kind: 'turn_complete',
+      durationMs: 20,
+      ts: new Date(BASE_MS + 50).toISOString(),
+    });
+
+    expect(ledger.attentionFor(session)).toMatchObject({
+      kind: 'completed',
+      context: 'Check the new release candidate',
     });
     ledger.dispose();
   });
@@ -317,6 +436,39 @@ describe('activity ledger lifecycle and attention', () => {
     expect(restored.attentionFor(session)).toMatchObject({
       kind: 'completed',
       unread: true,
+      observedLive: false,
+    });
+    restored.dispose();
+    first.dispose();
+  });
+
+  it('restores viewed attention as read but unresolved', () => {
+    const store = new InMemoryActivityLedgerStore();
+    const first = new ActivityLedger(store, () => new Date(BASE_MS));
+    const session = trackedSession('viewed-restored');
+    first.syncSessions([session]);
+    record(first, session, {
+      kind: 'assistant_text',
+      preview: 'The release candidate is ready for review.',
+      ts: new Date(BASE_MS).toISOString(),
+    });
+    record(first, session, {
+      kind: 'turn_complete',
+      durationMs: 20,
+      ts: new Date(BASE_MS + 20).toISOString(),
+    });
+    first.markViewed(session);
+    first.flush();
+
+    const restored = new ActivityLedger(
+      store,
+      () => new Date(BASE_MS + 1_000),
+    );
+    restored.syncSessions([session]);
+    expect(restored.attentionFor(session)).toMatchObject({
+      kind: 'completed',
+      context: 'The release candidate is ready for review.',
+      unread: false,
       observedLive: false,
     });
     restored.dispose();
@@ -550,7 +702,11 @@ describe('vendor lifecycle classification', () => {
     expect(
       ledger.getEvents().filter((event) => event.kind === 'turn_completed'),
     ).toHaveLength(1);
-    expect(ledger.attentionFor(session).kind).toBe('none');
+    expect(ledger.attentionFor(session)).toMatchObject({
+      kind: 'completed',
+      context: 'Implemented and verified.',
+      unread: false,
+    });
     ledger.dispose();
   });
 

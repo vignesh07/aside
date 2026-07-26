@@ -9,7 +9,7 @@ import type {
   ThreadActivityCursor,
 } from '../../dist/types/activity.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface EventRow {
   seq: number;
@@ -212,8 +212,25 @@ function initializeSchema(db: DatabaseSync): void {
         viewed_through_seq INTEGER NOT NULL,
         resolved_through_seq INTEGER NOT NULL
       );
-      PRAGMA user_version = 1;
+      PRAGMA user_version = 2;
     `);
+  }
+  if (version === 1) {
+    // v1 advanced both cursors whenever a task was merely opened. There was no
+    // explicit resolve action, so every persisted resolved cursor is legacy
+    // click state. Preserve viewed state while restoring those tasks as read
+    // and unresolved under the corrected semantics.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(`
+        UPDATE activity_threads SET resolved_through_seq = 0;
+        PRAGMA user_version = 2;
+      `);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
   }
 }
 

@@ -32,4 +32,19 @@ describe('menubar product surfaces', () => {
     expect(renderer).toContain('attentionOnly = !attentionOnly');
     expect(renderer).toContain("'aria-pressed'");
   });
+
+  it('keeps attention visible after opening and shows local context with age', () => {
+    expect(indexHtml).toContain('.attention-card');
+    expect(indexHtml).toContain('.attention-review');
+    expect(renderer).toContain('attentionHeadline');
+    expect(renderer).toContain('attentionContext');
+    expect(renderer).toContain('Waiting for ${elapsed}');
+    expect(renderer).toContain("review.textContent = 'Mark reviewed'");
+    expect(renderer).toContain(
+      'window.aside.resolveAttention(session.threadId)',
+    );
+    expect(renderer.indexOf('for (const turn of state.messages)')).toBeLessThan(
+      renderer.indexOf('if (attentionCard)'),
+    );
+  });
 });

@@ -240,13 +240,26 @@ describe('MenubarBackend', () => {
     session.lastEventTime = new Date(Date.now() - 1_000);
     const { backend, activity } = makeBackend([session]);
     backend.refresh();
+    const completedAt = Date.now() + 1_000;
+    activity.recordAgentEvent({
+      sessionId: session.id,
+      source: session.source,
+      event: {
+        kind: 'assistant_text',
+        preview: 'Implemented the attention-card context.',
+        ts: new Date(completedAt - 10).toISOString(),
+      },
+      seeded: false,
+      rawLine: JSON.stringify({ id: 'done-text', type: 'assistant_text' }),
+      ordinal: 0,
+    });
     activity.recordAgentEvent({
       sessionId: session.id,
       source: session.source,
       event: {
         kind: 'turn_complete',
         durationMs: 10,
-        ts: new Date(Date.now() + 1_000).toISOString(),
+        ts: new Date(completedAt).toISOString(),
       },
       seeded: false,
       rawLine: JSON.stringify({ id: 'done-1', type: 'task_complete' }),
@@ -257,11 +270,27 @@ describe('MenubarBackend', () => {
       attentionCount: 1,
       unreadAttentionCount: 1,
       attentionCounts: { completed: 1 },
+      sessions: [{
+        attentionHeadline: 'Last turn ended',
+        attentionContext: 'Implemented the attention-card context.',
+        attentionSince: completedAt,
+      }],
     });
     backend.selectThread('session:done');
     expect(backend.getState().unreadAttentionCount).toBe(1);
 
     backend.markThreadViewed('session:done');
+    expect(backend.getState()).toMatchObject({
+      attentionCount: 1,
+      unreadAttentionCount: 0,
+      sessions: [{
+        needsAttention: true,
+        attentionKind: 'completed',
+        attentionUnread: false,
+      }],
+    });
+
+    backend.resolveThreadAttention('session:done');
     expect(backend.getState()).toMatchObject({
       attentionCount: 0,
       unreadAttentionCount: 0,

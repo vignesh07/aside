@@ -424,26 +424,58 @@ function threadTarget(state: MenubarState): MenubarThreadTarget {
 function stateForRenderer(state: MenubarState | undefined): MenubarState | undefined {
   if (!state || !CAPTURE_ATTENTION) return state;
   const fixtures = [
-    ['waiting', 'Approve the production deployment?', true],
-    ['completed', 'Latest turn ended — ready to review', true],
-    ['failed', 'Provider reported a terminal error', true],
-    ['interrupted', 'Turn was interrupted', true],
-    ['stalled', 'Observed work is still quiet', true],
-    ['forgotten', 'A completed turn has been waiting for review', true],
+    {
+      kind: 'waiting',
+      headline: 'Approval requested',
+      context: 'Allow Aside to inspect the signing identities on this Mac?',
+      reason: 'Allow Aside to inspect the signing identities on this Mac?',
+    },
+    {
+      kind: 'completed',
+      headline: 'Last turn ended',
+      context: 'Added thread content search and verified the result ranking.',
+      reason: 'Latest turn ended — ready to review',
+    },
+    {
+      kind: 'failed',
+      headline: 'Turn failed',
+      context: 'The provider stopped before returning a response.',
+      reason: 'The provider stopped before returning a response.',
+    },
+    {
+      kind: 'interrupted',
+      headline: 'Turn interrupted',
+      context: 'The latest agent turn was interrupted.',
+      reason: 'The latest agent turn was interrupted.',
+    },
+    {
+      kind: 'stalled',
+      headline: 'Work may be stalled',
+      context: 'Running the release verification suite.',
+      reason: 'Observed work is still quiet',
+    },
+    {
+      kind: 'forgotten',
+      headline: 'Still waiting for review',
+      context: 'The completed work has not been reviewed yet.',
+      reason: 'A completed turn has been waiting for review',
+    },
   ] as const;
   let index = 0;
   const sessions = state.sessions.map((session) => {
     if (session.isInternal || index >= fixtures.length) return session;
-    const [kind, reason, unread] = fixtures[index++]!;
+    const fixture = fixtures[index++]!;
     return {
       ...session,
-      needsUser: kind === 'waiting',
+      needsUser: fixture.kind === 'waiting',
       needsAttention: true,
-      attentionKind: kind,
-      attentionUnread: unread,
+      attentionKind: fixture.kind,
+      attentionUnread: session.threadId !== state.activeThreadId,
       attentionObservedLive: true,
       attentionSince: Date.now() - index * 60_000,
-      attentionReason: reason,
+      attentionHeadline: fixture.headline,
+      attentionContext: fixture.context,
+      attentionReason: fixture.reason,
     };
   });
   const attentionCounts = {
@@ -463,7 +495,9 @@ function stateForRenderer(state: MenubarState | undefined): MenubarState | undef
     sessions,
     needsUserCount: attentionCounts.waiting,
     attentionCount,
-    unreadAttentionCount: attentionCount,
+    unreadAttentionCount: sessions.filter(
+      (session) => session.needsAttention && session.attentionUnread,
+    ).length,
     attentionCounts,
   };
 }
@@ -608,6 +642,15 @@ app.whenReady().then(() => {
       if (win?.isVisible() && win.isFocused()) {
         backend?.markThreadViewed(threadId);
       }
+    }
+  });
+  ipcMain.handle('aside:attention:resolve', (_e, threadId: unknown) => {
+    if (
+      typeof threadId === 'string' &&
+      threadId.startsWith('session:') &&
+      threadId.length <= 500
+    ) {
+      backend?.resolveThreadAttention(threadId);
     }
   });
   ipcMain.handle('aside:search-threads', (_e, query: unknown) => {
@@ -993,6 +1036,7 @@ async function captureLayoutIssues(window: BrowserWindow): Promise<string[]> {
       insideViewport('chat', chat);
       insideViewport('composer', document.querySelector('.composer-shell'));
       insideViewport('send button', document.getElementById('send'));
+      insideViewport('attention card', document.querySelector('.attention-card'));
       insideViewport('settings', settings);
       insideViewport('accounts popover', document.getElementById('accounts-popover'));
       return issues;

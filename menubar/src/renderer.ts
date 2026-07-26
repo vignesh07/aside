@@ -38,6 +38,7 @@ interface AsideBridge {
   searchThreads(query: string): Promise<ThreadSearchResult[]>;
   rebuildSearchIndex(): Promise<void>;
   selectThread(threadId: string): Promise<void>;
+  resolveAttention(threadId: string): Promise<void>;
   ask(question: string): Promise<void>;
   setModel(provider: string, model: string): Promise<void>;
   getProviderAuth(): Promise<ProviderAuthStatus[]>;
@@ -593,11 +594,34 @@ function attentionGlyph(kind: ThreadAttentionKind): string {
     case 'waiting': return '•';
     case 'failed': return '!';
     case 'interrupted': return '–';
-    case 'completed': return '✓';
+    case 'completed': return '○';
     case 'stalled': return '…';
     case 'forgotten': return '·';
     default: return '';
   }
+}
+
+function attentionTiming(
+  kind: ThreadAttentionKind,
+  sinceMs: number | null,
+): string {
+  if (sinceMs === null) return '';
+  const elapsed = formatDuration(Date.now() - sinceMs);
+  if (kind === 'stalled') return `Quiet for ${elapsed}`;
+  if (kind === 'failed' || kind === 'interrupted') return `${elapsed} ago`;
+  return `Waiting for ${elapsed}`;
+}
+
+function attentionSidebarCopy(session: SessionSummary): string {
+  const primary =
+    session.attentionKind === 'waiting'
+      ? stripMarkdown(session.attentionContext || session.attentionReason)
+      : session.attentionHeadline || attentionLabel(session.attentionKind);
+  const timing = attentionTiming(
+    session.attentionKind,
+    session.attentionSince,
+  );
+  return [primary, timing].filter(Boolean).join(' · ');
 }
 
 function makeGroupButton(
@@ -714,7 +738,7 @@ function appendProjectGroups(
           needsAttention: session.needsAttention,
           attentionKind: session.attentionKind,
           attentionUnread: session.attentionUnread,
-          reason: session.attentionReason,
+          reason: attentionSidebarCopy(session),
           nested: true,
         }),
       );
@@ -754,7 +778,7 @@ function appendProjectGroups(
             needsAttention: subagent.needsAttention,
             attentionKind: subagent.attentionKind,
             attentionUnread: subagent.attentionUnread,
-            reason: subagent.attentionReason,
+            reason: attentionSidebarCopy(subagent),
             nested: true,
             subagent: true,
           }),
@@ -901,6 +925,8 @@ function renderSearchResults(state: MenubarState, query: string): void {
         session.id,
         session.status,
         session.currentActivity,
+        session.attentionHeadline,
+        session.attentionContext,
         session.attentionReason,
       ].some((value) => value.toLocaleLowerCase().includes(query)),
     )
@@ -1111,10 +1137,17 @@ function renderModels(state: MenubarState): void {
 function renderMessages(state: MenubarState): void {
   const threadChanged = lastRenderedThread !== state.activeThreadId;
   messagesEl.innerHTML = '';
-  if (state.messages.length === 0 && !state.thinking) {
+  const session = activeSession(state);
+  const attentionCard = session?.needsAttention
+    ? makeAttentionCard(session)
+    : null;
+  if (
+    state.messages.length === 0 &&
+    !state.thinking &&
+    !session?.needsAttention
+  ) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    const session = activeSession(state);
     const title = document.createElement('strong');
     title.textContent = session
       ? `Ask about ${session.title || session.projectName}`
@@ -1142,6 +1175,9 @@ function renderMessages(state: MenubarState): void {
     row.append(who, body);
     messagesEl.appendChild(row);
   }
+  if (attentionCard) {
+    messagesEl.appendChild(attentionCard);
+  }
   if (state.thinking) {
     const thinking = document.createElement('div');
     thinking.className = 'thinking';
@@ -1153,6 +1189,63 @@ function renderMessages(state: MenubarState): void {
   }
   lastRenderedThread = state.activeThreadId;
   wasThinking = state.thinking;
+}
+
+function makeAttentionCard(session: SessionSummary): HTMLElement {
+  const card = document.createElement('section');
+  card.className = `attention-card attention-card-${session.attentionKind}${
+    session.attentionUnread ? ' unread' : ''
+  }`;
+  card.setAttribute('aria-label', 'Task attention status');
+
+  const meta = document.createElement('div');
+  meta.className = 'attention-card-meta';
+  const status = document.createElement('span');
+  status.className = 'attention-card-status';
+  status.textContent =
+    session.attentionKind === 'waiting'
+      ? 'Needs your input'
+      : session.attentionKind === 'completed' ||
+          session.attentionKind === 'forgotten'
+        ? 'Needs review'
+        : 'Needs attention';
+  const timing = document.createElement('span');
+  timing.textContent = attentionTiming(
+    session.attentionKind,
+    session.attentionSince,
+  );
+  meta.append(status, timing);
+
+  const headline = document.createElement('strong');
+  headline.className = 'attention-card-headline';
+  headline.textContent =
+    session.attentionHeadline || attentionLabel(session.attentionKind);
+  const context = document.createElement('p');
+  context.textContent =
+    stripMarkdown(
+      session.attentionContext ||
+      session.attentionReason ||
+      'The latest agent activity is ready for review.',
+    );
+  card.append(meta, headline, context);
+
+  // An explicit input/approval request is authoritative until the native
+  // session moves forward. Other attention can be deliberately reviewed.
+  if (session.attentionKind !== 'waiting') {
+    const actions = document.createElement('div');
+    actions.className = 'attention-card-actions';
+    const review = document.createElement('button');
+    review.type = 'button';
+    review.className = 'attention-review';
+    review.textContent = 'Mark reviewed';
+    review.addEventListener('click', () => {
+      review.disabled = true;
+      void window.aside.resolveAttention(session.threadId);
+    });
+    actions.appendChild(review);
+    card.appendChild(actions);
+  }
+  return card;
 }
 
 function render(state: MenubarState): void {

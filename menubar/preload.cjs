@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('aside', {
   searchThreads: (query) => ipcRenderer.invoke('aside:search-threads', query),
   rebuildSearchIndex: () => ipcRenderer.invoke('aside:search-rebuild'),
   selectThread: (threadId) => ipcRenderer.invoke('aside:select-thread', threadId),
+  resolveAttention: (threadId) => ipcRenderer.invoke('aside:attention:resolve', threadId),
   ask: (question) => ipcRenderer.invoke('aside:ask', question),
   setModel: (provider, model) => ipcRenderer.invoke('aside:set-model', provider, model),
   getProviderAuth: () => ipcRenderer.invoke('aside:auth:get'),

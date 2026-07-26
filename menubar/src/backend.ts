@@ -51,6 +51,8 @@ export interface SessionSummary {
   attentionUnread: boolean;
   attentionObservedLive: boolean;
   attentionSince: number | null;
+  attentionHeadline: string;
+  attentionContext: string;
   attentionReason: string;
 }
 
@@ -208,6 +210,14 @@ export class MenubarBackend {
     if (selected) this.activity.markViewed(selected);
   }
 
+  /** Clear reviewed attention only through an explicit user action. */
+  resolveThreadAttention(threadId = this.service.getActiveThreadId()): void {
+    if (!threadId.startsWith('session:')) return;
+    const sessionId = threadId.slice('session:'.length);
+    const selected = this.sessions.find((session) => session.id === sessionId);
+    if (selected) this.activity.markResolved(selected);
+  }
+
   setModel(
     provider: string,
     model: string,
@@ -280,6 +290,8 @@ export class MenubarBackend {
           session.status,
           session.currentActivity,
           attention.kind,
+          attention.headline,
+          attention.context,
           attention.reason,
         ].some((value) => value.toLocaleLowerCase().includes(normalized));
       })
@@ -339,6 +351,8 @@ export class MenubarBackend {
         attentionUnread: attention.unread,
         attentionObservedLive: attention.observedLive,
         attentionSince: attention.sinceMs,
+        attentionHeadline: attention.headline,
+        attentionContext: attention.context,
         attentionReason: attention.reason,
       };
     });

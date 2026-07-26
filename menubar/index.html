@@ -510,6 +510,61 @@
       }
       .empty strong { display: block; font-size: 14px; font-weight: 590; }
       .empty p { margin: 5px 0 0; color: var(--secondary); font-size: 12px; }
+      .attention-card {
+        max-width: var(--transcript-width);
+        margin: 0 auto 22px;
+        padding: 12px 13px 11px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--surface) 74%, var(--window));
+      }
+      .attention-card.unread {
+        border-color: color-mix(in srgb, var(--attention) 26%, var(--line));
+      }
+      .attention-card-meta {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 5px;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .attention-card-status {
+        color: var(--attention);
+        font-weight: 590;
+      }
+      .attention-card-failed .attention-card-status {
+        color: var(--danger);
+      }
+      .attention-card-headline {
+        display: block;
+        font-size: 13px;
+        font-weight: 620;
+        letter-spacing: -.008em;
+      }
+      .attention-card p {
+        margin: 4px 0 0;
+        color: var(--secondary);
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      .attention-card-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 10px;
+      }
+      .attention-review {
+        padding: 4px 9px;
+        color: var(--text);
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: var(--window);
+        font-size: 10px;
+        cursor: default;
+      }
+      .attention-review:hover { background: var(--surface-hover); }
+      .attention-review:disabled { opacity: .5; }
       .turn { max-width: var(--transcript-width); margin: 0 auto 22px; }
       .who {
         margin-bottom: 5px;
@@ -1041,6 +1096,7 @@
         #onboarding { padding-top: 24px; padding-bottom: 16px; }
         .onboarding-copy { margin-bottom: 16px; }
         .empty { margin-top: clamp(36px, 14vh, 70px); }
+        .attention-card { margin-bottom: 16px; }
         .turn { margin-bottom: 16px; }
         .composer-shell { padding-top: 5px; padding-bottom: 9px; }
         .settings-body { padding-top: 14px; padding-bottom: 18px; }

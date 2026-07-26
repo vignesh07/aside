@@ -67,12 +67,18 @@ export interface ThreadActivityCursor {
   threadKey: string;
   /** Existing history at first install is factual context, not unread work. */
   baselineAtMs: number;
+  /** Evidence the user has opened; this changes badge emphasis only. */
   viewedThroughSeq: number;
+  /** Evidence the user explicitly reviewed; opening never advances this. */
   resolvedThroughSeq: number;
 }
 
 export interface ThreadAttentionState {
   kind: ThreadAttentionKind;
+  /** Short, stable status copy for the selected-thread surface. */
+  headline: string;
+  /** Factual context derived from the local session log. */
+  context: string;
   reason: string;
   sinceMs: number | null;
   unread: boolean;
