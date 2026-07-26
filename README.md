@@ -250,11 +250,11 @@ tray icon to open it; right-click for Aside Settings or Quit.
 
 ### Signing and notarization
 
-Release builds use a Developer ID Application certificate and the `aside-notary`
+Release builds use a Developer ID Application certificate and the `fold-notary`
 Keychain profile. Credentials never live in the repository.
 
 ```bash
-xcrun notarytool store-credentials "aside-notary" \
+xcrun notarytool store-credentials "fold-notary" \
   --apple-id "<apple-id>" \
   --team-id 8ZS766K9K4 \
   --password "<app-specific-password>"

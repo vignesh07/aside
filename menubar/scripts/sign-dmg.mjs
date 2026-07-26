@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const releaseDir = path.join(here, '..', 'release');
-const PROFILE = process.env['ASIDE_NOTARY_PROFILE'] ?? 'aside-notary';
+const PROFILE = process.env['ASIDE_NOTARY_PROFILE'] ?? 'fold-notary';
 
 /** Read the signing identity from electron-builder.yml — one source of truth. */
 function signingIdentity() {

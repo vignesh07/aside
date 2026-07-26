@@ -3,7 +3,7 @@
 // Credentials deliberately never appear here, in the repo, or in CI logs. They
 // live in the macOS keychain under a notarytool profile, created once by:
 //
-//   xcrun notarytool store-credentials "aside-notary" \
+//   xcrun notarytool store-credentials "fold-notary" \
 //     --apple-id "<your-apple-id>" \
 //     --team-id 8ZS766K9K4 \
 //     --password "<app-specific-password>"
@@ -18,7 +18,7 @@
 import { notarize } from '@electron/notarize';
 import { execFileSync } from 'node:child_process';
 
-const PROFILE = process.env['ASIDE_NOTARY_PROFILE'] ?? 'aside-notary';
+const PROFILE = process.env['ASIDE_NOTARY_PROFILE'] ?? 'fold-notary';
 
 /** True if a notarytool profile of this name exists in the keychain. */
 function profileExists(profile) {
