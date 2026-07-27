@@ -80,6 +80,7 @@ import {
   InMemoryActivityLedgerStore,
 } from '../../dist/core/activity-ledger.js';
 import { createThreadSearchService } from './search-coordinator.js';
+import { feedbackIssueUrl } from './feedback-link.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const UPDATE_INITIAL_DELAY_MS = 15_000;
@@ -128,6 +129,7 @@ function integerFlagValue(name: string): number | null {
  *   --search "<q>"    filter the machine-wide thread list before capture
  *   --older            expand and scroll to the 7d+ section before capture
  *   --settings         open settings before capture
+ *   --settings-bottom  open settings and scroll to its final sections
  *   --accounts         open the account popover before capture
  *   --keep-open        render the detached-window control as active
  *   --attention        render representative attention states
@@ -144,7 +146,9 @@ const CAPTURE_ASK = flagValue('--ask');
 const CAPTURE_THREAD = flagValue('--thread');
 const CAPTURE_SEARCH = flagValue('--search');
 const CAPTURE_OLDER = process.argv.includes('--older');
-const CAPTURE_SETTINGS = process.argv.includes('--settings');
+const CAPTURE_SETTINGS_BOTTOM = process.argv.includes('--settings-bottom');
+const CAPTURE_SETTINGS =
+  process.argv.includes('--settings') || CAPTURE_SETTINGS_BOTTOM;
 const CAPTURE_ACCOUNTS = process.argv.includes('--accounts');
 const CAPTURE_KEEP_OPEN = process.argv.includes('--keep-open');
 const CAPTURE_ATTENTION_VIEW = process.argv.includes('--attention-view');
@@ -768,6 +772,17 @@ app.whenReady().then(() => {
       throw new Error('Aside could not open the signed installer download.');
     }
   });
+  ipcMain.handle('aside:feedback:open', async (_e, value: unknown) => {
+    const url = feedbackIssueUrl(value);
+    if (!url) {
+      throw new Error('That feedback option is not supported.');
+    }
+    try {
+      await shell.openExternal(url);
+    } catch {
+      throw new Error('Aside could not open GitHub Issues.');
+    }
+  });
   ipcMain.handle('aside:open-data', () => {
     const storagePath = backend?.getState().storagePath;
     if (!storagePath) return;
@@ -930,6 +945,15 @@ async function captureAndQuit(
         `document.getElementById('settings-button')?.click()`,
       );
       await sleep(250);
+      if (CAPTURE_SETTINGS_BOTTOM) {
+        await window.webContents.executeJavaScript(`
+          (() => {
+            const settings = document.querySelector('.settings-card');
+            settings?.scrollTo({ top: settings.scrollHeight });
+          })()
+        `);
+        await sleep(250);
+      }
     }
 
     if (showAccounts) {

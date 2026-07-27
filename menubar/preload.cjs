@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('aside', {
   checkForUpdates: () => ipcRenderer.invoke('aside:update:check'),
   restartToUpdate: () => ipcRenderer.invoke('aside:update:restart'),
   openManualUpdate: () => ipcRenderer.invoke('aside:update:manual-download'),
+  openFeedback: (kind) => ipcRenderer.invoke('aside:feedback:open', kind),
   openDataFolder: () => ipcRenderer.invoke('aside:open-data'),
   quit: () => ipcRenderer.invoke('aside:quit'),
   onUpdate: (callback) => {

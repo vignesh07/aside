@@ -1,0 +1,46 @@
+name: Feature request
+description: An idea that would make Aside more useful
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow you want to improve. Please leave out private transcripts, secrets, and sensitive project details.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help with?
+      description: Start with the problem or moment where Aside falls short.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What should Aside do?
+      description: Describe the behavior that would feel natural in your workflow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
+      description: Optional, but useful for understanding the gap.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Anything else?
+      description: Mockups and screenshots are welcome if they contain no private information.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Public request
+      options:
+        - label: I removed secrets and any transcript or project details I do not want public.
+          required: true

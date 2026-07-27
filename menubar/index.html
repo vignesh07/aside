@@ -1029,6 +1029,33 @@
       }
       .settings-update-actions { display: flex; flex: none; gap: 6px; }
       .settings-update-actions button:disabled { opacity: .48; }
+      .settings-feedback {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 8px;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface);
+      }
+      .settings-feedback-copy { min-width: 0; flex: 1; }
+      .settings-feedback-copy strong {
+        display: block;
+        font-size: 11px;
+        font-weight: 590;
+      }
+      .settings-feedback-copy span {
+        display: block;
+        margin-top: 1px;
+        color: var(--secondary);
+        font-size: 10px;
+        line-height: 1.4;
+      }
+      .settings-feedback-actions { display: flex; flex: none; gap: 6px; }
+      .settings-feedback-actions button { white-space: nowrap; }
+      .settings-feedback-actions button:disabled { opacity: .48; }
+      #feedback-status { color: var(--danger); }
       #settings-providers {
         margin-top: 9px;
         overflow: hidden;
@@ -1080,6 +1107,12 @@
           flex-wrap: wrap;
           justify-content: flex-end;
         }
+        .settings-feedback {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .settings-feedback-actions { width: 100%; }
+        .settings-feedback-actions button { flex: 1; }
       }
 
       @media (min-width: 960px) {
@@ -1307,6 +1340,20 @@
           <div class="settings-section">
             <h3>Diagnostics</h3>
             <p id="diagnostics"></p>
+          </div>
+          <div class="settings-section">
+            <h3>Feedback</h3>
+            <div class="settings-feedback">
+              <div class="settings-feedback-copy">
+                <strong>GitHub Issues</strong>
+                <span>Report a bug or request a feature. Aside never attaches logs or thread content.</span>
+                <span id="feedback-status" role="status" aria-live="polite" hidden></span>
+              </div>
+              <div class="settings-feedback-actions">
+                <button id="report-bug" class="secondary" type="button">Report Bug…</button>
+                <button id="request-feature" class="secondary" type="button">Request Feature…</button>
+              </div>
+            </div>
           </div>
           <div class="settings-actions">
             <button id="open-data" class="secondary" type="button">Show chat data</button>

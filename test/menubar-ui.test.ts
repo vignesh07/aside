@@ -47,4 +47,12 @@ describe('menubar product surfaces', () => {
       renderer.indexOf('if (attentionCard)'),
     );
   });
+
+  it('offers explicit feedback actions without attaching local context', () => {
+    expect(indexHtml).toContain('id="report-bug"');
+    expect(indexHtml).toContain('id="request-feature"');
+    expect(indexHtml).toContain('Aside never attaches logs or thread content.');
+    expect(renderer).toContain("openFeedback('bug')");
+    expect(renderer).toContain("openFeedback('feature')");
+  });
 });

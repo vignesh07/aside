@@ -53,6 +53,7 @@ interface AsideBridge {
   checkForUpdates(): Promise<AppUpdateStatus>;
   restartToUpdate(): Promise<void>;
   openManualUpdate(): Promise<void>;
+  openFeedback(kind: 'bug' | 'feature'): Promise<void>;
   openDataFolder(): Promise<void>;
   quit(): Promise<void>;
   onUpdate(callback: (state: MenubarState) => void): () => void;
@@ -117,6 +118,9 @@ const updateStatusEl = document.getElementById('update-status') as HTMLSpanEleme
 const checkUpdateEl = document.getElementById('check-update') as HTMLButtonElement;
 const restartUpdateEl = document.getElementById('restart-update') as HTMLButtonElement;
 const manualUpdateEl = document.getElementById('manual-update') as HTMLButtonElement;
+const reportBugEl = document.getElementById('report-bug') as HTMLButtonElement;
+const requestFeatureEl = document.getElementById('request-feature') as HTMLButtonElement;
+const feedbackStatusEl = document.getElementById('feedback-status') as HTMLSpanElement;
 const updateProgressEl = document.getElementById('update-progress') as HTMLSpanElement;
 const updateProgressBarEl = document.getElementById('update-progress-bar') as HTMLSpanElement;
 const updateReadyEl = document.getElementById('update-ready') as HTMLDivElement;
@@ -1492,6 +1496,24 @@ manualUpdateEl.addEventListener('click', () => {
       manualUpdateEl.disabled = false;
     });
 });
+function openFeedback(kind: 'bug' | 'feature'): void {
+  reportBugEl.disabled = true;
+  requestFeatureEl.disabled = true;
+  feedbackStatusEl.hidden = true;
+  feedbackStatusEl.textContent = '';
+  void window.aside
+    .openFeedback(kind)
+    .catch((error) => {
+      feedbackStatusEl.textContent = safeErrorMessage(error);
+      feedbackStatusEl.hidden = false;
+    })
+    .finally(() => {
+      reportBugEl.disabled = false;
+      requestFeatureEl.disabled = false;
+    });
+}
+reportBugEl.addEventListener('click', () => openFeedback('bug'));
+requestFeatureEl.addEventListener('click', () => openFeedback('feature'));
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!accountsPopoverEl.hidden) {
