@@ -96,6 +96,9 @@ export function providerDisplayName(provider: ProviderAuthId): string {
 
 export function providerStatusText(status: ProviderAuthStatus): string {
   if (status.enabled && isProviderUsable(status)) return 'Available to Aside';
+  if (status.reason === 'consent_unavailable') {
+    return 'Aside could not read saved access';
+  }
   if (status.reason === 'account_login_required') {
     return status.provider === 'codex-cli'
       ? 'ChatGPT sign-in required'

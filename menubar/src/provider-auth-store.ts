@@ -6,10 +6,12 @@ import {
   type ProviderAuthId,
 } from './provider-auth-types.js';
 
-// Keep the v1 envelope rollback-compatible with the current public build.
-// Older Aside versions ignore the optional `todayRecaps` field; if they later
-// rewrite this file, the narrower permission is safely forgotten.
+// Keep writing the v1 envelope so a rollback to an older public build still
+// works. Some pre-release Today builds wrote the same validated fields in a v2
+// envelope; accepting that one known shape prevents an update from stranding
+// provider access while future, unknown versions continue to fail closed.
 const STORE_VERSION = 1;
+const READABLE_STORE_VERSIONS = new Set([1, 2]);
 const MAX_STORE_BYTES = 64 * 1024;
 
 interface StoredConsent {
@@ -228,7 +230,7 @@ function parseStoredConsent(raw: string): StoredConsent {
 
   if (
     !isPlainObject(value) ||
-    value['version'] !== STORE_VERSION
+    !READABLE_STORE_VERSIONS.has(value['version'] as number)
   ) {
     throw new ProviderConsentStoreError('corrupt');
   }

@@ -100,4 +100,15 @@ describe('auth UI state', () => {
     });
     expect(providerHelpLink('ollama')).toBeUndefined();
   });
+
+  it('surfaces unreadable Aside consent instead of blaming vendor sign-in', () => {
+    expect(
+      providerStatusText({
+        provider: 'codex-cli',
+        state: 'signed_in',
+        enabled: false,
+        reason: 'consent_unavailable',
+      }),
+    ).toBe('Aside could not read saved access');
+  });
 });
