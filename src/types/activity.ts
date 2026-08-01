@@ -1,4 +1,5 @@
 import type { SessionSource, SessionStatus } from './session.js';
+import type { SessionEvent } from './events.js';
 
 export type ActivityEventKind =
   | 'session_started'
@@ -39,6 +40,8 @@ export interface ActivityEventRecord {
   occurredAtMs: number;
   observedAtMs: number;
   kind: ActivityEventKind;
+  /** Original normalized scanner event kind when known (v3+ ledger rows). */
+  originKind?: SessionEvent['kind'];
   lifecycle: ActivityLifecycle;
   severity: ActivitySeverity;
   summary: string;

@@ -9,14 +9,14 @@ import type {
 } from './backend.js';
 import type {
   ActivityEvidenceRef,
-  ActivityFactCounts,
   ActivityInsight,
-  TodayDiary,
   TodayProjectDiary,
   TodayThreadDiary,
 } from '../../dist/types/today.js';
 import type { GeneratedArtifact } from '../../dist/types/generated-artifact.js';
 import { stripMarkdown } from '../../dist/utils/markdown.js';
+import { parseGeneratedProse } from './generated-prose.js';
+import { shouldGenerateTodayOnEntry } from './today-generation.js';
 import {
   filterAttentionHierarchy,
   groupSubagentsByRoot,
@@ -64,6 +64,8 @@ interface AsideBridge {
   getWindowMode(): Promise<{ keepOpen: boolean }>;
   setKeepOpen(keepOpen: boolean): Promise<{ keepOpen: boolean }>;
   getToday(): Promise<TodayViewState>;
+  getTodayGenerationConsent(provider: string): Promise<boolean>;
+  allowTodayGeneration(provider: string): Promise<boolean>;
   generateTodayRecap(): Promise<TodayViewState>;
   getThreadReview(
     threadId: string,
@@ -192,6 +194,11 @@ let todayGenerationError: string | null = null;
 let todayLoadedRevision = '';
 let todayFailedRevision = '';
 let todayRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let todayEntryGenerationAttempted = false;
+let todayConsentProvider = '';
+let todayConsentGranted = false;
+let todayConsentGranting = false;
+let todayConsentError: string | null = null;
 let reviewView: ThreadReviewViewState | null = null;
 let reviewThreadId: string | null = null;
 let reviewThreadSource: SessionSummary['source'] | null = null;
@@ -297,14 +304,27 @@ function activityViewRevision(state: MenubarState): string {
     state.activityHighWaterSeq,
     state.activityCursorRevision,
     localDateKey(),
+    state.provider,
+    state.model,
   ].join(':');
 }
 
 function showToday(): void {
   activeView = 'today';
   todayError = null;
+  todayGenerationError = null;
+  todayConsentError = null;
   todayFailedRevision = '';
   todayLoadedRevision = '';
+  todayEntryGenerationAttempted = false;
+  if (
+    todayView &&
+    todayView.diary.range.dateKey !== localDateKey()
+  ) {
+    todayView = null;
+  }
+  if (todayRefreshTimer) clearTimeout(todayRefreshTimer);
+  todayRefreshTimer = null;
   if (latestState) {
     render(latestState);
     scheduleTodayRefresh(activityViewRevision(latestState), 0);
@@ -345,16 +365,30 @@ async function loadToday(requestedRevision: string): Promise<void> {
   if (todayLoading || activeView !== 'today') return;
   todayLoading = true;
   todayError = null;
+  let loaded = false;
   renderAnalysisView();
   try {
-    todayView = await window.aside.getToday();
+    const nextView = await window.aside.getToday();
+    todayView = nextView;
+    todayConsentProvider = nextView.provider;
+    try {
+      todayConsentGranted = await window.aside.getTodayGenerationConsent(
+        nextView.provider,
+      );
+      todayConsentError = null;
+    } catch (error) {
+      todayConsentGranted = false;
+      todayConsentError = safeErrorMessage(error);
+    }
     todayLoadedRevision = requestedRevision;
     todayFailedRevision = '';
+    loaded = true;
   } catch (error) {
     todayError = safeErrorMessage(error);
     todayFailedRevision = requestedRevision;
   } finally {
     todayLoading = false;
+    if (loaded) maybeGenerateTodayForEntry();
     if (latestState) render(latestState);
     else renderAnalysisView();
     const current = latestState
@@ -363,6 +397,55 @@ async function loadToday(requestedRevision: string): Promise<void> {
     if (activeView === 'today' && current !== todayLoadedRevision) {
       scheduleTodayRefresh(current);
     }
+  }
+}
+
+/**
+ * Opening Today is the only automatic generation intent. A live activity
+ * stream may refresh the local diary many times, but it must never turn into a
+ * provider-call loop. Re-entering Today grants exactly one new attempt.
+ */
+function maybeGenerateTodayForEntry(): void {
+  if (!todayView) return;
+  if (!shouldGenerateTodayOnEntry({
+    active: activeView === 'today',
+    attemptedThisEntry: todayEntryGenerationAttempted,
+    generating: todayGenerating,
+    eventCount: todayView.narrativeEventCount,
+    hasArtifact: todayView.artifact !== null,
+    artifactIsStale: todayView.artifactIsStale,
+    authReady: authPhase === 'ready',
+    providerUsable: canAskWithProvider(providerAuth, todayView.provider),
+    consentGranted:
+      todayConsentProvider === todayView.provider && todayConsentGranted,
+  })) return;
+  todayEntryGenerationAttempted = true;
+  void generateTodayRecap();
+}
+
+async function allowTodayGeneration(): Promise<void> {
+  const view = todayView;
+  if (!view || todayConsentGranting) return;
+  const provider = view.provider;
+  todayConsentGranting = true;
+  todayConsentError = null;
+  renderAnalysisView();
+  try {
+    const granted = await window.aside.allowTodayGeneration(provider);
+    if (todayView?.provider === provider) {
+      todayConsentProvider = provider;
+      todayConsentGranted = granted;
+    }
+  } catch (error) {
+    if (todayView?.provider === provider) {
+      todayConsentGranted = false;
+      todayConsentError = safeErrorMessage(error);
+    }
+  } finally {
+    todayConsentGranting = false;
+    if (latestState) render(latestState);
+    else renderAnalysisView();
+    maybeGenerateTodayForEntry();
   }
 }
 
@@ -498,6 +581,11 @@ async function restartToUpdate(): Promise<void> {
 }
 
 function updateProviderAuth(statuses: ProviderAuthStatus[]): void {
+  const todayProvider =
+    activeView === 'today' ? todayView?.provider ?? null : null;
+  const previousTodayStatus = todayProvider
+    ? providerAuth.find((status) => status.provider === todayProvider)
+    : undefined;
   providerAuth = statuses;
   authPhase = 'ready';
   authError = null;
@@ -505,7 +593,45 @@ function updateProviderAuth(statuses: ProviderAuthStatus[]): void {
     localStorage.setItem('aside:onboarding:v1', '1');
   }
   lastProviderSurfaceKey = '';
+  const nextTodayStatus = todayProvider
+    ? statuses.find((status) => status.provider === todayProvider)
+    : undefined;
+  const todayAccessChanged =
+    todayProvider !== null &&
+    (previousTodayStatus?.state !== nextTodayStatus?.state ||
+      previousTodayStatus?.enabled !== nextTodayStatus?.enabled);
+  if (todayAccessChanged && todayProvider) {
+    // Base provider access and Today permission are independent. Re-read the
+    // narrower grant after a disconnect/reconnect instead of trusting cached
+    // renderer state; the main process remains authoritative either way.
+    todayConsentProvider = todayProvider;
+    todayConsentGranted = false;
+    todayConsentError = null;
+    if (latestState) render(latestState);
+    void refreshTodayConsentAfterAuthChange(todayProvider);
+    return;
+  }
   if (latestState) render(latestState);
+  maybeGenerateTodayForEntry();
+}
+
+async function refreshTodayConsentAfterAuthChange(
+  provider: string,
+): Promise<void> {
+  let granted = false;
+  let error: string | null = null;
+  try {
+    granted = await window.aside.getTodayGenerationConsent(provider);
+  } catch (reason) {
+    error = safeErrorMessage(reason);
+  }
+  if (activeView !== 'today' || todayView?.provider !== provider) return;
+  todayConsentProvider = provider;
+  todayConsentGranted = granted;
+  todayConsentError = error;
+  if (latestState) render(latestState);
+  else renderAnalysisView();
+  maybeGenerateTodayForEntry();
 }
 
 async function refreshProviderAuth(): Promise<void> {
@@ -1063,7 +1189,7 @@ function renderThreads(state: MenubarState): void {
     makeThreadButton(state, {
       threadId: 'today',
       title: 'Today',
-      subtitle: 'Activity across your projects',
+      subtitle: 'Your daily recap',
       glyph: String(new Date().getDate()),
       selected: activeView === 'today',
       today: true,
@@ -1411,8 +1537,9 @@ function makeEvidenceControl(
   time.textContent = formatTime(evidence.occurredAtMs);
   const copy = document.createElement('span');
   copy.className = 'evidence-copy';
+  const sourceLabel = session?.title || session?.projectName || 'Recorded activity';
   copy.textContent = compact
-    ? evidence.summary
+    ? sourceLabel
     : `${evidence.summary} · ${evidence.kind.replaceAll('_', ' ')}`;
   control.append(time, copy);
   if (session) {
@@ -1426,7 +1553,7 @@ function makeEvidenceControl(
     'aria-label',
     `${
       citationNumber !== undefined ? `Evidence ${citationNumber}, ` : ''
-    }${formatTime(evidence.occurredAtMs)}, ${evidence.summary}${
+    }${formatTime(evidence.occurredAtMs)}, ${compact ? sourceLabel : evidence.summary}${
       session ? `, open ${session.title || session.projectName}` : ''
     }`,
   );
@@ -1451,44 +1578,38 @@ function appendInsights(
   container: HTMLElement,
   insights: ActivityInsight[],
 ): void {
+  if (insights.length === 0) return;
   const section = document.createElement('section');
-  section.className = 'analysis-section';
+  section.className = 'analysis-section insight-section';
   section.appendChild(
     makeSectionHeading(
-      'Worth a look',
-      'Signals grounded in recorded activity.',
+      'Needs attention',
+      'Threads that may need a decision or follow-up.',
     ),
   );
-  if (insights.length === 0) {
-    const quiet = document.createElement('p');
-    quiet.className = 'analysis-muted';
-    quiet.textContent = 'Nothing stands out in the recorded activity.';
-    section.appendChild(quiet);
-  } else {
-    const list = document.createElement('div');
-    list.className = 'insight-list';
-    for (const insight of insights) {
-      const row = document.createElement('article');
-      row.className = `insight-row severity-${insight.severity}`;
-      const marker = document.createElement('span');
-      marker.className = 'insight-marker';
-      marker.setAttribute('aria-hidden', 'true');
-      const copy = document.createElement('div');
-      copy.className = 'insight-copy';
-      const headline = document.createElement('h3');
-      headline.textContent = insight.headline;
-      const detail = document.createElement('p');
-      detail.textContent = insight.detail;
-      const meta = document.createElement('div');
-      meta.className = 'insight-meta';
-      meta.textContent = `${insight.projectName} · ${formatTime(insight.occurredAtMs)}`;
-      copy.append(headline, detail, meta);
-      appendEvidenceChips(copy, insight.evidence);
-      row.append(marker, copy);
-      list.appendChild(row);
-    }
-    section.appendChild(list);
+  const list = document.createElement('div');
+  list.className = 'insight-list';
+  for (const insight of insights) {
+    const row = document.createElement('article');
+    row.className = `insight-row severity-${insight.severity}`;
+    const marker = document.createElement('span');
+    marker.className = 'insight-marker';
+    marker.setAttribute('aria-hidden', 'true');
+    const copy = document.createElement('div');
+    copy.className = 'insight-copy';
+    const headline = document.createElement('h3');
+    headline.textContent = insight.headline;
+    const detail = document.createElement('p');
+    detail.textContent = insight.detail;
+    const meta = document.createElement('div');
+    meta.className = 'insight-meta';
+    meta.textContent = `${insight.projectName} · ${formatTime(insight.occurredAtMs)}`;
+    copy.append(headline, detail, meta);
+    appendEvidenceChips(copy, insight.evidence);
+    row.append(marker, copy);
+    list.appendChild(row);
   }
+  section.appendChild(list);
   container.appendChild(section);
 }
 
@@ -1508,10 +1629,12 @@ function appendArtifactEvidence(
       Boolean(item.evidence),
   );
   if (retained.length > 0) {
-    const label = document.createElement('div');
+    const sources = document.createElement('details');
+    sources.className = 'artifact-sources';
+    const label = document.createElement('summary');
     label.className = 'artifact-evidence-label';
-    label.textContent = 'Evidence used';
-    container.appendChild(label);
+    label.textContent = `Sources · ${retained.length}`;
+    sources.appendChild(label);
     const chips = document.createElement('div');
     chips.className = 'evidence-chips artifact-evidence';
     for (const item of retained) {
@@ -1519,7 +1642,8 @@ function appendArtifactEvidence(
         makeEvidenceControl(item.evidence, true, item.index),
       );
     }
-    container.appendChild(chips);
+    sources.appendChild(chips);
+    container.appendChild(sources);
   }
   if (missingCount > 0) {
     const missing = document.createElement('p');
@@ -1530,9 +1654,40 @@ function appendArtifactEvidence(
   }
 }
 
+function makeGeneratedProse(markdown: string): HTMLDivElement {
+  const prose = document.createElement('div');
+  prose.className = 'artifact-prose';
+  for (const [index, section] of parseGeneratedProse(markdown).entries()) {
+    const block = document.createElement('section');
+    block.className = `artifact-block${index === 0 ? ' lead' : ''}`;
+    if (section.heading) {
+      const heading = document.createElement('h3');
+      heading.textContent = section.heading;
+      block.appendChild(heading);
+    }
+    for (const value of section.paragraphs) {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = value;
+      block.appendChild(paragraph);
+    }
+    if (section.items.length > 0) {
+      const list = document.createElement('ul');
+      for (const value of section.items) {
+        const item = document.createElement('li');
+        item.textContent = value;
+        list.appendChild(item);
+      }
+      block.appendChild(list);
+    }
+    prose.appendChild(block);
+  }
+  return prose;
+}
+
 function appendGeneratedArtifact(
   container: HTMLElement,
   options: {
+    kind: 'today' | 'review';
     title: string;
     emptyCopy: string;
     buttonId: string;
@@ -1546,28 +1701,43 @@ function appendGeneratedArtifact(
     generating: boolean;
     error: string | null;
     disabled: boolean;
+    consentRequired?: boolean;
+    consentGranted?: boolean;
+    consentGranting?: boolean;
+    consentError?: string | null;
+    onConsent?: () => void;
     onGenerate: () => void;
   },
 ): void {
+  const isToday = options.kind === 'today';
+  const selectedModel = observerModelLabel(options.provider, options.model);
   const section = document.createElement('section');
-  section.className = 'analysis-section generated-section';
+  section.className = `analysis-section generated-section generated-${options.kind}`;
   const heading = makeSectionHeading(options.title);
-  const actionLabel = options.generating
-    ? 'Writing…'
-    : options.artifact
-      ? options.title === 'Daily recap'
-        ? 'Refresh recap'
-        : 'Refresh review'
-      : options.title === 'Daily recap'
-        ? 'Write recap'
-        : 'Write review';
-  heading.appendChild(
-    makeAnalysisAction(actionLabel, options.onGenerate, {
-      id: options.buttonId,
-      primary: true,
-      disabled: options.disabled || options.generating,
-    }),
-  );
+  const actionLabel = isToday && options.consentRequired
+    ? null
+    : isToday
+    ? options.error
+      ? null
+      : options.generating && options.artifact
+        ? 'Updating…'
+        : options.artifactIsStale
+          ? 'Update'
+          : null
+    : options.generating
+      ? 'Generating…'
+      : options.artifact
+        ? 'Regenerate'
+        : 'Generate review';
+  if (actionLabel) {
+    heading.appendChild(
+      makeAnalysisAction(actionLabel, options.onGenerate, {
+        id: options.buttonId,
+        primary: !isToday,
+        disabled: options.disabled || options.generating,
+      }),
+    );
+  }
   section.appendChild(heading);
 
   if (options.artifact) {
@@ -1579,34 +1749,35 @@ function appendGeneratedArtifact(
       options.artifact.model,
     );
     artifactMeta.textContent = Number.isFinite(created)
-      ? `Written ${formatTime(created)} with ${artifactModel}`
-      : `Written with ${artifactModel}`;
+      ? `Updated ${formatTime(created)} · ${artifactModel}`
+      : `Generated with ${artifactModel}`;
     if (options.artifactIsStale) {
       const stale = document.createElement('span');
       stale.className = 'artifact-stale';
       stale.textContent =
         options.newEventCount > 0
-          ? `${plural(options.newEventCount, 'new event')} since this ${
-              options.title === 'Daily recap' ? 'recap' : 'review'
+          ? `${plural(options.newEventCount, 'new update')} since this ${
+              isToday ? 'recap' : 'review'
             }`
-          : `Activity changed since this ${
-              options.title === 'Daily recap' ? 'recap' : 'review'
-            }`;
+          : `Activity changed since this ${isToday ? 'recap' : 'review'}`;
       artifactMeta.appendChild(stale);
     }
     section.appendChild(artifactMeta);
-
-    const prose = document.createElement('div');
-    prose.className = 'artifact-prose';
-    prose.textContent = options.artifact.markdown;
-    section.appendChild(prose);
+    section.appendChild(makeGeneratedProse(options.artifact.markdown));
     appendArtifactEvidence(
       section,
       options.artifact,
       options.evidence,
       options.artifactEvidenceMissingCount,
     );
-  } else {
+  } else if (options.generating) {
+    section.appendChild(
+      makeStatusMessage(
+        isToday ? 'Preparing today’s recap…' : 'Generating this review…',
+        { kind: 'loading' },
+      ),
+    );
+  } else if (!options.consentRequired) {
     const empty = document.createElement('p');
     empty.className = 'analysis-muted';
     empty.textContent = options.emptyCopy;
@@ -1614,35 +1785,100 @@ function appendGeneratedArtifact(
   }
 
   if (options.error) {
-    section.appendChild(makeStatusMessage(options.error, { kind: 'error' }));
+    section.appendChild(
+      makeStatusMessage(options.error, {
+        kind: 'error',
+        actionLabel: options.disabled ? undefined : 'Try again',
+        onAction: options.disabled ? undefined : options.onGenerate,
+      }),
+    );
   }
+
+  if (isToday && options.consentRequired) {
+    const consent = document.createElement('div');
+    consent.className = 'today-consent';
+    const copy = document.createElement('div');
+    copy.className = 'today-consent-copy';
+    const title = document.createElement('h3');
+    title.textContent = 'Generate recaps when you open Today';
+    const detail = document.createElement('p');
+    detail.textContent =
+      `This sends a limited, redacted set of the day’s activity to ${selectedModel}. ` +
+      'Aside stores the recap and its source links on this Mac.';
+    copy.append(title, detail);
+    const allow = makeAnalysisAction(
+      options.consentGranting ? 'Saving…' : 'Allow Today recaps',
+      options.onConsent ?? (() => {}),
+      {
+        id: 'allow-today-recaps',
+        primary: true,
+        disabled: options.consentGranting || !options.onConsent,
+      },
+    );
+    consent.append(copy, allow);
+    if (options.consentError) {
+      const error = document.createElement('p');
+      error.className = 'today-consent-error';
+      error.setAttribute('role', 'alert');
+      error.textContent = options.consentError;
+      consent.appendChild(error);
+    }
+    section.appendChild(consent);
+  }
+
+  if (isToday && options.consentRequired) {
+    container.appendChild(section);
+    return;
+  }
+
   const privacy = document.createElement('p');
   privacy.className = 'analysis-footnote';
-  const selectedModel = observerModelLabel(options.provider, options.model);
-  privacy.textContent =
-    options.provider === 'ollama'
-      ? `Runs ${selectedModel} on this Mac only when you click. Recent activity stays local.`
-      : `Uses ${selectedModel} only when you click. ` +
-        'Recent activity is limited and redacted before it leaves this Mac.';
+  privacy.textContent = options.provider === 'ollama'
+    ? isToday
+      ? `When needed, opening Today refreshes locally with ${selectedModel}. Aside stores recaps on this Mac.`
+      : `Generates locally with ${selectedModel} when you ask. Review data stays on this Mac.`
+    : isToday
+      ? options.consentGranted
+        ? `When needed, opening Today refreshes with ${selectedModel}. Scoped activity is redacted first; Aside stores recaps on this Mac.`
+        : `This recap was generated with ${selectedModel}. Scoped activity was redacted first; Aside stores the recap on this Mac.`
+      : `Uses ${selectedModel} when you choose Generate. Scoped activity is redacted before it leaves this Mac.`;
   section.appendChild(privacy);
   container.appendChild(section);
 }
 
-function factSummary(counts: ActivityFactCounts): string {
-  const facts: string[] = [];
-  if (counts.waitingCount > 0) {
-    facts.push(plural(counts.waitingCount, 'input request'));
+function diaryState(
+  digest: TodayThreadDiary['digest'],
+  session?: SessionSummary,
+): { label: string; tone: string } {
+  if (session?.needsAttention) {
+    switch (session.attentionKind) {
+      case 'waiting':
+        return { label: 'Waiting for you', tone: 'attention' };
+      case 'failed':
+        return { label: 'Turn failed', tone: 'danger' };
+      case 'interrupted':
+        return { label: 'Interrupted', tone: 'attention' };
+      case 'completed':
+      case 'forgotten':
+        return { label: 'Ready to review', tone: 'ready' };
+      case 'stalled':
+        return { label: 'Quiet', tone: 'muted' };
+      default:
+        break;
+    }
   }
-  if (counts.errorCount > 0) {
-    facts.push(plural(counts.errorCount, 'turn failure'));
+  switch (digest.state) {
+    case 'waiting':
+      return { label: 'Waiting for you', tone: 'attention' };
+    case 'ready':
+      return { label: 'Ready to review', tone: 'ready' };
+    case 'failed':
+      return { label: 'Turn failed', tone: 'danger' };
+    case 'interrupted':
+      return { label: 'Interrupted', tone: 'attention' };
+    default:
+      return { label: 'Active today', tone: 'active' };
   }
-  if (counts.warningCount > 0) {
-    facts.push(plural(counts.warningCount, 'warning'));
-  }
-  if (counts.completionCount > 0) {
-    facts.push(plural(counts.completionCount, 'turn ended', 'turns ended'));
-  }
-  return facts.length > 0 ? facts.join(' · ') : plural(counts.eventCount, 'event');
 }
 
 function makeThreadDiaryRow(thread: TodayThreadDiary): HTMLDivElement {
@@ -1662,28 +1898,37 @@ function makeThreadDiaryRow(thread: TodayThreadDiary): HTMLDivElement {
   const title = document.createElement('strong');
   title.textContent = thread.title;
   const meta = document.createElement('span');
-  meta.textContent =
-    `${factSummary(thread.counts)}${
-      thread.subagents.length > 0
-        ? ` · ${plural(thread.subagents.length, 'subagent')}`
-        : ''
-    }`;
+  const state = diaryState(thread.digest, session);
+  meta.className = `diary-thread-state state-${state.tone}`;
+  meta.textContent = state.label;
   copy.append(title, meta);
   heading.appendChild(copy);
-  if (thread.lastObservedWorkAtMs !== null) {
+  if (thread.digest.occurredAtMs !== null) {
     const time = document.createElement('time');
-    time.textContent = formatTime(thread.lastObservedWorkAtMs);
+    time.textContent = formatTime(thread.digest.occurredAtMs);
     heading.appendChild(time);
   }
   wrapper.appendChild(heading);
 
+  const digestCopy = session?.needsAttention
+    ? session.attentionContext || session.attentionReason || thread.digest.summary
+    : thread.digest.summary;
+  if (digestCopy) {
+    const digest = document.createElement('p');
+    digest.className = 'diary-thread-digest';
+    digest.textContent = stripMarkdown(digestCopy);
+    wrapper.appendChild(digest);
+  }
+
   if (thread.subagents.length > 0) {
-    const subagents = document.createElement('div');
+    const subagents = document.createElement('details');
     subagents.className = 'diary-subagents';
-    const label = document.createElement('span');
+    const label = document.createElement('summary');
     label.className = 'diary-subagents-label';
-    label.textContent = 'Subagents';
+    label.textContent = plural(thread.subagents.length, 'subagent');
     subagents.appendChild(label);
+    const list = document.createElement('div');
+    list.className = 'diary-subagent-list';
     for (const subagent of thread.subagents) {
       const subagentSession = latestState
         ? sessionForActivityThreadKey(latestState, subagent.threadKey)
@@ -1701,30 +1946,20 @@ function makeThreadDiaryRow(thread: TodayThreadDiary): HTMLDivElement {
       const title = document.createElement('span');
       title.textContent = subagent.title;
       const facts = document.createElement('small');
-      facts.textContent = factSummary(subagent.counts);
+      const state = diaryState(subagent.digest, subagentSession);
+      facts.className = `state-${state.tone}`;
+      facts.textContent = state.label;
       row.append(title, facts);
-      if (subagent.lastObservedWorkAtMs !== null) {
+      if (subagent.digest.occurredAtMs !== null) {
         const time = document.createElement('time');
-        time.textContent = formatTime(subagent.lastObservedWorkAtMs);
+        time.textContent = formatTime(subagent.digest.occurredAtMs);
         row.appendChild(time);
       }
-      subagents.appendChild(row);
+      list.appendChild(row);
     }
+    subagents.appendChild(list);
     wrapper.appendChild(subagents);
   }
-
-  const evidenceList = document.createElement('div');
-  evidenceList.className = 'diary-evidence';
-  for (const evidence of thread.evidence.slice(-3).reverse()) {
-    evidenceList.appendChild(makeEvidenceControl(evidence));
-  }
-  if (thread.evidence.length > 3) {
-    const remaining = document.createElement('div');
-    remaining.className = 'diary-more';
-    remaining.textContent = `${plural(thread.evidence.length - 3, 'earlier event')}`;
-    evidenceList.appendChild(remaining);
-  }
-  wrapper.appendChild(evidenceList);
   return wrapper;
 }
 
@@ -1739,8 +1974,11 @@ function appendTodayProject(
   const title = document.createElement('h2');
   title.textContent = project.projectName;
   const meta = document.createElement('span');
-  meta.textContent =
-    `${plural(project.threadCount, 'thread')} · ${factSummary(project.counts)}`;
+  const subagentCount = project.memberThreadCount - project.threadCount;
+  meta.textContent = [
+    plural(project.threadCount, 'conversation'),
+    subagentCount > 0 ? plural(subagentCount, 'subagent') : '',
+  ].filter(Boolean).join(' · ');
   heading.append(title, meta);
   section.appendChild(heading);
   for (const thread of project.threads) {
@@ -1753,57 +1991,66 @@ function renderTodayContent(view: TodayViewState): void {
   const content = document.createElement('div');
   content.className = 'analysis-content';
   const summary = document.createElement('section');
-  summary.className = 'today-summary';
+  summary.className = `today-summary${view.artifact ? ' has-artifact' : ''}`;
   const date = document.createElement('p');
   date.className = 'analysis-kicker';
   date.textContent = formatTodayDate(view.diary.range.dateKey);
-  const metrics = document.createElement('div');
-  metrics.className = 'analysis-metrics';
-  appendMetric(metrics, view.diary.projectCount, 'Projects');
-  appendMetric(metrics, view.diary.threadCount, 'Threads');
-  appendMetric(metrics, view.diary.counts.eventCount, 'Events');
-  appendMetric(metrics, view.diary.counts.completionCount, 'Turns ended');
-  summary.append(date, metrics);
+  const overview = document.createElement('p');
+  overview.className = 'today-overview';
+  overview.textContent = view.diary.overview;
+  summary.appendChild(date);
+  // The deterministic local digest is the useful fallback while generation
+  // is unavailable or in progress. Once a durable recap exists, let that
+  // artifact lead instead of repeating a count-based summary above it.
+  if (!view.artifact) summary.appendChild(overview);
   content.appendChild(summary);
 
-  if (view.diary.counts.eventCount === 0) {
-    content.appendChild(
-      makeStatusMessage(
-        'No agent activity has been recorded today. Aside will fill this in as your threads move.',
-        { kind: 'empty' },
-      ),
-    );
-  } else {
+  // On an empty day, `diary.overview` is sufficient; avoid adding a second,
+  // visually heavier empty state below it.
+  if (view.diary.counts.eventCount > 0) {
+    const canGenerate =
+      authPhase === 'ready' &&
+      canAskWithProvider(providerAuth, view.provider);
+    const recapNeedsGeneration =
+      view.artifact === null || view.artifactIsStale;
+    const consentGranted =
+      todayConsentProvider === view.provider && todayConsentGranted;
+    const consentRequired =
+      canGenerate && recapNeedsGeneration && !consentGranted;
+    if (view.artifact || view.narrativeEventCount > 0) {
+      appendGeneratedArtifact(content, {
+        kind: 'today',
+        title: 'Daily recap',
+        emptyCopy: canGenerate
+          ? 'Preparing today’s recap…'
+          : 'Connect the selected observer account to add a generated recap.',
+        buttonId: 'update-today-recap',
+        artifact: view.artifact,
+        evidence: view.artifactEvidence,
+        artifactEvidenceMissingCount: view.artifactEvidenceMissingCount,
+        newEventCount: view.newEventCount,
+        artifactIsStale: view.artifactIsStale,
+        provider: view.provider,
+        model: view.model,
+        generating: todayGenerating,
+        error: todayGenerationError,
+        disabled: !canGenerate || !consentGranted,
+        consentRequired,
+        consentGranted,
+        consentGranting: todayConsentGranting,
+        consentError: todayConsentError,
+        onConsent: () => void allowTodayGeneration(),
+        onGenerate: () => void generateTodayRecap(),
+      });
+    }
     appendInsights(content, view.insights);
-    appendGeneratedArtifact(content, {
-      title: 'Daily recap',
-      emptyCopy:
-        'Write a recap when you want a concise read of today’s activity.',
-      buttonId: 'write-recap',
-      artifact: view.artifact,
-      evidence: view.artifactEvidence,
-      artifactEvidenceMissingCount: view.artifactEvidenceMissingCount,
-      newEventCount: view.newEventCount,
-      artifactIsStale: view.artifactIsStale,
-      provider: view.provider,
-      model: view.model,
-      generating: todayGenerating,
-      error: todayGenerationError,
-      disabled:
-        authPhase !== 'ready' ||
-        !canAskWithProvider(providerAuth, view.provider),
-      onGenerate: () => void generateTodayRecap(),
-    });
 
     const diary = document.createElement('section');
     diary.className = 'analysis-section diary-section';
     diary.appendChild(
       makeSectionHeading(
-        'Activity',
-        `${factSummary(view.diary.counts)} across ${plural(
-          view.diary.projectCount,
-          'project',
-        )}.`,
+        'Projects',
+        'The conversations that moved today.',
       ),
     );
     for (const project of view.diary.projects) {
@@ -1840,10 +2087,11 @@ function renderReviewContent(view: ThreadReviewViewState): void {
   } else {
     appendInsights(content, view.insights);
     appendGeneratedArtifact(content, {
+      kind: 'review',
       title: 'Thread review',
       emptyCopy:
-        'Write a review to summarize the goal, approach, friction, observed outcome, and a possible next step.',
-      buttonId: 'write-review',
+        'Generate a review of the goal, approach, friction, observed outcome, and possible next step.',
+      buttonId: 'generate-review',
       artifact: view.artifact,
       evidence: view.artifactEvidence,
       artifactEvidenceMissingCount: view.artifactEvidenceMissingCount,
@@ -1880,6 +2128,7 @@ function renderReviewContent(view: ThreadReviewViewState): void {
 
 async function generateTodayRecap(): Promise<void> {
   if (todayGenerating || !todayView) return;
+  todayEntryGenerationAttempted = true;
   todayGenerating = true;
   todayGenerationError = null;
   renderAnalysisView();
@@ -2280,9 +2529,9 @@ function render(state: MenubarState): void {
     scopeMetaEl.textContent = todayView
       ? `${plural(todayView.diary.projectCount, 'project')} · ${plural(
           todayView.diary.threadCount,
-          'thread',
-        )} · local activity`
-      : 'Activity across your projects';
+          'conversation',
+        )}`
+      : 'Your daily recap across projects';
   } else if (activeView === 'review') {
     scopeTitleEl.textContent =
       `${reviewView?.title || session?.title || session?.projectName || 'Thread'} review`;

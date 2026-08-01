@@ -9,7 +9,7 @@ import type {
   ThreadActivityCursor,
 } from '../../dist/types/activity.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface EventRow {
   seq: number;
@@ -25,6 +25,7 @@ interface EventRow {
   occurred_at_ms: number;
   observed_at_ms: number;
   kind: ActivityEventRecord['kind'];
+  origin_kind: ActivityEventRecord['originKind'] | null;
   lifecycle: ActivityEventRecord['lifecycle'];
   severity: ActivityEventRecord['severity'];
   summary: string;
@@ -90,9 +91,9 @@ export class ActivityDatabase implements ActivityLedgerStore {
       INSERT OR IGNORE INTO activity_events (
         seq, event_id, thread_key, source, session_id,
         parent_thread_key, root_thread_key, project_name, project_path, title,
-        occurred_at_ms, observed_at_ms, kind, lifecycle, severity, summary,
+        occurred_at_ms, observed_at_ms, kind, origin_kind, lifecycle, severity, summary,
         origin_id, evidence_hash, seeded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -111,6 +112,7 @@ export class ActivityDatabase implements ActivityLedgerStore {
           event.occurredAtMs,
           event.observedAtMs,
           event.kind,
+          event.originKind ?? null,
           event.lifecycle,
           event.severity,
           event.summary,
@@ -174,7 +176,7 @@ export class ActivityDatabase implements ActivityLedgerStore {
 }
 
 function initializeSchema(db: DatabaseSync): void {
-  const version = Number(db.prepare('PRAGMA user_version').get()?.['user_version'] ?? 0);
+  let version = Number(db.prepare('PRAGMA user_version').get()?.['user_version'] ?? 0);
   if (version > SCHEMA_VERSION) {
     throw new Error(`Activity database version ${version} is newer than this Aside build.`);
   }
@@ -194,6 +196,7 @@ function initializeSchema(db: DatabaseSync): void {
         occurred_at_ms INTEGER NOT NULL,
         observed_at_ms INTEGER NOT NULL,
         kind TEXT NOT NULL,
+        origin_kind TEXT,
         lifecycle TEXT NOT NULL,
         severity TEXT NOT NULL,
         summary TEXT NOT NULL,
@@ -212,8 +215,9 @@ function initializeSchema(db: DatabaseSync): void {
         viewed_through_seq INTEGER NOT NULL,
         resolved_through_seq INTEGER NOT NULL
       );
-      PRAGMA user_version = 2;
+      PRAGMA user_version = 3;
     `);
+    return;
   }
   if (version === 1) {
     // v1 advanced both cursors whenever a task was merely opened. There was no
@@ -225,6 +229,20 @@ function initializeSchema(db: DatabaseSync): void {
       db.exec(`
         UPDATE activity_threads SET resolved_through_seq = 0;
         PRAGMA user_version = 2;
+      `);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    version = 2;
+  }
+  if (version === 2) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(`
+        ALTER TABLE activity_events ADD COLUMN origin_kind TEXT;
+        PRAGMA user_version = 3;
       `);
       db.exec('COMMIT');
     } catch (error) {
@@ -249,6 +267,7 @@ function deserializeEvent(row: EventRow): ActivityEventRecord {
     occurredAtMs: row.occurred_at_ms,
     observedAtMs: row.observed_at_ms,
     kind: row.kind,
+    originKind: row.origin_kind ?? undefined,
     lifecycle: row.lifecycle,
     severity: row.severity,
     summary: row.summary,

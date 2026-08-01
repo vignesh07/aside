@@ -331,6 +331,35 @@ describe('connect and disconnect', () => {
     expect(calls.flatMap((call) => call.args)).not.toContain('logout');
   });
 
+  it('requires separate durable consent before cloud Today recaps', async () => {
+    const store = tempStore();
+    const auth = coordinatorWith(store, async (command) =>
+      signedInResult(commandProvider(command)),
+    );
+
+    await auth.connect('codex-cli');
+    expect(auth.todayRecapsEnabled('codex-cli')).toBe(false);
+    auth.allowTodayRecaps('codex-cli');
+    expect(auth.todayRecapsEnabled('codex-cli')).toBe(true);
+    expect(store.load().todayRecaps).toEqual(new Set(['codex-cli']));
+
+    await auth.disconnect('codex-cli');
+    expect(auth.todayRecapsEnabled('codex-cli')).toBe(false);
+    expect(store.load().todayRecaps.size).toBe(0);
+    expect(auth.todayRecapsEnabled('ollama')).toBe(true);
+  });
+
+  it('cannot grant Today consent before the provider is enabled', () => {
+    const auth = coordinatorWith(tempStore(), async () =>
+      signedInResult('codex-cli'),
+    );
+
+    expect(() => auth.allowTodayRecaps('codex-cli')).toThrow(
+      ProviderAuthError,
+    );
+    expect(auth.todayRecapsEnabled('codex-cli')).toBe(false);
+  });
+
   it('rejects provider names outside the fixed IPC allowlist', async () => {
     const auth = coordinatorWith(tempStore(), async () => result());
     await expect(auth.connect('openai')).rejects.toBeInstanceOf(ProviderAuthError);
@@ -414,6 +443,62 @@ describe('private atomic consent storage', () => {
         'claude-cli': false,
         ollama: true,
       },
+      todayRecaps: {
+        'codex-cli': false,
+        'claude-cli': false,
+        ollama: false,
+      },
+    });
+  });
+
+  it('loads provider access without expanding it to Today recaps', () => {
+    const store = tempStore();
+    fs.mkdirSync(path.dirname(store.location), {
+      recursive: true,
+      mode: 0o700,
+    });
+    fs.writeFileSync(
+      store.location,
+      JSON.stringify({
+        version: 1,
+        enabled: { 'codex-cli': true, 'claude-cli': false, ollama: false },
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(store.load()).toEqual({
+      enabled: new Set(['codex-cli']),
+      todayRecaps: new Set(),
+    });
+    store.setTodayRecapsEnabled('codex-cli', true);
+    expect(JSON.parse(fs.readFileSync(store.location, 'utf8'))).toMatchObject({
+      version: 1,
+      enabled: { 'codex-cli': true },
+      todayRecaps: { 'codex-cli': true },
+    });
+  });
+
+  it('never resurrects Today permission from an inconsistent disabled entry', () => {
+    const store = tempStore();
+    fs.mkdirSync(path.dirname(store.location), {
+      recursive: true,
+      mode: 0o700,
+    });
+    fs.writeFileSync(
+      store.location,
+      JSON.stringify({
+        version: 1,
+        enabled: { 'codex-cli': false },
+        todayRecaps: { 'codex-cli': true },
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(store.load().todayRecaps).toEqual(new Set());
+    store.setEnabled('codex-cli', true);
+    expect(store.load()).toEqual({
+      enabled: new Set(['codex-cli']),
+      todayRecaps: new Set(),
     });
   });
 

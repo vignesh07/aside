@@ -22,6 +22,11 @@ thread, history, and observer model remain independent from every other thread.
 
 ## The product
 
+- **Today diary.** Opening **Today** gives you an immediate local digest. After
+  a one-time permission for the selected observer, it prepares one generated
+  recap when the saved recap is missing or stale. The supporting work stays
+  grouped by project and thread, with waiting and ready-to-review states kept
+  visible.
 - **Fleet thread.** Ask across recent agents and query-relevant history.
 - **Machine-wide full-content search.** Search user prompts, agent replies,
   commands, file targets, failures, and Aside side chats across every discovered
@@ -64,11 +69,17 @@ instructed to say so rather than guess.
 
 ## Privacy boundary
 
-Aside is read-only, but an observer model still needs context to answer.
+Aside is read-only, but an observer model still needs context to answer or
+prepare a Today recap.
 
-- Only the active scope is sent: recent sessions plus a bounded,
-  query-relevant history slice for the fleet thread, or exactly one session for
-  a session side thread. The full local catalog is never stuffed into a prompt.
+- Provider-bound scope is explicit and bounded: recent sessions plus a
+  query-relevant history slice for the fleet thread, exactly one session for a
+  session side thread, or a curated set of meaningful activity from the local
+  day for Today. The full local catalog is never stuffed into a prompt.
+- Aside asks separately before Today may use a cloud observer. After that
+  permission, opening Today is the generation action. Aside does not create
+  recaps at startup or continuously as tool events arrive, and it reuses a
+  current saved recap instead of repeating the same provider call.
 - Common credential forms—private keys, provider/GitHub/Slack tokens, AWS access
   keys, JWTs, authorization headers, and generic secret assignments—are redacted
   immediately before a provider call.
@@ -79,6 +90,10 @@ Aside is read-only, but an observer model still needs context to answer.
 - Aside's own side-chat history is stored at `~/.aside/threads.json`. The
   directory is mode `0700` and the file is mode `0600`. The TUI and Mac app
   merge writes so they can run together without erasing each other's threads.
+- Normalized activity facts are stored at `~/.aside/activity.sqlite`; raw
+  transcript records are not copied into it. Generated recaps and reviews are
+  stored at `~/.aside/generated-artifacts.json`. Both are private to the local
+  user.
 - Full-content search is backed by a rebuildable local index at
   `~/.aside/search.sqlite`. Indexed text is redacted with the same common-secret
   safety net used before provider calls, and search queries never leave the
@@ -138,8 +153,10 @@ On first launch, Aside detects whether the installed Codex and Claude clients
 already have an account sign-in, but does not use either one automatically.
 Choose **Use ChatGPT** or **Use Claude** to allow that client for Aside side
 chats. **Disconnect** revokes only Aside's permission; it does not sign Codex,
-Claude Code, ChatGPT, or Claude out on the rest of the Mac. Aside stores only
-these allow/deny choices at `~/.aside/providers.json`, never a credential.
+Claude Code, ChatGPT, or Claude out on the rest of the Mac. Today asks
+separately before it may prepare cloud recaps automatically when opened.
+Aside stores only these allow/deny choices at `~/.aside/providers.json`, never
+a credential.
 
 The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
 contains the current version, filenames, byte sizes, and SHA-256 checksums.
@@ -233,6 +250,7 @@ cd menubar
 npm run bundle
 npx electron build/main.js --show
 npx electron build/main.js --capture /tmp/aside.png
+npx electron build/main.js --capture /tmp/aside-today.png --today-generated
 ```
 
 Build packages:
@@ -279,9 +297,10 @@ and both menubar TypeScript/bundle builds from a fresh checkout.
 
 ## Current status
 
-The product path is implemented: discover and tail sessions, flag likely
-attention requests, switch between fleet and per-session durable chats, keep a
-different observer model per thread, and use the same core in TUI and Mac app.
+The product path is implemented: discover and tail sessions, generate a daily
+Today recap, flag likely attention requests, switch between fleet and
+per-session durable chats, keep a different observer model per thread, and use
+the same core in TUI and Mac app.
 
 The preview DMGs are distributed from a private Railway Bucket through stable
 public download routes. The Mac app has explicit provider onboarding and

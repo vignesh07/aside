@@ -5,6 +5,10 @@ const indexHtml = fs.readFileSync(
   new URL('../menubar/index.html', import.meta.url),
   'utf8',
 );
+const renderer = fs.readFileSync(
+  new URL('../menubar/src/renderer.ts', import.meta.url),
+  'utf8',
+);
 
 describe('cloud privacy disclosure', () => {
   it('names the cloud recipient and the limit of automatic redaction on first run', () => {
@@ -22,5 +26,15 @@ describe('cloud privacy disclosure', () => {
       'Common credential patterns are redacted before indexing',
     );
     expect(indexHtml).toContain('rebuild-search-index');
+  });
+
+  it('asks before Today starts sending scoped activity automatically', () => {
+    expect(renderer).toContain('Generate recaps when you open Today');
+    expect(renderer).toContain(
+      'This sends a limited, redacted set of the day’s activity to',
+    );
+    expect(renderer).toContain(
+      'Aside stores the recap and its source links on this Mac.',
+    );
   });
 });

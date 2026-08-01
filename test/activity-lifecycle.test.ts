@@ -174,6 +174,10 @@ describe('activity ledger lifecycle and attention', () => {
       new Set([threadKey('claude', 'shared-id'), threadKey('codex', 'shared-id')]),
     );
     expect(new Set(events.map((event) => event.eventId)).size).toBe(2);
+    expect(events.map((event) => event.originKind)).toEqual([
+      'user_prompt',
+      'user_prompt',
+    ]);
     expect(ledger.getHighWaterSeq()).toBe(2);
     expect(ledger.getEvent(events[0]!.eventId)).toEqual(events[0]);
     expect(ledger.getEvent('missing')).toBeNull();

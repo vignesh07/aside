@@ -152,6 +152,36 @@ export class ProviderAuthCoordinator {
     return this.withConsent(probe, consent);
   }
 
+  /**
+   * Separate, versioned permission for Today-triggered generation. Existing
+   * side-chat consent never silently expands into automatic recap generation.
+   * Ollama is exempt because its model context never leaves this Mac.
+   */
+  todayRecapsEnabled(providerValue: string): boolean {
+    const provider = requireProvider(providerValue);
+    if (provider === 'ollama') return true;
+    const consent = this.readConsent();
+    return (
+      consent.available &&
+      consent.snapshot.enabled.has(provider) &&
+      consent.snapshot.todayRecaps.has(provider)
+    );
+  }
+
+  allowTodayRecaps(providerValue: string): void {
+    const provider = requireProvider(providerValue);
+    if (provider === 'ollama') return;
+    const consent = this.readConsent();
+    if (!consent.available || !consent.snapshot.enabled.has(provider)) {
+      throw new ProviderAuthError('consent_unavailable', provider);
+    }
+    try {
+      this.consentStore.setTodayRecapsEnabled(provider, true);
+    } catch {
+      throw new ProviderAuthError('consent_unavailable', provider);
+    }
+  }
+
   async connect(providerValue: string): Promise<ProviderAuthStatus> {
     const provider = requireProvider(providerValue);
     const consent = this.readConsent();
@@ -328,7 +358,10 @@ export class ProviderAuthCoordinator {
     try {
       return { snapshot: this.consentStore.load(), available: true };
     } catch {
-      return { snapshot: { enabled: new Set() }, available: false };
+      return {
+        snapshot: { enabled: new Set(), todayRecaps: new Set() },
+        available: false,
+      };
     }
   }
 

@@ -6,9 +6,14 @@ import type {
   TodayDiary,
   TodayProjectDiary,
   TodayThreadDiary,
+  TodayThreadDigest,
   TodayThreadMember,
 } from '../types/today.js';
 import type { SessionSource } from '../types/session.js';
+import {
+  curateNarrativeActivity,
+  latestNarrativeSummary,
+} from './activity-narrative.js';
 
 const SEARCH_RADIUS_MS = 48 * 60 * 60_000;
 const WORK_KINDS = new Set<ActivityEventRecord['kind']>([
@@ -114,6 +119,7 @@ export function buildTodayDiary(
       0,
     ),
     counts,
+    overview: todayOverview(projects.length, projects),
     lastObservedWorkAtMs: lastObservedWork(events),
     projects,
   };
@@ -198,6 +204,7 @@ function buildThread(
     memberThreadCount: memberThreadKeys.length,
     memberThreadKeys,
     counts: countFacts(events),
+    digest: threadDigest(events),
     lastObservedWorkAtMs: lastObservedWork(events),
     evidence: evidenceRefs(events),
     subagents,
@@ -218,9 +225,89 @@ function buildMember(
     title: latest.title || 'Untitled thread',
     isRoot: threadKey === rootKey,
     counts: countFacts(events),
+    digest: threadDigest(events),
     lastObservedWorkAtMs: lastObservedWork(events),
     evidence: evidenceRefs(events),
   };
+}
+
+function threadDigest(
+  events: ReadonlyArray<ActivityEventRecord>,
+): TodayThreadDigest {
+  const ordered = [...events].sort(compareSequence);
+  const narrative = curateNarrativeActivity(ordered);
+  // Low-level tool bookkeeping can arrive after a terminal or blocked event.
+  // Prefer the latest user-visible narrative signal so that a completed tool
+  // cannot accidentally clear a genuine "waiting for you" state.
+  const phase = narrative.at(-1) ??
+    [...ordered].reverse().find((event) => event.kind !== 'tool_warning');
+  let state: TodayThreadDigest['state'] = 'active';
+  if (phase?.kind === 'input_requested') state = 'waiting';
+  else if (phase?.kind === 'turn_completed') state = 'ready';
+  else if (phase?.kind === 'turn_failed') state = 'failed';
+  else if (phase?.kind === 'turn_interrupted') state = 'interrupted';
+  return {
+    state,
+    summary: latestNarrativeSummary(ordered),
+    occurredAtMs: phase?.occurredAtMs ?? null,
+  };
+}
+
+function todayOverview(
+  projectCount: number,
+  projects: ReadonlyArray<TodayProjectDiary>,
+): string {
+  const threadCount = projects.reduce(
+    (total, project) => total + project.threadCount,
+    0,
+  );
+  if (threadCount === 0) {
+    return 'No agent work has been recorded today yet.';
+  }
+  const scope =
+    `${pluralWord(threadCount, 'conversation')} across ` +
+    pluralWord(projectCount, 'project');
+  const states = [...projects.values()]
+    .flatMap((project) => project.threads)
+    .map((thread) => thread.digest.state);
+  const waitingCount = states.filter((state) => state === 'waiting').length;
+  const readyCount = states.filter((state) => state === 'ready').length;
+  const failedCount = states.filter((state) => state === 'failed').length;
+  const interruptedCount = states.filter(
+    (state) => state === 'interrupted',
+  ).length;
+  const signals: string[] = [];
+  if (waitingCount > 0) {
+    signals.push(
+      waitingCount === 1
+        ? '1 is waiting for you.'
+        : `${waitingCount} are waiting for you.`,
+    );
+  }
+  if (readyCount > 0) {
+    signals.push(
+      readyCount === 1
+        ? '1 is ready to review.'
+        : `${readyCount} are ready to review.`,
+    );
+  }
+  if (failedCount > 0) {
+    signals.push(`${pluralWord(failedCount, 'turn')} failed.`);
+  }
+  if (interruptedCount > 0) {
+    signals.push(
+      `${pluralWord(interruptedCount, 'turn')} ${
+        interruptedCount === 1 ? 'was' : 'were'
+      } interrupted.`,
+    );
+  }
+  return signals.length > 0
+    ? `Aside followed ${scope} today. ${signals.join(' ')}`
+    : `Aside followed ${scope} today.`;
+}
+
+function pluralWord(value: number, singular: string): string {
+  return `${value} ${value === 1 ? singular : `${singular}s`}`;
 }
 
 export function activityEvidenceRef(

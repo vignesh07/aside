@@ -345,8 +345,102 @@ export default function Home() {
         </div>
 
         <div className="feature-sequence">
-          <article className="feature-row reveal">
+          <article className="feature-row today-feature-row reveal" id="today">
             <div className="feature-index">01</div>
+            <div className="feature-copy">
+              <p className="eyebrow">A clear read on the day</p>
+              <h3>Open Today. Get the day&apos;s recap.</h3>
+              <p>
+                Open Today and Aside prepares a concise recap from the work
+                your agents recorded that day. Projects and threads sit
+                underneath it, with waiting and ready-to-review states easy to
+                scan.
+              </p>
+              <p className="feature-note">
+                You choose whether Today can send a limited, redacted set of
+                relevant activity to a cloud model. The recap and its evidence
+                links are saved locally on your Mac.
+              </p>
+            </div>
+            <div
+              className="feature-visual today-feature-visual"
+              aria-hidden="true"
+            >
+              <div className="today-visual-titlebar">
+                <div>
+                  <span className="today-visual-mark">a</span>
+                  <strong>Today</strong>
+                </div>
+                <small>Friday, July 31</small>
+              </div>
+
+              <div className="today-visual-body">
+                <section className="today-recap-card">
+                  <div className="today-recap-heading">
+                    <span>Daily recap</span>
+                    <small>Generated on open · 9:41 AM</small>
+                  </div>
+                  <p>
+                    Release work moved forward in Aside. The Today view is
+                    integrated and the latest signed build is ready to review.
+                    Northstar is waiting on a rollback choice before its
+                    migration can continue.
+                  </p>
+                  <div className="today-evidence-links">
+                    <span>[1] Aside</span>
+                    <span>[2] Northstar</span>
+                  </div>
+                </section>
+
+                <div className="today-project-group">
+                  <div className="today-project-heading">
+                    <span>aside</span>
+                    <small>2 threads</small>
+                  </div>
+                  <div className="today-thread-row">
+                    <span className="today-thread-glyph">X</span>
+                    <span className="today-thread-copy">
+                      <strong>Polish the Today view</strong>
+                      <small>Latest turn ended 12m ago</small>
+                    </span>
+                    <span className="today-state ready">Ready to review</span>
+                  </div>
+                  <div className="today-thread-row">
+                    <span className="today-thread-glyph">C</span>
+                    <span className="today-thread-copy">
+                      <strong>Prepare the release</strong>
+                      <small>Checking the signed build</small>
+                    </span>
+                    <span className="today-state active">Active</span>
+                  </div>
+                </div>
+
+                <div className="today-project-group compact">
+                  <div className="today-project-heading">
+                    <span>northstar</span>
+                    <small>1 thread</small>
+                  </div>
+                  <div className="today-thread-row">
+                    <span className="today-thread-glyph">C</span>
+                    <span className="today-thread-copy">
+                      <strong>Review the migration</strong>
+                      <small>Choose the rollback policy · 4m</small>
+                    </span>
+                    <span className="today-state waiting">Waiting for you</span>
+                  </div>
+                </div>
+
+                <div className="today-privacy-line">
+                  <span aria-hidden="true">●</span>
+                  Scoped and redacted for cloud generation · recap stored
+                  locally
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article className="feature-row reveal">
+            <div className="feature-index">02</div>
             <div className="feature-copy">
               <p className="eyebrow">Search the work, not just the title</p>
               <h3>Find the thread from what happened inside it.</h3>
@@ -392,7 +486,7 @@ export default function Home() {
           </article>
 
           <article className="feature-row flip reveal">
-            <div className="feature-index">02</div>
+            <div className="feature-index">03</div>
             <div className="feature-copy">
               <p className="eyebrow">Read is not resolved</p>
               <h3>Opening a thread doesn&apos;t make it done.</h3>
@@ -433,7 +527,7 @@ export default function Home() {
           </article>
 
           <article className="feature-row reveal">
-            <div className="feature-index">03</div>
+            <div className="feature-index">04</div>
             <div className="feature-copy">
               <p className="eyebrow">One session. One side chat.</p>
               <h3>The second conversation persists.</h3>

@@ -139,6 +139,8 @@ describe('buildTodayDiary', () => {
       projectCount: 2,
       threadCount: 2,
       memberThreadCount: 3,
+      overview:
+        'Aside followed 2 conversations across 2 projects today. 1 is waiting for you. 1 turn failed.',
       counts: {
         eventCount: 6,
         waitingCount: 1,
@@ -189,6 +191,11 @@ describe('buildTodayDiary', () => {
       threadKey: childKey,
       parentThreadKey: rootKey,
       isRoot: false,
+      digest: {
+        state: 'waiting',
+        summary: '',
+        occurredAtMs: Date.parse('2026-03-08T13:00:00.000Z'),
+      },
       counts: {
         eventCount: 3,
         waitingCount: 1,
@@ -245,6 +252,58 @@ describe('buildTodayDiary', () => {
     expect(Object.hasOwn(thread, 'successful')).toBe(false);
     expect(Object.hasOwn(thread, 'outcome')).toBe(false);
     expect(JSON.stringify(thread).toLowerCase()).not.toContain('succeeded');
+  });
+
+  it('uses meaningful prose and preserves a waiting state after tool noise', () => {
+    const diary = buildTodayDiary(
+      [
+        event('prompt1', 'prompt', '2026-03-08T09:00:00.000Z', {
+          originKind: 'user_prompt',
+          summary: 'Prepare the Today feature for release.',
+        }),
+        event('prose2', 'progress', '2026-03-08T10:00:00.000Z', {
+          originKind: 'assistant_text',
+          summary: 'The generated recap now leads the page.',
+        }),
+        event('wait3', 'input_requested', '2026-03-08T11:00:00.000Z', {
+          originKind: 'needs_input',
+          summary: 'Approve access to the signing key.',
+        }),
+        event('tool4', 'progress', '2026-03-08T12:00:00.000Z', {
+          originKind: 'tool_result_ok',
+          summary: 'exec_command completed',
+        }),
+      ],
+      { nowMs, timeZone: LA },
+    );
+
+    expect(diary.projects[0]?.threads[0]?.digest).toEqual({
+      state: 'waiting',
+      summary: 'The generated recap now leads the page.',
+      occurredAtMs: Date.parse('2026-03-08T11:00:00.000Z'),
+    });
+  });
+
+  it('uses sequence rather than vendor time for the current thread state', () => {
+    const diary = buildTodayDiary(
+      [
+        event('ready1', 'turn_completed', '2026-03-08T12:00:00.000Z', {
+          seq: 1,
+          originKind: 'turn_complete',
+        }),
+        event('wait2', 'input_requested', '2026-03-08T11:00:00.000Z', {
+          seq: 2,
+          observedAtMs: Date.parse('2026-03-08T13:00:00.000Z'),
+          originKind: 'needs_input',
+          summary: 'Approve the release?',
+        }),
+      ],
+      { nowMs, timeZone: LA },
+    );
+
+    expect(diary.projects[0]?.threads[0]?.digest.state).toBe('waiting');
+    expect(diary.overview).toContain('1 is waiting for you.');
+    expect(diary.overview).not.toContain('ready to review');
   });
 });
 

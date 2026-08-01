@@ -33,6 +33,7 @@ function event(overrides: Partial<ActivityEventRecord> = {}): ActivityEventRecor
     occurredAtMs: 1_700_000_000_000,
     observedAtMs: 1_700_000_000_100,
     kind: 'turn_completed',
+    originKind: 'turn_complete',
     lifecycle: 'terminal',
     severity: 'info',
     summary: 'Latest turn ended',
@@ -104,6 +105,27 @@ describe('ActivityDatabase', () => {
         viewed_through_seq INTEGER NOT NULL,
         resolved_through_seq INTEGER NOT NULL
       );
+      CREATE TABLE activity_events (
+        seq INTEGER NOT NULL UNIQUE,
+        event_id TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        parent_thread_key TEXT,
+        root_thread_key TEXT,
+        project_name TEXT NOT NULL,
+        project_path TEXT NOT NULL,
+        title TEXT NOT NULL,
+        occurred_at_ms INTEGER NOT NULL,
+        observed_at_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        lifecycle TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        origin_id TEXT,
+        evidence_hash TEXT NOT NULL,
+        seeded INTEGER NOT NULL CHECK (seeded IN (0, 1))
+      );
       INSERT INTO activity_threads VALUES ('codex:legacy', 100, 42, 42);
       PRAGMA user_version = 1;
     `);
@@ -112,7 +134,12 @@ describe('ActivityDatabase', () => {
     const migrated = new ActivityDatabase(location);
     migrated.close();
     const check = new DatabaseSync(location);
-    expect(check.prepare('PRAGMA user_version').get()?.['user_version']).toBe(2);
+    expect(check.prepare('PRAGMA user_version').get()?.['user_version']).toBe(3);
+    expect(
+      check
+        .prepare("SELECT name FROM pragma_table_info('activity_events') WHERE name = 'origin_kind'")
+        .get(),
+    ).toEqual({ name: 'origin_kind' });
     expect(
       check
         .prepare(

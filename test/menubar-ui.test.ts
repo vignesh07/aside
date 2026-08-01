@@ -9,6 +9,18 @@ const renderer = fs.readFileSync(
   new URL('../menubar/src/renderer.ts', import.meta.url),
   'utf8',
 );
+const main = fs.readFileSync(
+  new URL('../menubar/src/main.ts', import.meta.url),
+  'utf8',
+);
+const preload = fs.readFileSync(
+  new URL('../menubar/preload.cjs', import.meta.url),
+  'utf8',
+);
+const todayAuthorization = fs.readFileSync(
+  new URL('../menubar/src/today-authorization.ts', import.meta.url),
+  'utf8',
+);
 
 describe('menubar product surfaces', () => {
   it('keeps account management global instead of duplicating it in the composer', () => {
@@ -65,12 +77,47 @@ describe('menubar product surfaces', () => {
     expect(renderer).toContain("composerShellEl.hidden = activeView !== 'thread'");
   });
 
-  it('runs generated analysis only from named user actions', () => {
-    expect(renderer).toContain("buttonId: 'write-recap'");
-    expect(renderer).toContain("buttonId: 'write-review'");
+  it('builds Today as an automatic diary instead of a writing surface', () => {
+    const todayRenderer = renderer.slice(
+      renderer.indexOf('function renderTodayContent'),
+      renderer.indexOf('function renderReviewContent'),
+    );
+    const diaryRowRenderer = renderer.slice(
+      renderer.indexOf('function makeThreadDiaryRow'),
+      renderer.indexOf('function appendTodayProject'),
+    );
+    expect(renderer).toContain('todayEntryGenerationAttempted = true');
+    expect(renderer).toContain('shouldGenerateTodayOnEntry');
+    expect(renderer).toContain('eventCount: todayView.narrativeEventCount');
+    expect(todayRenderer).toContain(
+      'view.artifact || view.narrativeEventCount > 0',
+    );
+    expect(renderer).toContain("buttonId: 'update-today-recap'");
+    expect(renderer).toContain("buttonId: 'generate-review'");
     expect(renderer).toContain('window.aside.generateTodayRecap()');
     expect(renderer).toContain(
       'window.aside.generateThreadReview(threadId, source)',
+    );
+    expect(todayRenderer).toContain("title: 'Daily recap'");
+    expect(renderer).toContain("'Needs attention'");
+    expect(todayRenderer).not.toContain("'Events'");
+    expect(diaryRowRenderer).not.toContain('makeEvidenceControl');
+    expect(renderer).not.toContain('Write recap');
+    expect(renderer).not.toContain('Write review');
+    expect(indexHtml).toContain('a cloud model or open Today');
+  });
+
+  it('requires a separate durable permission before automatic cloud recaps', () => {
+    expect(renderer).toContain('Generate recaps when you open Today');
+    expect(renderer).toContain('Allow Today recaps');
+    expect(renderer).toContain('consentGranted:');
+    expect(renderer).toContain('window.aside.allowTodayGeneration(provider)');
+    expect(preload).toContain("'aside:today:consent:get'");
+    expect(preload).toContain("'aside:today:consent:allow'");
+    expect(main).toContain('providerAuth.todayRecapsEnabled(provider)');
+    expect(main).toContain('runAuthorizedTodayRecap(');
+    expect(todayAuthorization).toContain(
+      "throw new Error('Allow Today recaps before generating.')",
     );
   });
 

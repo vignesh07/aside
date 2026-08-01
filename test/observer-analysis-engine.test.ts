@@ -61,7 +61,7 @@ describe('ObserverAnalysisEngine', () => {
         evidence: ['activity:event-1', 'activity:event-2'],
       },
       highlights: [{
-        text: 'A test command was observed.',
+        text: 'Verification work moved forward.',
         evidence: ['activity:event-1'],
       }],
       risks: [],
@@ -93,6 +93,8 @@ describe('ObserverAnalysisEngine', () => {
       evidenceIds: ['event-1', 'event-2'],
     });
     expect(artifact.markdown).toContain('Summary\n');
+    expect(artifact.markdown).toContain('Work and outcomes\n');
+    expect(artifact.markdown).toContain('Still open\n');
     expect(artifact.markdown).toContain('[1][2]');
     expect(complete).toHaveBeenCalledWith(
       'codex-cli',
@@ -103,8 +105,14 @@ describe('ObserverAnalysisEngine', () => {
         context: expect.stringContaining(
           '0 older events omitted by the local budget',
         ),
+        question: expect.stringContaining(
+          'user-level work that moved forward',
+        ),
         conversationId: expect.stringMatching(/^analysis:daily:/),
       }),
+    );
+    expect(complete.mock.calls[0]![1].question).toContain(
+      'Do not inventory tool calls, commands, file operations',
     );
   });
 

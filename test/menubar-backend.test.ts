@@ -619,7 +619,8 @@ describe('MenubarBackend', () => {
       artifact: null,
       artifactEvidence: [],
       artifactEvidenceMissingCount: 0,
-      newEventCount: 2,
+      narrativeEventCount: 1,
+      newEventCount: 1,
       artifactIsStale: false,
     });
     expect(today.insights.map((insight) => insight.kind)).toEqual(['waiting']);
@@ -638,6 +639,7 @@ describe('MenubarBackend', () => {
     root.source = 'codex';
     const activity = activityLedger([
       activityEvent(1, {
+        originKind: 'assistant_text',
         projectName: '/opt/private-repo',
         title: 'Edit /workspace/aside/src/main.ts',
         summary:
@@ -705,6 +707,154 @@ describe('MenubarBackend', () => {
       newEventCount: 1,
       artifactIsStale: true,
     });
+  });
+
+  it('keeps tool mechanics out of recap evidence and reuses the same narrative input', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const activity = activityLedger([
+      activityEvent(1, {
+        kind: 'prompt',
+        originKind: 'user_prompt',
+        lifecycle: 'start',
+        summary: 'Make Today a useful automatic recap.',
+      }),
+      activityEvent(2, {
+        kind: 'work_started',
+        originKind: 'tool_call',
+        summary: 'exec_command: npm test',
+      }),
+      activityEvent(3, {
+        originKind: 'tool_result_ok',
+        summary: 'exec_command completed',
+      }),
+      activityEvent(4, {
+        originKind: 'assistant_text',
+        summary: 'The recap now focuses on decisions and outcomes.',
+      }),
+    ]);
+    const artifacts = new MemoryArtifactStore();
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity,
+      artifacts,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+    const target = backend.getTodayAnalysisTarget();
+
+    await backend.generateTodayRecap(target);
+
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+    const request = analysis.generateDailyRecap.mock.calls[0]![0];
+    expect(request.evidence.evidenceIds).toEqual(['event-1', 'event-4']);
+    expect(request.evidence.text).not.toContain('exec_command');
+    expect(backend.getToday()).toMatchObject({
+      newEventCount: 0,
+      artifactIsStale: false,
+    });
+
+    await backend.generateTodayRecap(target);
+
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+    expect(artifacts.saves).toHaveLength(1);
+
+    activity.recordAgentEvent({
+      sessionId: root.id,
+      source: root.source,
+      event: {
+        kind: 'tool_call',
+        tool: 'exec_command',
+        target: 'npm run check',
+        ts: '2026-07-26T18:01:00.000Z',
+      },
+      seeded: false,
+      rawLine: JSON.stringify({ id: 'later-tool-call' }),
+      ordinal: 0,
+    });
+
+    expect(backend.getToday()).toMatchObject({
+      newEventCount: 0,
+      artifactIsStale: false,
+    });
+    await backend.generateTodayRecap(target);
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a same-watermark artifact stale when its narrative input changed', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const record = activityEvent(1, {
+      originKind: 'assistant_text',
+      summary: 'The release recap now reflects the finished Today design.',
+    });
+    const staleArtifact: GeneratedDailyRecapArtifact = {
+      id: 'old-daily-input',
+      kind: 'daily_recap',
+      day: '2026-07-26',
+      createdAt: '2026-07-26T17:00:00.000Z',
+      provider: 'codex-cli',
+      model: 'gpt-5.6-sol',
+      inputHighWaterSeq: 1,
+      inputHash: 'f'.repeat(64),
+      evidenceIds: [record.eventId],
+      markdown: 'An older recap [1]',
+    };
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity: activityLedger([record]),
+      artifacts: new MemoryArtifactStore([staleArtifact]),
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    expect(backend.getToday()).toMatchObject({
+      newEventCount: 0,
+      artifactIsStale: true,
+    });
+
+    await backend.generateTodayRecap(backend.getTodayAnalysisTarget());
+    expect(analysis.generateDailyRecap).toHaveBeenCalledTimes(1);
+    expect(backend.getToday()).toMatchObject({ artifactIsStale: false });
+  });
+
+  it('does not call a provider when Today contains only tool mechanics', async () => {
+    const root = fakeSession('root');
+    root.source = 'codex';
+    const artifacts = new MemoryArtifactStore();
+    const analysis = analysisEngine();
+    const { backend } = makeBackend([root], undefined, {
+      activity: activityLedger([
+        activityEvent(1, {
+          kind: 'work_started',
+          originKind: 'tool_call',
+          summary: 'exec_command: npm test',
+        }),
+        activityEvent(2, {
+          originKind: 'tool_result_ok',
+          summary: 'exec_command completed',
+        }),
+      ]),
+      artifacts,
+      analysis: analysis.engine,
+      now: () => ANALYSIS_NOW,
+      timeZone: 'UTC',
+    });
+    backend.refresh();
+
+    const result = await backend.generateTodayRecap(
+      backend.getTodayAnalysisTarget(),
+    );
+
+    expect(result.artifact).toBeNull();
+    expect(result.narrativeEventCount).toBe(0);
+    expect(result.newEventCount).toBe(0);
+    expect(analysis.generateDailyRecap).not.toHaveBeenCalled();
+    expect(artifacts.saves).toHaveLength(0);
   });
 
   it('coalesces duplicate Today generation clicks into one provider call', async () => {

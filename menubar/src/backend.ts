@@ -20,6 +20,7 @@ import {
   countFacts,
 } from '../../dist/core/today-diary.js';
 import { buildActivityInsights } from '../../dist/core/activity-insights.js';
+import { curateNarrativeActivity } from '../../dist/core/activity-narrative.js';
 import { packActivityEvidence } from '../../dist/core/activity-evidence-pack.js';
 import {
   FileGeneratedArtifactStore,
@@ -157,6 +158,8 @@ export interface TodayViewState {
   /** Evidence cited by the artifact and still present in today's ledger scope. */
   artifactEvidence: ActivityEvidenceRef[];
   artifactEvidenceMissingCount: number;
+  /** Curated prompt/prose/attention/terminal facts eligible for a recap. */
+  narrativeEventCount: number;
   newEventCount: number;
   artifactIsStale: boolean;
 }
@@ -414,15 +417,30 @@ export class MenubarBackend {
   ): Promise<TodayViewState> {
     const nowMs = this.now().getTime();
     const before = this.buildTodayView(nowMs);
+    const events = this.todayNarrativeEvents(before.diary);
+    const evidence = packActivityEvidence(
+      events.map(providerSafeActivityEvent),
+    );
+
+    // Entering Today is allowed to ask for a recap, but an empty narrative
+    // scope must stay a completely local view. Likewise, reopening Today with
+    // the same evidence should use its durable artifact rather than incur a
+    // duplicate provider request.
+    if (evidence.evidence.length === 0 || evidence.text.trim().length === 0) {
+      return Promise.resolve(before);
+    }
+    if (
+      before.artifact?.inputHash === evidence.inputHash &&
+      before.artifactEvidenceMissingCount === 0
+    ) {
+      return Promise.resolve(before);
+    }
+
     const scope = `daily:${before.diary.range.dateKey}`;
     this.assertAnalysisTarget(FLEET_THREAD_ID, target);
     const existing = this.analysisInFlight.get(scope);
     if (existing) return existing as Promise<TodayViewState>;
 
-    const events = this.todayEvents(before.diary);
-    const evidence = packActivityEvidence(
-      events.map(providerSafeActivityEvent),
-    );
     const task = (async () => {
       const artifact = await this.analysis.generateDailyRecap({
         day: before.diary.range.dateKey,
@@ -683,6 +701,10 @@ export class MenubarBackend {
       timeZone: this.timeZone,
     });
     const events = this.todayEvents(diary);
+    const narrativeEvents = curateNarrativeActivity(events);
+    const narrativeEvidence = packActivityEvidence(
+      narrativeEvents.map(providerSafeActivityEvent),
+    );
     const insights = buildActivityInsights(events, {
       nowMs,
       cursors: this.activity.getCursors(),
@@ -693,7 +715,11 @@ export class MenubarBackend {
     const artifactEvidenceMissingCount = artifact
       ? artifact.evidenceIds.length - artifactEvidence.length
       : 0;
-    const newEventCount = countEventsAfterArtifact(events, artifact);
+    const newEventCount = countEventsAfterArtifact(narrativeEvents, artifact);
+    const artifactInputChanged =
+      artifact !== null &&
+      narrativeEvidence.evidence.length > 0 &&
+      artifact.inputHash !== narrativeEvidence.inputHash;
     return {
       diary,
       insights,
@@ -702,10 +728,13 @@ export class MenubarBackend {
       artifact,
       artifactEvidence,
       artifactEvidenceMissingCount,
+      narrativeEventCount: narrativeEvents.length,
       newEventCount,
       artifactIsStale:
         artifact !== null &&
-        (newEventCount > 0 || artifactEvidenceMissingCount > 0),
+        (newEventCount > 0 ||
+          artifactEvidenceMissingCount > 0 ||
+          artifactInputChanged),
     };
   }
 
@@ -714,6 +743,10 @@ export class MenubarBackend {
       sinceMs: diary.range.startMs,
       untilMs: diary.range.endMs,
     });
+  }
+
+  private todayNarrativeEvents(diary: TodayDiary): ActivityEventRecord[] {
+    return curateNarrativeActivity(this.todayEvents(diary));
   }
 
   private buildThreadReviewView(

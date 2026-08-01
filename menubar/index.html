@@ -529,11 +529,25 @@
         margin: 0 auto;
         padding: 19px 0 34px;
       }
+      .today-summary {
+        padding: 3px 0 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .today-summary.has-artifact { padding-bottom: 11px; }
       .analysis-kicker {
-        margin: 0 0 11px;
+        margin: 0 0 7px;
         color: var(--secondary);
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 540;
+      }
+      .today-overview {
+        max-width: 650px;
+        margin: 0;
+        color: var(--text);
+        font-size: 15px;
+        font-weight: 450;
+        letter-spacing: -.012em;
+        line-height: 1.45;
       }
       .analysis-metrics {
         display: grid;
@@ -629,7 +643,9 @@
       .analysis-action:focus-visible,
       .evidence-row:focus-visible,
       .evidence-chip:focus-visible,
-      .diary-thread-heading:focus-visible {
+      .diary-thread-heading:focus-visible,
+      .artifact-sources > summary:focus-visible,
+      .diary-subagents-label:focus-visible {
         outline: 0;
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
       }
@@ -766,11 +782,43 @@
         line-height: 1;
       }
       .generated-section .analysis-section-heading { margin-bottom: 8px; }
+      .generated-today { padding-top: 20px; }
+      .generated-today .analysis-section-heading h2 { font-size: 13px; }
+      .today-consent {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px 22px;
+        margin-top: 13px;
+        padding: 14px 15px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-hover);
+      }
+      .today-consent-copy { min-width: 0; }
+      .today-consent h3 {
+        margin: 0 0 3px;
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 590;
+        letter-spacing: -.006em;
+      }
+      .today-consent p {
+        margin: 0;
+        color: var(--secondary);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+      .today-consent-error {
+        grid-column: 1 / -1;
+        color: var(--danger) !important;
+      }
       .artifact-meta {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 7px;
-        margin-bottom: 10px;
+        margin-bottom: 14px;
         color: var(--secondary);
         font-size: 9px;
       }
@@ -780,24 +828,64 @@
         border-left: 1px solid var(--line);
       }
       .artifact-prose {
-        padding-left: 11px;
-        border-left: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+        display: grid;
+        gap: 17px;
         color: var(--text);
+      }
+      .artifact-block h3 {
+        margin: 0 0 5px;
+        color: var(--secondary);
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: .045em;
+        text-transform: uppercase;
+      }
+      .artifact-block p,
+      .artifact-block ul {
+        margin: 0;
         font-size: 11px;
         line-height: 1.55;
-        white-space: pre-wrap;
+      }
+      .artifact-block.lead p {
+        max-width: 680px;
+        font-size: 13px;
+        letter-spacing: -.006em;
+        line-height: 1.5;
+      }
+      .artifact-block ul {
+        display: grid;
+        gap: 6px;
+        padding-left: 17px;
+      }
+      .artifact-sources {
+        margin-top: 14px;
+      }
+      .artifact-sources > summary {
+        list-style: none;
+        cursor: default;
+      }
+      .artifact-sources > summary::-webkit-details-marker { display: none; }
+      .artifact-sources > summary::before {
+        content: "›";
+        display: inline-block;
+        margin-right: 5px;
+        color: var(--tertiary);
+        transform-origin: center;
+        transition: transform .12s ease-out;
+      }
+      .artifact-sources[open] > summary::before { transform: rotate(90deg); }
+      .artifact-sources .artifact-evidence { margin: 8px 0 0 12px; }
+      .artifact-evidence .evidence-chip {
+        max-width: min(100%, 220px);
       }
       .artifact-evidence-label {
-        margin-top: 13px;
         color: var(--secondary);
         font-size: 9px;
         font-weight: 560;
-        text-transform: uppercase;
-        letter-spacing: .045em;
       }
       .artifact-missing { margin-top: 7px; }
       .diary-project {
-        padding-top: 15px;
+        padding-top: 14px;
       }
       .diary-project + .diary-project {
         margin-top: 5px;
@@ -807,7 +895,7 @@
         display: flex;
         align-items: baseline;
         gap: 10px;
-        padding-bottom: 6px;
+        padding-bottom: 7px;
       }
       .diary-project-heading h2 {
         min-width: 0;
@@ -830,7 +918,7 @@
         display: flex;
         align-items: center;
         gap: 12px;
-        padding: 9px 0 7px;
+        padding: 10px 0 4px;
         color: inherit;
         border: 0;
         background: transparent;
@@ -858,6 +946,22 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .diary-thread-copy .state-attention,
+      .diary-subagent .state-attention { color: var(--attention); }
+      .diary-thread-copy .state-danger,
+      .diary-subagent .state-danger { color: var(--danger); }
+      .diary-thread-copy .state-ready,
+      .diary-subagent .state-ready { color: var(--accent); }
+      .diary-thread-digest {
+        display: -webkit-box;
+        overflow: hidden;
+        margin: 0 52px 8px 0;
+        color: var(--secondary);
+        font-size: 10px;
+        line-height: 1.45;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
       .diary-thread-heading time {
         flex: none;
         color: var(--secondary);
@@ -865,17 +969,32 @@
         font-variant-numeric: tabular-nums;
       }
       .diary-subagents {
-        display: grid;
-        grid-template-columns: 66px minmax(0, 1fr);
-        gap: 0 8px;
-        padding: 0 0 7px 10px;
+        margin: 0 0 8px;
         color: var(--secondary);
-        border-left: 1px solid var(--line);
       }
       .diary-subagents-label {
-        padding: 4px 0;
+        width: fit-content;
+        padding: 2px 0 4px;
         color: var(--secondary);
         font-size: 9px;
+        list-style: none;
+        cursor: default;
+      }
+      .diary-subagents-label::-webkit-details-marker { display: none; }
+      .diary-subagents-label::before {
+        content: "›";
+        display: inline-block;
+        margin-right: 5px;
+        color: var(--tertiary);
+        transition: transform .12s ease-out;
+      }
+      .diary-subagents[open] > .diary-subagents-label::before {
+        transform: rotate(90deg);
+      }
+      .diary-subagent-list {
+        margin: 3px 0 3px 6px;
+        padding-left: 9px;
+        border-left: 1px solid var(--line);
       }
       .diary-subagent {
         min-width: 0;
@@ -910,7 +1029,6 @@
         font-size: 9px;
         font-variant-numeric: tabular-nums;
       }
-      .diary-evidence,
       .observed-list {
         padding: 0 0 8px 10px;
         border-left: 1px solid var(--line);
@@ -932,11 +1050,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-      .diary-more {
-        padding: 4px 5px;
-        color: var(--secondary);
-        font-size: 9px;
       }
       .observed-list {
         padding-left: 0;
@@ -1711,8 +1824,8 @@
             <div class="onboarding-eyebrow">Read-only observer</div>
             <h2>Choose how Aside answers</h2>
             <p class="onboarding-copy">
-              Your thread index and side-chat history stay on this Mac. When you ask
-              a cloud model, scoped transcript excerpts go to your selected provider.
+              Your thread index and side-chat history stay on this Mac. When you ask a cloud model or open Today,
+              scoped transcript excerpts go to your selected provider.
               Common credential patterns are redacted first, but automatic redaction
               can miss sensitive prose.
             </p>
@@ -1796,7 +1909,7 @@
           <div class="settings-section">
             <h3>Observer boundary</h3>
             <p>Aside only reads local agent session logs. It never writes to an agent session or project.</p>
-            <p>Scoped transcript excerpts go to the selected cloud provider. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
+            <p>Scoped transcript excerpts go to the selected cloud provider when you ask or open Today. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
           </div>
           <div class="settings-section">
             <h3>Thread list</h3>

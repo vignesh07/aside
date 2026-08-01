@@ -45,6 +45,7 @@ export interface TodayThreadMember {
   title: string;
   isRoot: boolean;
   counts: ActivityFactCounts;
+  digest: TodayThreadDigest;
   /** Timestamp from the latest prompt/work/progress evidence. */
   lastObservedWorkAtMs: number | null;
   evidence: ActivityEvidenceRef[];
@@ -63,6 +64,7 @@ export interface TodayThreadDiary {
   memberThreadCount: number;
   memberThreadKeys: string[];
   counts: ActivityFactCounts;
+  digest: TodayThreadDigest;
   lastObservedWorkAtMs: number | null;
   evidence: ActivityEvidenceRef[];
   subagents: TodayThreadMember[];
@@ -87,8 +89,24 @@ export interface TodayDiary {
   /** Root conversations plus their visible subagent threads. */
   memberThreadCount: number;
   counts: ActivityFactCounts;
+  /** Immediate local summary shown while a model-backed recap is unavailable. */
+  overview: string;
   lastObservedWorkAtMs: number | null;
   projects: TodayProjectDiary[];
+}
+
+export type TodayThreadState =
+  | 'active'
+  | 'waiting'
+  | 'ready'
+  | 'failed'
+  | 'interrupted';
+
+export interface TodayThreadDigest {
+  state: TodayThreadState;
+  /** Latest user-facing agent prose or prompt, never a raw tool record. */
+  summary: string;
+  occurredAtMs: number | null;
 }
 
 export type ActivityInsightKind =

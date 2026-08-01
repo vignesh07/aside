@@ -6,21 +6,27 @@ import {
   type ProviderAuthId,
 } from './provider-auth-types.js';
 
+// Keep the v1 envelope rollback-compatible with the current public build.
+// Older Aside versions ignore the optional `todayRecaps` field; if they later
+// rewrite this file, the narrower permission is safely forgotten.
 const STORE_VERSION = 1;
 const MAX_STORE_BYTES = 64 * 1024;
 
 interface StoredConsent {
   version: number;
   enabled: Partial<Record<ProviderAuthId, boolean>>;
+  todayRecaps: Partial<Record<ProviderAuthId, boolean>>;
 }
 
 export interface ProviderConsentSnapshot {
   readonly enabled: ReadonlySet<ProviderAuthId>;
+  readonly todayRecaps: ReadonlySet<ProviderAuthId>;
 }
 
 export interface ProviderConsentStore {
   load(): ProviderConsentSnapshot;
   setEnabled(provider: ProviderAuthId, enabled: boolean): void;
+  setTodayRecapsEnabled(provider: ProviderAuthId, enabled: boolean): void;
 }
 
 export type ProviderConsentStoreErrorCode =
@@ -63,7 +69,9 @@ export class FileProviderConsentStore implements ProviderConsentStore {
     try {
       stat = fs.lstatSync(this.location);
     } catch (error) {
-      if (isFsCode(error, 'ENOENT')) return { enabled: new Set() };
+      if (isFsCode(error, 'ENOENT')) {
+        return { enabled: new Set(), todayRecaps: new Set() };
+      }
       throw new ProviderConsentStoreError('unavailable');
     }
 
@@ -89,6 +97,13 @@ export class FileProviderConsentStore implements ProviderConsentStore {
       enabled: new Set(
         PROVIDER_AUTH_IDS.filter((provider) => parsed.enabled[provider] === true),
       ),
+      todayRecaps: new Set(
+        PROVIDER_AUTH_IDS.filter(
+          (provider) =>
+            parsed.enabled[provider] === true &&
+            parsed.todayRecaps[provider] === true,
+        ),
+      ),
     };
   }
 
@@ -97,16 +112,41 @@ export class FileProviderConsentStore implements ProviderConsentStore {
     // silently treated as valid state or overwritten as if nothing happened.
     const current = this.load();
     const next = new Set(current.enabled);
+    const todayRecaps = new Set(current.todayRecaps);
     if (enabled) next.add(provider);
-    else next.delete(provider);
+    else {
+      next.delete(provider);
+      todayRecaps.delete(provider);
+    }
 
+    this.save(next, todayRecaps);
+  }
+
+  setTodayRecapsEnabled(provider: ProviderAuthId, enabled: boolean): void {
+    const current = this.load();
+    if (enabled && !current.enabled.has(provider)) {
+      throw new ProviderConsentStoreError('unavailable');
+    }
+    const todayRecaps = new Set(current.todayRecaps);
+    if (enabled) todayRecaps.add(provider);
+    else todayRecaps.delete(provider);
+    this.save(new Set(current.enabled), todayRecaps);
+  }
+
+  private save(
+    enabled: ReadonlySet<ProviderAuthId>,
+    todayRecaps: ReadonlySet<ProviderAuthId>,
+  ): void {
     const dir = path.dirname(this.location);
     this.ensurePrivateDirectory(dir);
 
     const state: StoredConsent = {
       version: STORE_VERSION,
       enabled: Object.fromEntries(
-        PROVIDER_AUTH_IDS.map((id) => [id, next.has(id)]),
+        PROVIDER_AUTH_IDS.map((id) => [id, enabled.has(id)]),
+      ) as Record<ProviderAuthId, boolean>,
+      todayRecaps: Object.fromEntries(
+        PROVIDER_AUTH_IDS.map((id) => [id, todayRecaps.has(id)]),
       ) as Record<ProviderAuthId, boolean>,
     };
 
@@ -186,7 +226,10 @@ function parseStoredConsent(raw: string): StoredConsent {
     throw new ProviderConsentStoreError('corrupt');
   }
 
-  if (!isPlainObject(value) || value['version'] !== STORE_VERSION) {
+  if (
+    !isPlainObject(value) ||
+    value['version'] !== STORE_VERSION
+  ) {
     throw new ProviderConsentStoreError('corrupt');
   }
   const enabled = value['enabled'];
@@ -199,8 +242,22 @@ function parseStoredConsent(raw: string): StoredConsent {
       throw new ProviderConsentStoreError('corrupt');
     }
   }
+  const todayRecaps = value['todayRecaps'] ?? {};
+  if (!isPlainObject(todayRecaps)) {
+    throw new ProviderConsentStoreError('corrupt');
+  }
+  for (const provider of PROVIDER_AUTH_IDS) {
+    const setting = todayRecaps[provider];
+    if (setting !== undefined && typeof setting !== 'boolean') {
+      throw new ProviderConsentStoreError('corrupt');
+    }
+  }
 
-  return value as unknown as StoredConsent;
+  return {
+    version: STORE_VERSION,
+    enabled: enabled as StoredConsent['enabled'],
+    todayRecaps: todayRecaps as StoredConsent['todayRecaps'],
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -96,7 +96,20 @@ export class ObserverAnalysisEngine implements ObserverAnalysisEngineLike {
       request.model,
       request.evidence,
       conversationId,
-      `Write a factual recap for local day ${request.day}.
+      `Create Aside's automatic recap for local day ${request.day}.
+
+Write for the person overseeing this work, not for an engineer inspecting an
+event log. The recap should read like a concise work diary:
+- Lead with the user-level work that moved forward across projects and threads.
+- Highlight decisions made or requested, and outcomes only when the evidence
+  explicitly establishes them.
+- Call out blockers, failures, unanswered requests, and materially unclear
+  outcomes in risks.
+- Use next steps only for work that remains open or needs the user's attention.
+- Do not inventory tool calls, commands, file operations, or implementation
+  mechanics. Mention one only when it directly explains a user-visible outcome
+  or blocker.
+- Prefer a few specific, connected observations over a chronological event list.
 
 Return this JSON shape:
 {
@@ -314,9 +327,9 @@ function formatDaily(
   return formatSections(
     [
       ['Summary', [analysis.summary]],
-      ['Highlights', analysis.highlights],
-      ['Worth a look', analysis.risks],
-      ['Possible next steps', analysis.nextSteps],
+      ['Work and outcomes', analysis.highlights],
+      ['Waiting or blocked', analysis.risks],
+      ['Still open', analysis.nextSteps],
     ],
     pack,
   );

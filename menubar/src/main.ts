@@ -36,6 +36,10 @@ import {
   validatedProviderId,
 } from './auth-guard.js';
 import {
+  grantTodayRecapPermission,
+  runAuthorizedTodayRecap,
+} from './today-authorization.js';
+import {
   disposeClaudeSession,
 } from '../../dist/core/providers/index.js';
 import {
@@ -82,6 +86,13 @@ import {
 } from '../../dist/core/activity-ledger.js';
 import { createThreadSearchService } from './search-coordinator.js';
 import { feedbackIssueUrl } from './feedback-link.js';
+import {
+  captureProviderAuthCoordinator,
+  captureSideChatService,
+  generatedTodayCaptureFixture,
+  TODAY_CAPTURE_MODEL,
+  TODAY_CAPTURE_PROVIDER,
+} from './capture-fixtures.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const UPDATE_INITIAL_DELAY_MS = 15_000;
@@ -136,6 +147,8 @@ function integerFlagValue(name: string): number | null {
  *   --attention        render representative attention states
  *   --attention-view   render and open the attention inbox
  *   --today            open the local Today diary
+ *   --today-generated  open a deterministic generated Today recap
+ *   --today-permission open deterministic Today before cloud permission
  *   --review           open the selected thread review
  *   --width <px>       override the window width for responsive QA
  *   --height <px>      override the window height for responsive QA
@@ -157,7 +170,12 @@ const CAPTURE_KEEP_OPEN = process.argv.includes('--keep-open');
 const CAPTURE_ATTENTION_VIEW = process.argv.includes('--attention-view');
 const CAPTURE_ATTENTION =
   process.argv.includes('--attention') || CAPTURE_ATTENTION_VIEW;
-const CAPTURE_TODAY = process.argv.includes('--today');
+const CAPTURE_TODAY_GENERATED = process.argv.includes('--today-generated');
+const CAPTURE_TODAY_PERMISSION = process.argv.includes('--today-permission');
+const CAPTURE_TODAY_FIXTURE =
+  CAPTURE_TODAY_GENERATED || CAPTURE_TODAY_PERMISSION;
+const CAPTURE_TODAY =
+  process.argv.includes('--today') || CAPTURE_TODAY_FIXTURE;
 const CAPTURE_REVIEW = process.argv.includes('--review');
 const CAPTURE_THEME = flagValue('--theme');
 const DEV_WINDOW_SIZE = parseWindowSize({
@@ -640,23 +658,55 @@ app.whenReady().then(() => {
     ),
   );
 
+  const todayCapture =
+    CAPTURE_PATH && CAPTURE_TODAY_FIXTURE
+      ? generatedTodayCaptureFixture()
+      : null;
   backend = new MenubarBackend(
-    { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
+    todayCapture
+      ? {
+          provider: TODAY_CAPTURE_PROVIDER,
+          model: TODAY_CAPTURE_MODEL,
+        }
+      : { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
     handleBackendUpdate,
     {
-      search: createThreadSearchService(),
+      scan: todayCapture
+        ? () => ({ sessions: todayCapture.sessions, jsonlPaths: new Map() })
+        : undefined,
+      service: todayCapture ? captureSideChatService() : undefined,
+      search: todayCapture ? undefined : createThreadSearchService(),
       activity: CAPTURE_PATH
-        ? new ActivityLedger(new InMemoryActivityLedgerStore())
+        ? new ActivityLedger(
+            new InMemoryActivityLedgerStore(
+              todayCapture?.activity ?? { events: [], cursors: [] },
+            ),
+            todayCapture
+              ? () => new Date(todayCapture.now)
+              : undefined,
+          )
         : undefined,
       // Screenshot QA must never read or replace the user's private generated
       // recaps, even when the local activity fixture happens to match a day.
       artifacts: CAPTURE_PATH
-        ? { load: () => [], save: () => {} }
+        ? {
+            load: () =>
+              CAPTURE_TODAY_PERMISSION
+                ? []
+                : todayCapture?.artifacts ?? [],
+            save: () => {},
+          }
         : undefined,
+      now: todayCapture
+        ? () => new Date(todayCapture.now)
+        : undefined,
+      timeZone: todayCapture?.timeZone,
     },
   );
   backend.start();
-  providerAuth = new ProviderAuthCoordinator();
+  providerAuth = todayCapture
+    ? captureProviderAuthCoordinator(!CAPTURE_TODAY_PERMISSION)
+    : new ProviderAuthCoordinator();
   appUpdates = new AppUpdateController({
     updater: autoUpdater as unknown as AutoUpdaterLike,
     currentVersion: app.getVersion(),
@@ -684,15 +734,35 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('aside:today:get', () => backend?.getToday());
+  ipcMain.handle('aside:today:consent:get', (_e, value: unknown) => {
+    const provider = validatedProvider(value);
+    if (!backend || !providerAuth || !provider) return false;
+    const target = backend.getTodayAnalysisTarget();
+    if (provider !== target.provider) return false;
+    return providerAuth.todayRecapsEnabled(provider);
+  });
+  ipcMain.handle(
+    'aside:today:consent:allow',
+    async (_e, value: unknown) => {
+      if (!backend) {
+        throw new Error('That Today recap provider is not supported.');
+      }
+      const target = backend.getTodayAnalysisTarget();
+      return grantTodayRecapPermission(value, target, providerAuth);
+    },
+  );
   ipcMain.handle('aside:today:generate', async () => {
     if (!backend) throw new Error('Aside is still starting.');
+    // Generated-state screenshots are entirely fixture-backed. If renderer
+    // behavior requests a refresh, return that state without touching auth or
+    // starting an observer model.
+    if (CAPTURE_PATH && CAPTURE_TODAY_GENERATED) return backend.getToday();
     const target = backend.getTodayAnalysisTarget();
-    await requireUsableProvider(
-      target.provider,
+    return runAuthorizedTodayRecap(
+      target,
       providerAuth,
-      'Connect the Today recap provider before generating.',
+      (authorizedTarget) => backend!.generateTodayRecap(authorizedTarget),
     );
-    return backend.generateTodayRecap(target);
   });
   ipcMain.handle(
     'aside:review:get',

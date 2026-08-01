@@ -55,6 +55,18 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Subagent work stays attached:/);
   assert.match(html, /Codex and Claude\s+Code subagents fold beneath/);
   assert.match(html, /Search queries never leave your machine\./);
+  assert.match(html, /Open Today\. Get the day(?:&#x27;|')s recap\./);
+  assert.match(
+    html,
+    /Open Today and Aside prepares a concise recap from the work/,
+  );
+  assert.match(html, /Projects and threads sit underneath it/);
+  assert.match(html, /Ready to review/);
+  assert.match(html, /Waiting for you/);
+  assert.match(html, /Generated on open · 9:41 AM/);
+  assert.match(html, /You choose whether Today can send/);
+  assert.match(html, /limited, redacted set of relevant activity/);
+  assert.match(html, /recap and its evidence links are saved locally/);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
   assert.match(html, /Open source · MIT/);
   assert.match(html, /Aside is open source\./);

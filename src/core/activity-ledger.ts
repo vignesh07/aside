@@ -586,6 +586,7 @@ function normalizeEvent(
     occurredAtMs,
     observedAtMs,
     kind: normalized.kind,
+    originKind: input.event.kind,
     lifecycle: normalized.lifecycle,
     severity: normalized.severity,
     summary: clamp(normalized.summary),

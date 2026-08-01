@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('aside', {
   selectThread: (threadId) => ipcRenderer.invoke('aside:select-thread', threadId),
   resolveAttention: (threadId) => ipcRenderer.invoke('aside:attention:resolve', threadId),
   getToday: () => ipcRenderer.invoke('aside:today:get'),
+  getTodayGenerationConsent: (provider) =>
+    ipcRenderer.invoke('aside:today:consent:get', provider),
+  allowTodayGeneration: (provider) =>
+    ipcRenderer.invoke('aside:today:consent:allow', provider),
   generateTodayRecap: () => ipcRenderer.invoke('aside:today:generate'),
   getThreadReview: (threadId, source) =>
     ipcRenderer.invoke('aside:review:get', threadId, source),
