@@ -13,6 +13,11 @@ import type {
   ThreadSearchResult,
   ThreadSearchService,
 } from './search-types.js';
+import { emptyUsageSnapshot } from './usage-analytics.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 
 type WorkerResponse = { type: 'status'; status: SearchIndexStatus };
 
@@ -104,6 +109,11 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     return this.reader.search(query, limit);
   }
 
+  usage(query: UsageAnalyticsQuery): UsageAnalyticsSnapshot {
+    if (this.disposed) return emptyUsageSnapshot(query);
+    return this.reader.usage(query);
+  }
+
   rebuild(): void {
     if (this.disposed) return;
     const sessions = this.lastSessions;
@@ -154,6 +164,9 @@ class UnavailableThreadSearchService implements ThreadSearchService {
   search(): Promise<ThreadSearchResult[]> {
     return Promise.resolve([]);
   }
+  usage(query: UsageAnalyticsQuery): UsageAnalyticsSnapshot {
+    return emptyUsageSnapshot(query);
+  }
   rebuild(): void {}
   getStatus(): SearchIndexStatus {
     return this.status;
@@ -187,6 +200,30 @@ export function createThreadSearchService(
       );
     }
   }
+}
+
+/** Capture-only reader that renders an already-seeded database without
+ * launching an indexing worker or touching source transcripts. */
+export function createReadOnlyThreadSearchService(
+  databasePath: string,
+): ThreadSearchService {
+  const reader = new ThreadSearchReader(databasePath);
+  return {
+    syncSessions() {},
+    syncSideChats() {},
+    search: async (query, limit) => reader.search(query, limit),
+    usage: (query) => reader.usage(query),
+    rebuild() {},
+    getStatus: () => ({
+      phase: 'ready',
+      indexedThreads: 0,
+      totalThreads: 0,
+      indexedBytes: 0,
+      totalBytes: 0,
+    }),
+    onStatus: () => () => {},
+    dispose: () => reader.close(),
+  };
 }
 
 function quarantineSearchDatabase(databasePath: string): void {

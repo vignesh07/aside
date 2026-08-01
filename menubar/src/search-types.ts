@@ -1,4 +1,8 @@
 import type { SessionSource } from '../../dist/types/session.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 
 export interface IndexableThread {
   sessionId: string;
@@ -65,6 +69,7 @@ export interface ThreadSearchService {
   syncSessions(sessions: IndexableThread[]): void;
   syncSideChats(chats: IndexableSideChat[]): void;
   search(query: string, limit?: number): Promise<ThreadSearchResult[]>;
+  usage?(query: UsageAnalyticsQuery): UsageAnalyticsSnapshot;
   rebuild(): void;
   getStatus(): SearchIndexStatus;
   onStatus(listener: () => void): () => void;

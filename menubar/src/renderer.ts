@@ -22,6 +22,11 @@ import type {
   ThreadSearchResult,
 } from './search-types.js';
 import type { ThreadAttentionKind } from '../../dist/types/activity.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+  UsageDay,
+} from './usage-types.js';
 import {
   canDisconnectProvider,
   canAskWithProvider,
@@ -37,6 +42,7 @@ interface AsideBridge {
   getState(): Promise<MenubarState>;
   searchThreads(query: string): Promise<ThreadSearchResult[]>;
   rebuildSearchIndex(): Promise<void>;
+  getUsage(query: UsageAnalyticsQuery): Promise<UsageAnalyticsSnapshot>;
   selectThread(threadId: string): Promise<void>;
   resolveAttention(threadId: string): Promise<void>;
   ask(question: string): Promise<void>;
@@ -97,6 +103,26 @@ const settingsEl = document.getElementById('settings') as HTMLDivElement;
 const settingsButtonEl = document.getElementById('settings-button') as HTMLButtonElement;
 const settingsCloseEl = document.getElementById('settings-close') as HTMLButtonElement;
 const settingsProvidersEl = document.getElementById('settings-providers') as HTMLDivElement;
+const settingsTitleEl = document.getElementById('settings-title') as HTMLHeadingElement;
+const settingsViewEl = document.getElementById('settings-view') as HTMLDivElement;
+const openUsageEl = document.getElementById('open-usage') as HTMLButtonElement;
+const usageViewEl = document.getElementById('usage-view') as HTMLDivElement;
+const usageStatusEl = document.getElementById('usage-status') as HTMLDivElement;
+const usageContentEl = document.getElementById('usage-content') as HTMLDivElement;
+const usageProviderFiltersEl = document.getElementById('usage-provider-filters') as HTMLDivElement;
+const usageModelFilterEl = document.getElementById('usage-model-filter') as HTMLSelectElement;
+const usageTotalTokensEl = document.getElementById('usage-total-tokens') as HTMLElement;
+const usageEstimatedCostEl = document.getElementById('usage-estimated-cost') as HTMLElement;
+const usageEstimatedSavingsEl = document.getElementById('usage-estimated-savings') as HTMLElement;
+const usageActiveDaysEl = document.getElementById('usage-active-days') as HTMLElement;
+const usageStreaksEl = document.getElementById('usage-streaks') as HTMLSpanElement;
+const usageChartEl = document.getElementById('usage-chart') as HTMLDivElement;
+const usageMonthsEl = document.getElementById('usage-months') as HTMLDivElement;
+const usageGridEl = document.getElementById('usage-grid') as HTMLDivElement;
+const usagePeakEl = document.getElementById('usage-peak') as HTMLSpanElement;
+const usagePricedCoverageEl = document.getElementById('usage-priced-coverage') as HTMLSpanElement;
+const usageBreakdownEl = document.getElementById('usage-breakdown') as HTMLDivElement;
+const usageNoteEl = document.getElementById('usage-note') as HTMLParagraphElement;
 const openDataEl = document.getElementById('open-data') as HTMLButtonElement;
 const quitEl = document.getElementById('quit') as HTMLButtonElement;
 const storagePathEl = document.getElementById('storage-path') as HTMLSpanElement;
@@ -155,6 +181,13 @@ let pendingDisconnectId: ProviderAuthId | null = null;
 let lastProviderSurfaceKey = '';
 let appUpdateStatus: AppUpdateStatus | null = null;
 let keepOpen = false;
+let usageOpen = false;
+let usageRangeDays: 90 | 365 = 365;
+let usageProviders = new Set<string>();
+let usageModel: { provider: string; model: string } | null = null;
+let usageSequence = 0;
+let usageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let usageIndexSignature = '';
 
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
@@ -1367,22 +1400,332 @@ function render(state: MenubarState): void {
   if (firstRun) modelsEl.disabled = true;
   renderMessages(state);
   renderProviderSurfaces();
+  const nextUsageIndexSignature =
+    `${state.searchIndex.phase}:${state.searchIndex.indexedBytes}:${state.searchIndex.totalBytes}`;
+  if (usageOpen && nextUsageIndexSignature !== usageIndexSignature) {
+    usageIndexSignature = nextUsageIndexSignature;
+    if (usageRefreshTimer) clearTimeout(usageRefreshTimer);
+    usageRefreshTimer = setTimeout(() => {
+      usageRefreshTimer = null;
+      if (usageOpen) void loadUsage();
+    }, 600);
+  }
 }
 
 function showSettings(): void {
   if (!accountsPopoverEl.hidden) {
     accountsPopoverEl.hidden = true;
     accountsButtonEl.setAttribute('aria-expanded', 'false');
-    pendingDisconnectId = null;
-    lastProviderSurfaceKey = '';
+      pendingDisconnectId = null;
+      lastProviderSurfaceKey = '';
   }
+  showSettingsRoot();
   settingsEl.hidden = false;
   void refreshProviderAuth();
 }
 
 function hideSettings(): void {
   settingsEl.hidden = true;
+  showSettingsRoot();
   settingsButtonEl.focus();
+}
+
+function showSettingsRoot(): void {
+  usageOpen = false;
+  usageSequence += 1;
+  if (usageRefreshTimer) clearTimeout(usageRefreshTimer);
+  usageRefreshTimer = null;
+  settingsTitleEl.textContent = 'Aside Settings';
+  settingsViewEl.hidden = false;
+  usageViewEl.hidden = true;
+  settingsEl.querySelector('.settings-card')?.scrollTo({ top: 0 });
+}
+
+function showUsage(): void {
+  usageOpen = true;
+  settingsTitleEl.textContent = 'Usage';
+  settingsViewEl.hidden = true;
+  usageViewEl.hidden = false;
+  settingsEl.querySelector('.settings-card')?.scrollTo({ top: 0 });
+  void loadUsage(true);
+}
+
+function usageQuery(): UsageAnalyticsQuery {
+  return {
+    rangeDays: usageRangeDays,
+    providers: [...usageProviders],
+    models: usageModel ? [usageModel] : [],
+  };
+}
+
+async function loadUsage(initial = false): Promise<void> {
+  const sequence = ++usageSequence;
+  if (initial || usageContentEl.hidden) {
+    usageStatusEl.textContent = 'Preparing usage insights…';
+    usageStatusEl.hidden = false;
+    usageContentEl.hidden = true;
+  }
+  try {
+    const snapshot = await window.aside.getUsage(usageQuery());
+    if (sequence !== usageSequence || !usageOpen) return;
+    renderUsage(snapshot);
+    usageStatusEl.hidden = true;
+    usageContentEl.hidden = false;
+  } catch (error) {
+    if (sequence !== usageSequence || !usageOpen) return;
+    usageStatusEl.textContent = `Usage unavailable: ${safeErrorMessage(error)}`;
+    usageStatusEl.hidden = false;
+    usageContentEl.hidden = true;
+  }
+}
+
+function renderUsage(snapshot: UsageAnalyticsSnapshot): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-usage-days]')) {
+    button.setAttribute(
+      'aria-pressed',
+      String(Number(button.dataset['usageDays']) === snapshot.rangeDays),
+    );
+  }
+  renderUsageProviders(snapshot);
+  renderUsageModels(snapshot);
+  usageTotalTokensEl.textContent = formatTokenCount(snapshot.totals.totalTokens);
+  usageEstimatedCostEl.textContent = formatMoney(snapshot.totals.estimatedCostUsd);
+  usageEstimatedSavingsEl.textContent = formatMoney(snapshot.totals.estimatedSavingsUsd);
+  usageActiveDaysEl.textContent = String(snapshot.totals.activeDays);
+  usageStreaksEl.textContent = snapshot.longestStreak > 0
+    ? `${snapshot.currentStreak} day current · ${snapshot.longestStreak} day best`
+    : 'No active streak yet';
+  renderUsageGrid(snapshot);
+  renderUsageBreakdown(snapshot);
+
+  const pricedShare = snapshot.totals.totalTokens > 0
+    ? snapshot.totals.pricedTokens / snapshot.totals.totalTokens
+    : 1;
+  usagePricedCoverageEl.textContent = snapshot.totals.unpricedTokens > 0
+    ? `${Math.round(pricedShare * 100)}% price coverage`
+    : 'Public prices matched';
+  usageNoteEl.textContent =
+    `API-equivalent estimates use public list prices checked ${formatShortDate(snapshot.pricingAsOf)}. ` +
+    'They are not invoices and exclude subscriptions, free tiers, taxes, tool-call charges, ' +
+    'and special regional or long-context rates. ' +
+    `Local savings use a conservative ${snapshot.localBenchmark}; unknown cloud models stay unpriced.`;
+}
+
+function renderUsageProviders(snapshot: UsageAnalyticsSnapshot): void {
+  usageProviderFiltersEl.innerHTML = '';
+  const choices = [
+    { id: '', label: 'All' },
+    ...snapshot.providers.map((provider) => ({
+      id: provider.id,
+      label: provider.local ? `${provider.label} · local` : provider.label,
+    })),
+  ];
+  for (const choice of choices) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'usage-filter-chip';
+    button.textContent = choice.label;
+    button.setAttribute(
+      'aria-pressed',
+      String(choice.id ? usageProviders.has(choice.id) : usageProviders.size === 0),
+    );
+    button.addEventListener('click', () => {
+      if (!choice.id) usageProviders.clear();
+      else if (usageProviders.has(choice.id)) usageProviders.delete(choice.id);
+      else usageProviders.add(choice.id);
+      usageModel = null;
+      void loadUsage();
+    });
+    usageProviderFiltersEl.appendChild(button);
+  }
+}
+
+function renderUsageModels(snapshot: UsageAnalyticsSnapshot): void {
+  usageModelFilterEl.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'All models';
+  usageModelFilterEl.appendChild(all);
+  const providerLabels = new Map(
+    snapshot.providers.map((provider) => [provider.id, provider.label]),
+  );
+  for (const model of snapshot.models) {
+    if (usageProviders.size > 0 && !usageProviders.has(model.provider)) continue;
+    const option = document.createElement('option');
+    option.value = JSON.stringify({ provider: model.provider, model: model.model });
+    option.textContent = `${providerLabels.get(model.provider) ?? model.provider} · ${model.label}`;
+    option.selected =
+      usageModel?.provider === model.provider && usageModel.model === model.model;
+    usageModelFilterEl.appendChild(option);
+  }
+  if (!usageModel) usageModelFilterEl.value = '';
+}
+
+function renderUsageGrid(snapshot: UsageAnalyticsSnapshot): void {
+  usageGridEl.innerHTML = '';
+  usageMonthsEl.innerHTML = '';
+  const first = localDate(snapshot.startDate);
+  const prefixDays = first.getDay();
+  const totalCells = Math.ceil((prefixDays + snapshot.days.length) / 7) * 7;
+  const weeks = totalCells / 7;
+  usageChartEl.style.setProperty('--usage-weeks', String(weeks));
+  for (let index = 0; index < prefixDays; index += 1) {
+    usageGridEl.appendChild(usagePlaceholder());
+  }
+
+  const activeTokenCounts = snapshot.days
+    .map((day) => day.totalTokens)
+    .filter((tokens) => tokens > 0)
+    .sort((a, b) => a - b);
+  const monthColumns = new Set<number>();
+  snapshot.days.forEach((day, index) => {
+    const date = localDate(day.date);
+    const column = Math.floor((prefixDays + index) / 7) + 1;
+    if ((index === 0 || date.getDate() === 1) && !monthColumns.has(column)) {
+      monthColumns.add(column);
+      const month = document.createElement('span');
+      month.style.gridColumn = String(column);
+      month.textContent = date.toLocaleDateString(undefined, { month: 'short' });
+      usageMonthsEl.appendChild(month);
+    }
+    const cell = document.createElement('i');
+    cell.className = 'usage-cell';
+    cell.dataset['level'] = String(usageLevel(day.totalTokens, activeTokenCounts));
+    const label = usageDayLabel(day);
+    cell.title = label;
+    cell.setAttribute('aria-label', label);
+    usageGridEl.appendChild(cell);
+  });
+  while (usageGridEl.children.length < totalCells) {
+    usageGridEl.appendChild(usagePlaceholder());
+  }
+
+  usagePeakEl.textContent = snapshot.peakDay
+    ? `Peak ${formatTokenCount(snapshot.peakDay.totalTokens)} · ${formatLongDate(snapshot.peakDay.date)}`
+    : 'No recorded usage in this range';
+  usageGridEl.setAttribute(
+    'aria-label',
+    `${formatTokenCount(snapshot.totals.totalTokens)} tokens across ${snapshot.totals.activeDays} active days`,
+  );
+}
+
+function renderUsageBreakdown(snapshot: UsageAnalyticsSnapshot): void {
+  usageBreakdownEl.innerHTML = '';
+  const shown = snapshot.breakdown.slice(0, 7);
+  if (shown.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'usage-note';
+    empty.textContent = 'No token counters were found for these filters.';
+    usageBreakdownEl.appendChild(empty);
+    return;
+  }
+  for (const model of shown) {
+    const row = document.createElement('div');
+    row.className = 'usage-model-row';
+    const copy = document.createElement('div');
+    copy.className = 'usage-model-copy';
+    const dot = document.createElement('i');
+    dot.className = 'usage-provider-dot';
+    const name = document.createElement('span');
+    name.className = 'usage-model-name';
+    name.textContent = model.model;
+    name.title = `${model.provider} · ${model.model}`;
+    copy.append(dot, name);
+
+    const bar = document.createElement('span');
+    bar.className = 'usage-model-bar';
+    const fill = document.createElement('span');
+    fill.style.width = `${Math.max(2, model.share * 100)}%`;
+    bar.appendChild(fill);
+
+    const value = document.createElement('span');
+    value.className = 'usage-model-value';
+    const tokens = document.createElement('strong');
+    tokens.textContent = formatTokenCount(model.totalTokens);
+    const estimate = document.createElement('span');
+    estimate.textContent = model.local
+      ? `${formatMoney(model.estimatedSavingsUsd)} saved`
+      : model.priced
+        ? formatMoney(model.estimatedCostUsd)
+        : 'Unpriced';
+    value.append(tokens, estimate);
+    row.append(copy, bar, value);
+    usageBreakdownEl.appendChild(row);
+  }
+}
+
+function usagePlaceholder(): HTMLElement {
+  const cell = document.createElement('i');
+  cell.className = 'usage-cell placeholder';
+  cell.setAttribute('aria-hidden', 'true');
+  return cell;
+}
+
+function usageLevel(tokens: number, sortedActiveTokens: number[]): number {
+  if (tokens <= 0 || sortedActiveTokens.length === 0) return 0;
+  const quartile = (fraction: number) =>
+    sortedActiveTokens[
+      Math.min(
+        sortedActiveTokens.length - 1,
+        Math.floor(sortedActiveTokens.length * fraction),
+      )
+    ]!;
+  if (tokens <= quartile(0.25)) return 1;
+  if (tokens <= quartile(0.5)) return 2;
+  if (tokens <= quartile(0.75)) return 3;
+  return 4;
+}
+
+function usageDayLabel(day: UsageDay): string {
+  const estimates = [
+    day.estimatedCostUsd > 0 ? `${formatMoney(day.estimatedCostUsd)} API equivalent` : '',
+    day.estimatedSavingsUsd > 0 ? `${formatMoney(day.estimatedSavingsUsd)} local saved` : '',
+  ].filter(Boolean);
+  return `${formatLongDate(day.date)} · ${formatTokenCount(day.totalTokens)} tokens${
+    estimates.length > 0 ? ` · ${estimates.join(' · ')}` : ''
+  }`;
+}
+
+function formatTokenCount(value: number): string {
+  const amount = Math.max(0, value);
+  if (amount < 1_000) return Math.round(amount).toLocaleString();
+  const units = [
+    { threshold: 1_000_000_000, suffix: 'B' },
+    { threshold: 1_000_000, suffix: 'M' },
+    { threshold: 1_000, suffix: 'K' },
+  ];
+  const unit = units.find((candidate) => amount >= candidate.threshold)!;
+  const scaled = amount / unit.threshold;
+  return `${scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1).replace(/\.0$/u, '')}${unit.suffix}`;
+}
+
+function formatMoney(value: number): string {
+  if (value > 0 && value < 0.01) return '<$0.01';
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: value >= 100 ? 0 : 2,
+  }).format(Math.max(0, value));
+}
+
+function localDate(day: string): Date {
+  return new Date(`${day}T12:00:00`);
+}
+
+function formatLongDate(day: string): string {
+  return localDate(day).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function formatShortDate(day: string): string {
+  return localDate(day).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 modelsEl.addEventListener('change', () => {
@@ -1451,7 +1794,40 @@ settingsButtonEl.addEventListener('click', () => {
   if (!accountsPopoverEl.hidden) hideAccounts();
   showSettings();
 });
-settingsCloseEl.addEventListener('click', hideSettings);
+openUsageEl.addEventListener('click', showUsage);
+settingsCloseEl.addEventListener('click', () => {
+  if (usageOpen) showSettingsRoot();
+  else hideSettings();
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-usage-days]')) {
+  button.addEventListener('click', () => {
+    const days = Number(button.dataset['usageDays']);
+    if (days !== 90 && days !== 365) return;
+    usageRangeDays = days;
+    usageProviders.clear();
+    usageModel = null;
+    void loadUsage();
+  });
+}
+usageModelFilterEl.addEventListener('change', () => {
+  if (!usageModelFilterEl.value) {
+    usageModel = null;
+  } else {
+    try {
+      const parsed = JSON.parse(usageModelFilterEl.value) as {
+        provider?: unknown;
+        model?: unknown;
+      };
+      usageModel =
+        typeof parsed.provider === 'string' && typeof parsed.model === 'string'
+          ? { provider: parsed.provider, model: parsed.model }
+          : null;
+    } catch {
+      usageModel = null;
+    }
+  }
+  void loadUsage();
+});
 showSubagentThreadsEl.checked = showSubagentThreads;
 showSubagentThreadsEl.addEventListener('change', () => {
   showSubagentThreads = showSubagentThreadsEl.checked;
@@ -1520,7 +1896,10 @@ document.addEventListener('keydown', (event) => {
     hideAccounts();
     return;
   }
-  if (!settingsEl.hidden) hideSettings();
+  if (!settingsEl.hidden) {
+    if (usageOpen) showSettingsRoot();
+    else hideSettings();
+  }
 });
 document.addEventListener('mousedown', (event) => {
   if (

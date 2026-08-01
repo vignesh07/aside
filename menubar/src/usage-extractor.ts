@@ -1,0 +1,260 @@
+import type { SessionSource } from '../../dist/types/session.js';
+import type { StoredUsageSample } from './usage-types.js';
+
+export interface UsageExtractionResult {
+  model: string;
+  provider: string;
+  sample?: StoredUsageSample;
+}
+
+/**
+ * Extract billing counters only. Prompt, response, tool, and path content never
+ * enters the usage tables.
+ */
+export function extractUsageFromLine(
+  raw: string,
+  source: SessionSource,
+  currentModel: string,
+  currentProvider: string,
+  lineEndOffset: number,
+): UsageExtractionResult {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return { model: currentModel, provider: currentProvider };
+  }
+
+  if (source === 'codex') {
+    return extractCodex(parsed, currentModel, currentProvider, lineEndOffset);
+  }
+  if (source === 'claude') {
+    return extractClaude(parsed, currentModel, currentProvider, lineEndOffset);
+  }
+  return extractPi(parsed, currentModel, currentProvider, lineEndOffset);
+}
+
+function extractCodex(
+  parsed: Record<string, unknown>,
+  currentModel: string,
+  currentProvider: string,
+  lineEndOffset: number,
+): UsageExtractionResult {
+  const payload = record(parsed['payload']);
+  if (parsed['type'] === 'session_meta') {
+    const recordedProvider = stringValue(payload?.['model_provider']);
+    return {
+      model: currentModel,
+      provider: recordedProvider
+        ? normalizeProvider(recordedProvider)
+        : currentProvider,
+    };
+  }
+  if (parsed['type'] === 'turn_context') {
+    return {
+      model: cleanModel(payload?.['model']) || currentModel,
+      provider: currentProvider,
+    };
+  }
+  if (
+    parsed['type'] !== 'event_msg' ||
+    payload?.['type'] !== 'token_count'
+  ) {
+    return { model: currentModel, provider: currentProvider };
+  }
+
+  const info = record(payload['info']);
+  const usage = record(info?.['last_token_usage']);
+  const cumulative = record(info?.['total_token_usage']);
+  if (!usage || !cumulative) {
+    return { model: currentModel, provider: currentProvider };
+  }
+
+  const rawInput = tokens(usage['input_tokens']);
+  const cached = tokens(usage['cached_input_tokens']);
+  const cacheWrite = tokens(usage['cache_write_input_tokens']);
+  const output = tokens(usage['output_tokens']);
+  const model = cleanModel(currentModel) || 'unknown';
+  const provider = currentProvider
+    ? normalizeProvider(currentProvider)
+    : 'openai';
+  const sampleKey = [
+    'codex',
+    tokens(cumulative['input_tokens']),
+    tokens(cumulative['cached_input_tokens']),
+    tokens(cumulative['cache_write_input_tokens']),
+    tokens(cumulative['output_tokens']),
+    tokens(cumulative['reasoning_output_tokens']),
+    tokens(cumulative['total_tokens']),
+  ].join(':');
+  const sample = usageSample({
+    sampleKey: sampleKey === 'codex:0:0:0:0:0:0'
+      ? `codex:offset:${lineEndOffset}`
+      : sampleKey,
+    timestamp: parsed['timestamp'],
+    provider,
+    model,
+    local: isLocalProvider(provider),
+    // Codex input includes cached input; normalize every source to disjoint
+    // counters so displayed totals and pricing never double-count the cache.
+    inputTokens: Math.max(0, rawInput - cached - cacheWrite),
+    cachedInputTokens: cached,
+    cacheWriteInputTokens: cacheWrite,
+    outputTokens: output,
+    reasoningOutputTokens: tokens(usage['reasoning_output_tokens']),
+  });
+  return { model, provider, ...(sample ? { sample } : {}) };
+}
+
+function extractClaude(
+  parsed: Record<string, unknown>,
+  currentModel: string,
+  currentProvider: string,
+  lineEndOffset: number,
+): UsageExtractionResult {
+  if (parsed['type'] !== 'assistant') {
+    return { model: currentModel, provider: currentProvider };
+  }
+  const message = record(parsed['message']);
+  const usage = record(message?.['usage']);
+  const model = cleanModel(message?.['model']) || currentModel || 'unknown';
+  if (!usage || model === '<synthetic>') {
+    return { model, provider: 'anthropic' };
+  }
+
+  const id = stringValue(message?.['id']) ||
+    stringValue(parsed['requestId']) ||
+    stringValue(parsed['uuid']) ||
+    `offset:${lineEndOffset}`;
+  const sample = usageSample({
+    sampleKey: `claude:${id}`,
+    timestamp: parsed['timestamp'],
+    provider: 'anthropic',
+    model,
+    local: false,
+    inputTokens: tokens(usage['input_tokens']),
+    cachedInputTokens: tokens(usage['cache_read_input_tokens']),
+    cacheWriteInputTokens: tokens(usage['cache_creation_input_tokens']),
+    outputTokens: tokens(usage['output_tokens']),
+    reasoningOutputTokens: 0,
+  });
+  return { model, provider: 'anthropic', ...(sample ? { sample } : {}) };
+}
+
+function extractPi(
+  parsed: Record<string, unknown>,
+  currentModel: string,
+  currentProvider: string,
+  lineEndOffset: number,
+): UsageExtractionResult {
+  if (parsed['type'] === 'model_change') {
+    const changedProvider = stringValue(parsed['provider']);
+    return {
+      model: cleanModel(parsed['modelId']) || currentModel,
+      provider: changedProvider ? normalizeProvider(changedProvider) : currentProvider,
+    };
+  }
+  if (parsed['type'] !== 'message') {
+    return { model: currentModel, provider: currentProvider };
+  }
+  const message = record(parsed['message']);
+  if (message?.['role'] !== 'assistant') {
+    return { model: currentModel, provider: currentProvider };
+  }
+  const usage = record(message['usage']);
+  const model = cleanModel(message['model']) || currentModel || 'unknown';
+  if (!usage) return { model, provider: currentProvider };
+
+  const recordedProvider = stringValue(message['provider']);
+  const provider = recordedProvider
+    ? normalizeProvider(recordedProvider)
+    : currentProvider || 'unknown';
+  const id = stringValue(parsed['id']) ||
+    stringValue(message['id']) ||
+    `offset:${lineEndOffset}`;
+  const sample = usageSample({
+    sampleKey: `pi:${id}`,
+    timestamp: parsed['timestamp'] ?? message['timestamp'],
+    provider,
+    model,
+    local: isLocalProvider(provider),
+    inputTokens: tokens(usage['input']),
+    cachedInputTokens: tokens(usage['cacheRead']),
+    cacheWriteInputTokens: tokens(usage['cacheWrite']),
+    outputTokens: tokens(usage['output']),
+    reasoningOutputTokens: 0,
+  });
+  return { model, provider, ...(sample ? { sample } : {}) };
+}
+
+function usageSample(
+  value: Omit<StoredUsageSample, 'timestampMs'> & { timestamp: unknown },
+): StoredUsageSample | undefined {
+  const timestampMs = timestamp(value.timestamp);
+  const total =
+    value.inputTokens +
+    value.cachedInputTokens +
+    value.cacheWriteInputTokens +
+    value.outputTokens;
+  if (timestampMs === null || total <= 0) return undefined;
+  const { timestamp: _timestamp, ...sample } = value;
+  return { ...sample, timestampMs };
+}
+
+function timestamp(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? Math.round(value) : Math.round(value * 1000);
+  }
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function tokens(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function cleanModel(value: unknown): string {
+  return stringValue(value).slice(0, 240);
+}
+
+export function normalizeProvider(value: string): string {
+  const normalized = value.trim().toLocaleLowerCase().replaceAll('_', '-');
+  if (
+    normalized === 'openai-codex' ||
+    normalized === 'codex' ||
+    normalized.startsWith('openai')
+  ) {
+    return 'openai';
+  }
+  if (normalized === 'claude' || normalized.startsWith('anthropic')) {
+    return 'anthropic';
+  }
+  if (normalized.startsWith('google') || normalized.startsWith('gemini')) {
+    return 'google';
+  }
+  if (normalized === 'lm-studio') return 'lmstudio';
+  return normalized || 'unknown';
+}
+
+export function isLocalProvider(provider: string): boolean {
+  return [
+    'ollama',
+    'lmstudio',
+    'llama.cpp',
+    'llama-cpp',
+    'local',
+  ].includes(provider);
+}

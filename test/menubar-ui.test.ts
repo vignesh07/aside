@@ -55,4 +55,15 @@ describe('menubar product surfaces', () => {
     expect(renderer).toContain("openFeedback('bug')");
     expect(renderer).toContain("openFeedback('feature')");
   });
+
+  it('keeps token analytics local, filterable, and visibly estimated', () => {
+    expect(indexHtml).toContain('id="open-usage"');
+    expect(indexHtml).toContain('id="usage-provider-filters"');
+    expect(indexHtml).toContain('id="usage-model-filter"');
+    expect(indexHtml).toContain('id="usage-grid"');
+    expect(indexHtml).toContain('API equivalent');
+    expect(indexHtml).toContain('Local saved');
+    expect(renderer).toContain('window.aside.getUsage(usageQuery())');
+    expect(renderer).toContain('unknown cloud models stay unpriced');
+  });
 });
