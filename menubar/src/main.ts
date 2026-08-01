@@ -84,15 +84,20 @@ import {
   ActivityLedger,
   InMemoryActivityLedgerStore,
 } from '../../dist/core/activity-ledger.js';
-import { createThreadSearchService } from './search-coordinator.js';
+import {
+  createReadOnlyThreadSearchService,
+  createThreadSearchService,
+} from './search-coordinator.js';
 import { feedbackIssueUrl } from './feedback-link.js';
 import {
   captureProviderAuthCoordinator,
   captureSideChatService,
+  captureUsageSearchService,
   generatedTodayCaptureFixture,
   TODAY_CAPTURE_MODEL,
   TODAY_CAPTURE_PROVIDER,
 } from './capture-fixtures.js';
+import type { UsageAnalyticsQuery } from './usage-types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const UPDATE_INITIAL_DELAY_MS = 15_000;
@@ -142,6 +147,7 @@ function integerFlagValue(name: string): number | null {
  *   --older            expand and scroll to the 7d+ section before capture
  *   --settings         open settings before capture
  *   --settings-bottom  open settings and scroll to its final sections
+ *   --usage            open deterministic token usage before capture
  *   --accounts         open the account popover before capture
  *   --keep-open        render the detached-window control as active
  *   --attention        render representative attention states
@@ -163,6 +169,7 @@ const CAPTURE_THREAD = flagValue('--thread');
 const CAPTURE_SEARCH = flagValue('--search');
 const CAPTURE_OLDER = process.argv.includes('--older');
 const CAPTURE_SETTINGS_BOTTOM = process.argv.includes('--settings-bottom');
+const CAPTURE_USAGE = process.argv.includes('--usage');
 const CAPTURE_SETTINGS =
   process.argv.includes('--settings') || CAPTURE_SETTINGS_BOTTOM;
 const CAPTURE_ACCOUNTS = process.argv.includes('--accounts');
@@ -178,6 +185,7 @@ const CAPTURE_TODAY =
   process.argv.includes('--today') || CAPTURE_TODAY_FIXTURE;
 const CAPTURE_REVIEW = process.argv.includes('--review');
 const CAPTURE_THEME = flagValue('--theme');
+const DEV_SEARCH_DATABASE = flagValue('--search-db');
 const DEV_WINDOW_SIZE = parseWindowSize({
   width: integerFlagValue('--width') ?? DEFAULT_WINDOW_SIZE.width,
   height: integerFlagValue('--height') ?? DEFAULT_WINDOW_SIZE.height,
@@ -199,7 +207,15 @@ let preferredWindowSize: WindowSize = { ...DEFAULT_WINDOW_SIZE };
 let keepOpen = false;
 let rememberedWindowPosition: WindowPosition | null = null;
 
-const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+if (CAPTURE_PATH) {
+  app.setPath(
+    'userData',
+    path.join(path.dirname(CAPTURE_PATH), '.aside-capture-profile'),
+  );
+}
+const ownsSingleInstanceLock = CAPTURE_PATH
+  ? true
+  : app.requestSingleInstanceLock();
 const windowRecovery = new WindowRecoveryController(() => showWindow());
 const releaseArch = process.arch === 'arm64' ? 'arm64' : 'x64';
 
@@ -432,6 +448,43 @@ function validatedProvider(value: unknown): ProviderAuthId | null {
   return validatedProviderId(value);
 }
 
+function validatedUsageQuery(value: unknown): UsageAnalyticsQuery {
+  const input = value && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : {};
+  const providers = Array.isArray(input['providers'])
+    ? [...new Set(
+        input['providers']
+          .filter(
+            (provider): provider is string =>
+              typeof provider === 'string' && provider.length <= 80,
+          )
+          .slice(0, 12),
+      )]
+    : [];
+  const models = Array.isArray(input['models'])
+    ? input['models']
+        .flatMap((candidate): Array<{ provider: string; model: string }> => {
+          if (!candidate || typeof candidate !== 'object') return [];
+          const record = candidate as Record<string, unknown>;
+          const provider = record['provider'];
+          const model = record['model'];
+          return typeof provider === 'string' &&
+            provider.length <= 80 &&
+            typeof model === 'string' &&
+            model.length <= 240
+            ? [{ provider, model }]
+            : [];
+        })
+        .slice(0, 12)
+    : [];
+  return {
+    rangeDays: input['rangeDays'] === 90 ? 90 : 365,
+    providers,
+    models,
+  };
+}
+
 function safeProviderError(error: unknown): Error {
   return new Error(
     error instanceof ProviderAuthError
@@ -659,7 +712,7 @@ app.whenReady().then(() => {
   );
 
   const todayCapture =
-    CAPTURE_PATH && CAPTURE_TODAY_FIXTURE
+    CAPTURE_PATH && (CAPTURE_TODAY_FIXTURE || CAPTURE_USAGE)
       ? generatedTodayCaptureFixture()
       : null;
   backend = new MenubarBackend(
@@ -675,7 +728,13 @@ app.whenReady().then(() => {
         ? () => ({ sessions: todayCapture.sessions, jsonlPaths: new Map() })
         : undefined,
       service: todayCapture ? captureSideChatService() : undefined,
-      search: todayCapture ? undefined : createThreadSearchService(),
+      search: CAPTURE_PATH && CAPTURE_USAGE
+          ? captureUsageSearchService()
+          : todayCapture
+            ? undefined
+          : CAPTURE_USAGE && DEV_SEARCH_DATABASE
+            ? createReadOnlyThreadSearchService(DEV_SEARCH_DATABASE)
+            : createThreadSearchService(DEV_SEARCH_DATABASE ?? undefined),
       activity: CAPTURE_PATH
         ? new ActivityLedger(
             new InMemoryActivityLedgerStore(
@@ -796,6 +855,9 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('aside:search-rebuild', () => {
     backend?.rebuildSearchIndex();
+  });
+  ipcMain.handle('aside:usage:get', (_e, value: unknown) => {
+    return backend?.usageAnalytics(validatedUsageQuery(value));
   });
   ipcMain.handle('aside:ask', async (_e, question: unknown) => {
     if (
@@ -1091,6 +1153,13 @@ async function captureAndQuit(
         `);
         await sleep(250);
       }
+    }
+
+    if (CAPTURE_USAGE) {
+      await window.webContents.executeJavaScript(
+        `document.querySelector('.thread.usage-smart')?.click()`,
+      );
+      await sleep(1200);
     }
 
     if (showAccounts) {

@@ -71,7 +71,9 @@ describe('menubar product surfaces', () => {
   it('keeps Today and thread review as explicit destinations', () => {
     expect(indexHtml).toContain('id="analysis-view"');
     expect(indexHtml).toContain('id="review-thread"');
-    expect(renderer).toContain("type ActiveView = 'thread' | 'today' | 'review'");
+    expect(renderer).toContain(
+      "type ActiveView = 'thread' | 'today' | 'review' | 'usage'",
+    );
     expect(renderer).toContain("title: 'Today'");
     expect(renderer).toContain("activeView = 'review'");
     expect(renderer).toContain("composerShellEl.hidden = activeView !== 'thread'");
@@ -131,5 +133,16 @@ describe('menubar product surfaces', () => {
 
   it('announces generated evidence citation numbers accessibly', () => {
     expect(renderer).toContain('`Evidence ${citationNumber}, `');
+  });
+
+  it('keeps token analytics local, filterable, and visibly estimated', () => {
+    expect(indexHtml).toContain('id="open-usage"');
+    expect(indexHtml).toContain('id="usage-provider-filters"');
+    expect(indexHtml).toContain('id="usage-model-filter"');
+    expect(indexHtml).toContain('id="usage-grid"');
+    expect(indexHtml).toContain('API equivalent');
+    expect(indexHtml).toContain('Local equivalent');
+    expect(renderer).toContain('window.aside.getUsage(usageQuery())');
+    expect(renderer).toContain('unknown cloud models stay unpriced');
   });
 });

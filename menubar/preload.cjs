@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('aside', {
   getState: () => ipcRenderer.invoke('aside:get-state'),
   searchThreads: (query) => ipcRenderer.invoke('aside:search-threads', query),
   rebuildSearchIndex: () => ipcRenderer.invoke('aside:search-rebuild'),
+  getUsage: (query) => ipcRenderer.invoke('aside:usage:get', query),
   selectThread: (threadId) => ipcRenderer.invoke('aside:select-thread', threadId),
   resolveAttention: (threadId) => ipcRenderer.invoke('aside:attention:resolve', threadId),
   getToday: () => ipcRenderer.invoke('aside:today:get'),

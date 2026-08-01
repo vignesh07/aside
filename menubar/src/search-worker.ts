@@ -1,10 +1,17 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { ThreadSearchWriter } from './search-database.js';
+import {
+  ThreadSearchReader,
+  ThreadSearchWriter,
+} from './search-database.js';
 import type {
   IndexableSideChat,
   IndexableThread,
   SearchIndexStatus,
 } from './search-types.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 
 interface WorkerConfig {
   databasePath: string;
@@ -13,16 +20,25 @@ interface WorkerConfig {
 type WorkerRequest =
   | { type: 'sync-sessions'; sessions: IndexableThread[] }
   | { type: 'sync-side-chats'; chats: IndexableSideChat[] }
+  | { type: 'usage'; requestId: number; query: UsageAnalyticsQuery }
   | { type: 'rebuild' }
   | { type: 'dispose' };
 
-type WorkerResponse = { type: 'status'; status: SearchIndexStatus };
+type WorkerResponse =
+  | { type: 'status'; status: SearchIndexStatus }
+  | {
+      type: 'usage-result';
+      requestId: number;
+      snapshot: UsageAnalyticsSnapshot;
+    }
+  | { type: 'usage-error'; requestId: number; message: string };
 
 if (!parentPort) throw new Error('Search index worker requires a parent port.');
 const port = parentPort;
 
 const config = workerData as WorkerConfig;
 const writer = new ThreadSearchWriter(config.databasePath);
+const reader = new ThreadSearchReader(config.databasePath);
 let pendingSessions: IndexableThread[] | null = null;
 let pendingSideChats: IndexableSideChat[] | null = null;
 let draining = false;
@@ -102,6 +118,22 @@ port.on('message', (message: WorkerRequest) => {
     void drain();
     return;
   }
+  if (message.type === 'usage') {
+    try {
+      port.postMessage({
+        type: 'usage-result',
+        requestId: message.requestId,
+        snapshot: reader.usage(message.query),
+      } satisfies WorkerResponse);
+    } catch (error) {
+      port.postMessage({
+        type: 'usage-error',
+        requestId: message.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      } satisfies WorkerResponse);
+    }
+    return;
+  }
   if (message.type === 'rebuild') {
     writer.clear();
     publish({
@@ -114,6 +146,7 @@ port.on('message', (message: WorkerRequest) => {
     return;
   }
   disposed = true;
+  reader.close();
   writer.close();
 });
 

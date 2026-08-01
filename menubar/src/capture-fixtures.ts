@@ -11,6 +11,11 @@ import {
   ProviderAuthCoordinator,
   type ProviderAuthId,
 } from './provider-auth.js';
+import {
+  buildUsageSnapshot,
+  type UsageAggregateRow,
+} from './usage-analytics.js';
+import type { ThreadSearchService } from './search-types.js';
 
 const TODAY_CAPTURE_NOW = '2026-07-31T19:00:00.000Z';
 const TODAY_CAPTURE_DAY = '2026-07-31';
@@ -78,6 +83,47 @@ export function captureSideChatService(): SideChatService {
       model: TODAY_CAPTURE_MODEL,
     },
   );
+}
+
+const USAGE_CAPTURE_ROWS: UsageAggregateRow[] = [
+  usageRow('2026-04-18', 'openai', 'gpt-5.6-sol', 92_000, 168_000, 14_000, 4),
+  usageRow('2026-05-03', 'anthropic', 'claude-opus-4-8', 74_000, 133_000, 19_000, 3),
+  usageRow('2026-05-19', 'openai', 'gpt-5.6-terra', 118_000, 205_000, 23_000, 5),
+  usageRow('2026-06-02', 'anthropic', 'claude-sonnet-5', 63_000, 187_000, 17_000, 4),
+  usageRow('2026-06-14', 'google', 'gemini-3.1-pro-preview', 55_000, 91_000, 12_000, 3),
+  usageRow('2026-06-28', 'openai', 'gpt-5.6-sol', 126_000, 284_000, 31_000, 6),
+  usageRow('2026-07-08', 'anthropic', 'claude-opus-4-8', 84_000, 246_000, 21_000, 5),
+  usageRow('2026-07-19', 'openai', 'gpt-5.6-terra', 142_000, 317_000, 28_000, 7),
+  usageRow('2026-07-25', 'ollama', 'qwen3-coder:30b', 211_000, 52_000, 25_000, 4, true),
+  usageRow('2026-07-28', 'anthropic', 'claude-sonnet-5', 97_000, 304_000, 33_000, 7),
+  usageRow('2026-07-29', 'openai', 'gpt-5.6-sol', 169_000, 429_000, 46_000, 8),
+  usageRow('2026-07-30', 'google', 'gemini-3.5-flash', 121_000, 198_000, 29_000, 6),
+  usageRow('2026-07-31', 'openai', 'gpt-5.6-sol', 153_000, 386_000, 41_000, 7),
+];
+
+/** Deterministic token dashboard for screenshot QA; it never opens a transcript. */
+export function captureUsageSearchService(): ThreadSearchService {
+  return {
+    syncSessions: () => {},
+    syncSideChats: () => {},
+    search: async () => [],
+    usage: async (query) =>
+      buildUsageSnapshot(
+        USAGE_CAPTURE_ROWS,
+        query,
+        Date.parse(TODAY_CAPTURE_NOW),
+      ),
+    rebuild: () => {},
+    getStatus: () => ({
+      phase: 'ready',
+      indexedThreads: 4,
+      totalThreads: 4,
+      indexedBytes: 1,
+      totalBytes: 1,
+    }),
+    onStatus: () => () => {},
+    dispose: () => {},
+  };
 }
 
 /**
@@ -270,6 +316,31 @@ function session(input: {
     lastEventTime: new Date(input.lastEventAt),
     eventCount: input.eventCount,
     currentActivity: '',
+  };
+}
+
+function usageRow(
+  day: string,
+  provider: string,
+  model: string,
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  requests: number,
+  local = false,
+): UsageAggregateRow {
+  return {
+    day,
+    provider,
+    model,
+    local: local ? 1 : 0,
+    input_tokens: inputTokens,
+    cached_input_tokens: cachedInputTokens,
+    cache_write_5m_input_tokens: 0,
+    cache_write_1h_input_tokens: 0,
+    output_tokens: outputTokens,
+    reasoning_output_tokens: 0,
+    requests,
   };
 }
 

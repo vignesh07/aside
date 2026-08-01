@@ -13,6 +13,7 @@ interface DiscoveredCodexSession {
 
 interface CodexScannerOptions {
   sessionsDir?: string;
+  archivedSessionsDir?: string;
   nowMs?: number;
   includeInternal?: boolean;
 }
@@ -25,11 +26,19 @@ const metadataCache = new Map<
 export function scanCodexSessions(options: CodexScannerOptions = {}): DiscoveredCodexSession[] {
   const results: DiscoveredCodexSession[] = [];
   const sessionsDir = options.sessionsDir ?? path.join(CODEX_DIR, 'sessions');
+  const archivedSessionsDir =
+    options.archivedSessionsDir ??
+    (options.sessionsDir === undefined
+      ? path.join(CODEX_DIR, 'archived_sessions')
+      : undefined);
   const nowMs = options.nowMs ?? Date.now();
+  const roots = [sessionsDir, archivedSessionsDir].filter(
+    (candidate): candidate is string =>
+      typeof candidate === 'string' && fs.existsSync(candidate),
+  );
+  const seenSessionIds = new Set<string>();
 
-  if (!fs.existsSync(sessionsDir)) return results;
-
-  for (const jsonlPath of listJsonlFiles(sessionsDir)) {
+  for (const jsonlPath of roots.flatMap(listJsonlFiles)) {
     const file = path.basename(jsonlPath);
     let stat: fs.Stats;
     try {
@@ -52,6 +61,8 @@ export function scanCodexSessions(options: CodexScannerOptions = {}): Discovered
       sessionIdFromRolloutFile(file) ||
       metadata.id ||
       file.replace('.jsonl', '');
+    if (seenSessionIds.has(sessionId)) continue;
+    seenSessionIds.add(sessionId);
 
     const status =
       age < TIMING.activeThresholdMs ? 'active' as const :

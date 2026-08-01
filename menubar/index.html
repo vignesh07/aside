@@ -374,6 +374,21 @@
         color: var(--accent);
         border-color: color-mix(in srgb, var(--accent) 46%, transparent);
       }
+      .thread.usage-smart {
+        min-height: 40px;
+      }
+      .thread.usage-smart .source {
+        width: 20px;
+        height: 20px;
+        color: var(--secondary);
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        font-size: 10px;
+      }
+      .thread.usage-smart.active .source {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+      }
       .sidebar-foot {
         flex: none;
         display: flex;
@@ -1667,6 +1682,207 @@
       .danger { margin-left: auto; color: var(--danger); }
       .settings-back { font-size: 17px; }
 
+      /* Local token analytics */
+      .usage-entry strong { display: block; font-size: 11px; font-weight: 590; }
+      .usage-entry span { display: block; color: var(--secondary); font-size: 10px; }
+      .usage-body {
+        width: 100%;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 19px 0 34px;
+      }
+      .usage-hero {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .usage-kicker {
+        margin: 0 0 2px;
+        color: var(--secondary);
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: .07em;
+        text-transform: uppercase;
+      }
+      .usage-hero h3 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+      .usage-subtitle { margin: 4px 0 0; color: var(--secondary); font-size: 10px; }
+      .usage-range {
+        display: flex;
+        flex: none;
+        overflow: hidden;
+        padding: 2px;
+        border-radius: 7px;
+        background: var(--surface);
+      }
+      .usage-range button {
+        min-width: 34px;
+        padding: 3px 7px;
+        color: var(--secondary);
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        font-size: 9px;
+        cursor: default;
+      }
+      .usage-range button[aria-pressed="true"] {
+        color: var(--text);
+        background: var(--window);
+        box-shadow: 0 1px 3px rgb(0 0 0 / .12);
+      }
+      .usage-range button:focus-visible,
+      .usage-filter-chip:focus-visible,
+      #usage-model-filter:focus-visible {
+        outline: 0;
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+      }
+      #usage-status {
+        margin-top: 22px;
+        padding: 24px;
+        color: var(--secondary);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        text-align: center;
+        font-size: 10px;
+      }
+      .usage-index-progress {
+        margin: 12px 0 0;
+        color: var(--secondary);
+        font-size: 10px;
+      }
+      .usage-filters {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 17px;
+      }
+      .usage-provider-filters { min-width: 0; display: flex; flex: 1; flex-wrap: wrap; gap: 5px; }
+      .usage-filter-chip {
+        padding: 4px 8px;
+        color: var(--secondary);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: transparent;
+        font-size: 9px;
+        cursor: default;
+      }
+      .usage-filter-chip[aria-pressed="true"] {
+        color: var(--text);
+        border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+        background: color-mix(in srgb, var(--accent) 9%, transparent);
+      }
+      #usage-model-filter {
+        min-width: 108px;
+        max-width: 188px;
+        padding: 4px 22px 4px 7px;
+        color: var(--secondary);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        outline: 0;
+        background: var(--surface);
+        font-size: 9px;
+      }
+      .usage-stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        overflow: hidden;
+        margin-top: 13px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .usage-stat { min-width: 0; padding: 12px 11px 10px; border-right: 1px solid var(--line); }
+      .usage-stat:last-child { border-right: 0; }
+      .usage-stat strong {
+        display: block;
+        overflow: hidden;
+        font-size: 15px;
+        font-weight: 590;
+        letter-spacing: -.02em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .usage-stat span { display: block; margin-top: 1px; color: var(--secondary); font-size: 9px; }
+      .usage-chart-section { margin-top: 22px; }
+      .usage-section-head { display: flex; align-items: baseline; gap: 10px; }
+      .usage-section-head h4 { margin: 0; font-size: 11px; font-weight: 620; }
+      .usage-section-head span { margin-left: auto; color: var(--secondary); font-size: 9px; }
+      .usage-chart-scroll { overflow-x: auto; margin: 11px -2px 0; padding: 0 2px 4px; }
+      .usage-chart {
+        --usage-cell: clamp(5px, calc((100vw - var(--sidebar-width) - 184px) / 53), 9px);
+        width: max-content;
+        min-width: 100%;
+      }
+      .usage-months {
+        height: 13px;
+        display: grid;
+        grid-template-columns: repeat(var(--usage-weeks), var(--usage-cell));
+        gap: 2px;
+        color: var(--secondary);
+        font-size: 9px;
+        white-space: nowrap;
+        margin-left: 20px;
+      }
+      .usage-months span { overflow: visible; }
+      .usage-grid-row { display: flex; gap: 6px; }
+      .usage-weekdays {
+        width: 14px;
+        flex: none;
+        display: grid;
+        grid-template-rows: repeat(7, var(--usage-cell));
+        gap: 2px;
+        color: var(--secondary);
+        font-size: 8px;
+        line-height: var(--usage-cell);
+      }
+      .usage-grid {
+        display: grid;
+        grid-auto-flow: column;
+        grid-template-rows: repeat(7, var(--usage-cell));
+        grid-auto-columns: var(--usage-cell);
+        gap: 2px;
+      }
+      .usage-cell {
+        width: var(--usage-cell);
+        height: var(--usage-cell);
+        border: 0;
+        border-radius: max(1px, calc(var(--usage-cell) * .23));
+        background: color-mix(in srgb, var(--text) 7%, transparent);
+      }
+      .usage-cell[data-level="1"] { background: color-mix(in srgb, var(--accent) 25%, var(--window)); }
+      .usage-cell[data-level="2"] { background: color-mix(in srgb, var(--accent) 44%, var(--window)); }
+      .usage-cell[data-level="3"] { background: color-mix(in srgb, var(--accent) 67%, var(--window)); }
+      .usage-cell[data-level="4"] { background: var(--accent); }
+      .usage-cell.placeholder { visibility: hidden; }
+      .usage-chart-meta { display: flex; align-items: center; margin: 7px 0 0 20px; color: var(--secondary); font-size: 9px; }
+      .usage-chart-meta #usage-peak { margin-right: auto; }
+      .usage-legend { display: flex; align-items: center; gap: 3px; }
+      .usage-legend .usage-cell { --usage-cell: 7px; }
+      .usage-breakdown { margin-top: 22px; }
+      #usage-breakdown { margin-top: 7px; border-top: 1px solid var(--line); }
+      .usage-model-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(58px, .8fr) auto;
+        align-items: center;
+        gap: 10px;
+        min-height: 34px;
+        border-bottom: 1px solid var(--line);
+      }
+      .usage-model-copy { min-width: 0; display: flex; align-items: center; gap: 6px; }
+      .usage-provider-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--accent); }
+      .usage-model-name { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+      .usage-model-bar { height: 3px; overflow: hidden; border-radius: 3px; background: var(--line); }
+      .usage-model-bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+      .usage-model-value { text-align: right; }
+      .usage-model-value strong { display: block; font-size: 9px; font-weight: 560; }
+      .usage-model-value span { display: block; color: var(--secondary); font-size: 8px; }
+      .usage-note {
+        margin: 15px 0 0;
+        color: var(--secondary);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+
       @media (max-width: 719px) {
         :root {
           --transcript-width: 100%;
@@ -1706,6 +1922,12 @@
         #onboarding { padding: 32px 18px 20px; }
         .composer-shell { padding: 7px 14px 11px; }
         .settings-body { padding: 18px 18px 24px; }
+        .usage-body { padding: 15px 0 26px; }
+        .usage-filters { align-items: stretch; flex-direction: column; }
+        #usage-model-filter { width: 100%; max-width: none; }
+        .usage-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .usage-stat:nth-child(2) { border-right: 0; }
+        .usage-stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
         .settings-update { gap: 9px; }
         .settings-update-actions {
           flex-wrap: wrap;
@@ -1899,12 +2121,25 @@
           <button id="settings-close" class="icon-button settings-back" type="button" aria-label="Back">‹</button>
           <h2 id="settings-title">Aside Settings</h2>
         </div>
-        <div class="settings-body">
+        <div id="settings-view" class="settings-body">
           <div class="settings-section">
             <h3>Accounts</h3>
             <p>Aside only uses accounts you connect here. Disconnecting does not sign out Codex or Claude.</p>
             <div id="settings-error" class="surface-message" role="status" aria-live="polite" hidden></div>
             <div id="settings-providers"></div>
+          </div>
+          <div class="settings-section">
+            <h3>Token usage</h3>
+            <p>See local token activity across providers and models, with public API-equivalent cost estimates.</p>
+            <div class="settings-update usage-entry">
+              <div class="settings-update-copy">
+                <strong>Usage insights</strong>
+                <span>Aggregated locally while the search index reads your transcripts.</span>
+              </div>
+              <div class="settings-update-actions">
+                <button id="open-usage" class="secondary" type="button">View Usage</button>
+              </div>
+            </div>
           </div>
           <div class="settings-section">
             <h3>Observer boundary</h3>
@@ -1978,6 +2213,62 @@
           <div class="settings-actions">
             <button id="open-data" class="secondary" type="button">Show chat data</button>
             <button id="quit" class="danger" type="button">Quit Aside</button>
+          </div>
+        </div>
+        <div id="usage-view" class="usage-body" hidden>
+          <div class="usage-hero">
+            <div>
+              <p class="usage-kicker">On this Mac</p>
+              <h3>Token activity</h3>
+              <p class="usage-subtitle">Claude Code, Codex, and Pi usage — prompts stay out of these statistics.</p>
+            </div>
+            <div class="usage-range" role="group" aria-label="Usage range">
+              <button type="button" data-usage-days="90" aria-pressed="false">90D</button>
+              <button type="button" data-usage-days="365" aria-pressed="true">1Y</button>
+            </div>
+          </div>
+          <div id="usage-status" role="status" aria-live="polite">Preparing usage insights…</div>
+          <p id="usage-index-progress" class="usage-index-progress" role="status" aria-live="polite" hidden></p>
+          <div id="usage-content" hidden>
+            <div class="usage-filters">
+              <div id="usage-provider-filters" class="usage-provider-filters" role="group" aria-label="Filter providers"></div>
+              <select id="usage-model-filter" aria-label="Filter model">
+                <option value="">All models</option>
+              </select>
+            </div>
+            <div class="usage-stats" aria-label="Usage summary">
+              <div class="usage-stat"><strong id="usage-total-tokens">0</strong><span>Tokens</span></div>
+              <div class="usage-stat"><strong id="usage-estimated-cost">$0</strong><span>API equivalent</span></div>
+              <div class="usage-stat"><strong id="usage-estimated-savings">$0</strong><span>Local equivalent</span></div>
+              <div class="usage-stat"><strong id="usage-active-days">0</strong><span>Active days</span></div>
+            </div>
+            <section class="usage-chart-section" aria-labelledby="usage-chart-title">
+              <div class="usage-section-head">
+                <h4 id="usage-chart-title">Activity</h4>
+                <span id="usage-streaks"></span>
+              </div>
+              <div id="usage-chart-scroll" class="usage-chart-scroll">
+                <div id="usage-chart" class="usage-chart">
+                  <div id="usage-months" class="usage-months"></div>
+                  <div class="usage-grid-row">
+                    <div class="usage-weekdays" aria-hidden="true"><span></span><span>M</span><span></span><span>W</span><span></span><span>F</span><span></span></div>
+                    <div id="usage-grid" class="usage-grid" role="img" aria-label="Daily token activity"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="usage-chart-meta">
+                <span id="usage-peak"></span>
+                <span class="usage-legend" aria-hidden="true">Less <i class="usage-cell" data-level="0"></i><i class="usage-cell" data-level="1"></i><i class="usage-cell" data-level="2"></i><i class="usage-cell" data-level="3"></i><i class="usage-cell" data-level="4"></i> More</span>
+              </div>
+            </section>
+            <section class="usage-breakdown" aria-labelledby="usage-breakdown-title">
+              <div class="usage-section-head">
+                <h4 id="usage-breakdown-title">Models</h4>
+                <span id="usage-priced-coverage"></span>
+              </div>
+              <div id="usage-breakdown"></div>
+            </section>
+            <p id="usage-note" class="usage-note"></p>
           </div>
         </div>
       </section>

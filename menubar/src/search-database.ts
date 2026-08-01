@@ -7,6 +7,16 @@ import {
   normalizeSearchText,
   type SearchDocumentKind,
 } from '../../dist/core/search-document.js';
+import {
+  buildUsageSnapshot,
+  type UsageAggregateRow,
+} from './usage-analytics.js';
+import { extractUsageFromLine } from './usage-extractor.js';
+import type {
+  StoredUsageSample,
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 import type {
   IndexableSideChat,
   IndexableThread,
@@ -16,7 +26,9 @@ import type {
   ThreadSearchResult,
 } from './search-types.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
+const USAGE_RETENTION_DAYS = 370;
+const USAGE_RETENTION_MS = USAGE_RETENTION_DAYS * 24 * 60 * 60 * 1_000;
 const READ_CHUNK_BYTES = 1024 * 1024;
 const COMMIT_AFTER_BYTES = 4 * 1024 * 1024;
 const MAX_JSONL_LINE_BYTES = 32 * 1024 * 1024;
@@ -36,6 +48,9 @@ interface TranscriptRow {
   prefix_bytes: number;
   prefix_hash: string;
   indexed_offset: number;
+  usage_indexed_offset: number;
+  usage_model: string;
+  usage_provider: string;
   metadata_signature: string;
   sidechat_signature: string;
   last_fingerprint: string;
@@ -150,6 +165,34 @@ export class ThreadSearchReader {
     });
   }
 
+  usage(
+    query: UsageAnalyticsQuery,
+    nowMs = Date.now(),
+  ): UsageAnalyticsSnapshot {
+    const { startMs, endMs } = usageRangeBounds(query.rangeDays, nowMs);
+    const rows = this.db
+      .prepare(
+        `SELECT
+           date(timestamp_ms / 1000, 'unixepoch', 'localtime') AS day,
+           provider,
+           model,
+           local,
+           SUM(input_tokens) AS input_tokens,
+           SUM(cached_input_tokens) AS cached_input_tokens,
+           SUM(cache_write_5m_input_tokens) AS cache_write_5m_input_tokens,
+           SUM(cache_write_1h_input_tokens) AS cache_write_1h_input_tokens,
+           SUM(output_tokens) AS output_tokens,
+           SUM(reasoning_output_tokens) AS reasoning_output_tokens,
+           COUNT(*) AS requests
+         FROM token_usage_samples
+         WHERE timestamp_ms >= ? AND timestamp_ms < ?
+         GROUP BY day, provider, model, local
+         ORDER BY day ASC`,
+      )
+      .all(startMs, endMs) as unknown as UsageAggregateRow[];
+    return buildUsageSnapshot(rows, query, nowMs);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -163,6 +206,7 @@ export class ThreadSearchReader {
 export class ThreadSearchWriter {
   private readonly db: DatabaseSync;
   private readonly insertDocument: StatementSync;
+  private readonly insertUsageSample: StatementSync;
   private changedDocuments = 0;
 
   constructor(readonly location: string) {
@@ -189,6 +233,58 @@ export class ThreadSearchWriter {
          error_text
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    this.insertUsageSample = this.db.prepare(
+      `INSERT INTO token_usage_samples(
+         sample_key,
+         timestamp_ms,
+         provider,
+         model,
+         local,
+         input_tokens,
+         cached_input_tokens,
+         cache_write_5m_input_tokens,
+         cache_write_1h_input_tokens,
+         output_tokens,
+         reasoning_output_tokens
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(sample_key) DO UPDATE SET
+         provider = CASE
+           WHEN excluded.timestamp_ms < timestamp_ms
+             AND excluded.provider <> 'unknown'
+             THEN excluded.provider
+           WHEN provider = 'unknown' AND excluded.provider <> 'unknown'
+             THEN excluded.provider
+           ELSE provider
+         END,
+         model = CASE
+           WHEN excluded.timestamp_ms < timestamp_ms
+             AND excluded.model <> 'unknown'
+             THEN excluded.model
+           WHEN model = 'unknown' AND excluded.model <> 'unknown'
+             THEN excluded.model
+           ELSE model
+         END,
+         timestamp_ms = MIN(timestamp_ms, excluded.timestamp_ms),
+         local = MAX(local, excluded.local),
+         input_tokens = MAX(input_tokens, excluded.input_tokens),
+         cached_input_tokens = MAX(
+           cached_input_tokens,
+           excluded.cached_input_tokens
+         ),
+         cache_write_5m_input_tokens = MAX(
+           cache_write_5m_input_tokens,
+           excluded.cache_write_5m_input_tokens
+         ),
+         cache_write_1h_input_tokens = MAX(
+           cache_write_1h_input_tokens,
+           excluded.cache_write_1h_input_tokens
+         ),
+         output_tokens = MAX(output_tokens, excluded.output_tokens),
+         reasoning_output_tokens = MAX(
+           reasoning_output_tokens,
+           excluded.reasoning_output_tokens
+         )`,
+    );
   }
 
   async syncSessions(
@@ -213,7 +309,7 @@ export class ThreadSearchWriter {
     const totalBytes = discovered.reduce((sum, item) => sum + item.stat.size, 0);
     let indexedBytes = discovered.reduce((sum, { session, stat }) => {
       const existing = this.transcript(threadKey(session));
-      return sum + Math.min(existing?.indexed_offset ?? 0, stat.size);
+      return sum + Math.min(processedOffset(existing), stat.size);
     }, 0);
     let indexedThreads = 0;
     onProgress({
@@ -225,7 +321,7 @@ export class ThreadSearchWriter {
 
     for (const { session, stat } of discovered) {
       const before = Math.min(
-        this.transcript(threadKey(session))?.indexed_offset ?? 0,
+        processedOffset(this.transcript(threadKey(session))),
         stat.size,
       );
       await this.indexSession(session, stat, (offset) => {
@@ -238,7 +334,7 @@ export class ThreadSearchWriter {
         });
       });
       const after = Math.min(
-        this.transcript(threadKey(session))?.indexed_offset ?? 0,
+        processedOffset(this.transcript(threadKey(session))),
         stat.size,
       );
       indexedBytes += Math.max(0, after - before);
@@ -251,6 +347,7 @@ export class ThreadSearchWriter {
       });
       await yieldToWorkerLoop();
     }
+    this.pruneExpiredUsageSamples();
   }
 
   syncSideChats(chats: IndexableSideChat[]): void {
@@ -343,6 +440,7 @@ export class ThreadSearchWriter {
     this.db.exec('BEGIN');
     try {
       this.db.exec('DELETE FROM search_transcripts');
+      this.db.exec('DELETE FROM token_usage_samples');
       this.db.exec('COMMIT');
       this.changedDocuments = 0;
     } catch (error) {
@@ -370,7 +468,9 @@ export class ThreadSearchWriter {
       existing.file_size === stat.size &&
       existing.file_mtime_ms === stat.mtimeMs &&
       existing.last_event_ms === session.lastEventMs &&
-      existing.metadata_signature === metadataSignature(session)
+      existing.metadata_signature === metadataSignature(session) &&
+      existing.indexed_offset >= stat.size &&
+      existing.usage_indexed_offset >= stat.size
     ) {
       return;
     }
@@ -386,12 +486,14 @@ export class ThreadSearchWriter {
     const rewrittenAtSameSize =
       existing !== null &&
       existing.indexed_offset === stat.size &&
+      existing.usage_indexed_offset === stat.size &&
       existing.file_size === stat.size &&
       existing.file_mtime_ms !== stat.mtimeMs;
     const mustReset =
       existing !== null &&
       (existing.jsonl_path !== session.jsonlPath ||
         stat.size < existing.indexed_offset ||
+        stat.size < existing.usage_indexed_offset ||
         identityChanged ||
         prefixChanged ||
         rewrittenAtSameSize);
@@ -448,6 +550,9 @@ export class ThreadSearchWriter {
           .prepare(
             `UPDATE search_transcripts
              SET indexed_offset = 0,
+                 usage_indexed_offset = 0,
+                 usage_model = '',
+                 usage_provider = '',
                  last_fingerprint = '',
                  file_dev = ?,
                  file_ino = ?,
@@ -478,14 +583,28 @@ export class ThreadSearchWriter {
     if (!existing) return;
 
     this.updateMetadata(session, existing);
-    const startOffset = existing.indexed_offset;
-    if (startOffset >= stat.size) {
-      this.updateFileState(key, startOffset, existing.last_fingerprint, stat);
+    const startOffset = processedOffset(existing);
+    if (
+      existing.indexed_offset >= stat.size &&
+      existing.usage_indexed_offset >= stat.size
+    ) {
+      this.updateFileState(
+        key,
+        existing.indexed_offset,
+        existing.usage_indexed_offset,
+        existing.last_fingerprint,
+        existing.usage_model,
+        existing.usage_provider,
+        stat,
+      );
       return;
     }
 
-    let lastCommittedOffset = startOffset;
+    let searchOffset = existing.indexed_offset;
+    let usageOffset = existing.usage_indexed_offset;
     let lastFingerprint = existing.last_fingerprint;
+    let usageModel = existing.usage_model;
+    let usageProvider = existing.usage_provider;
     let transactionOpen = false;
     const begin = () => {
       if (!transactionOpen) {
@@ -495,10 +614,18 @@ export class ThreadSearchWriter {
     };
     const commit = () => {
       if (!transactionOpen) return;
-      this.updateFileState(key, lastCommittedOffset, lastFingerprint, stat);
+      this.updateFileState(
+        key,
+        searchOffset,
+        usageOffset,
+        lastFingerprint,
+        usageModel,
+        usageProvider,
+        stat,
+      );
       this.db.exec('COMMIT');
       transactionOpen = false;
-      onOffset(lastCommittedOffset);
+      onOffset(Math.min(searchOffset, usageOffset));
     };
 
     try {
@@ -509,22 +636,39 @@ export class ThreadSearchWriter {
         startOffset,
         stat.size,
       )) {
-        for (const document of extractSearchDocuments(line.raw, session.source)) {
-          const fingerprint = searchFingerprint(document.kind, document.body);
-          if (fingerprint === lastFingerprint) continue;
-          this.addDocument(
-            key,
-            'transcript',
-            document.kind,
-            document.timestamp,
-            document.body,
-          );
-          lastFingerprint = fingerprint;
+        if (line.endOffset > searchOffset) {
+          for (const document of extractSearchDocuments(line.raw, session.source)) {
+            const fingerprint = searchFingerprint(document.kind, document.body);
+            if (fingerprint === lastFingerprint) continue;
+            this.addDocument(
+              key,
+              'transcript',
+              document.kind,
+              document.timestamp,
+              document.body,
+            );
+            lastFingerprint = fingerprint;
+          }
+          searchOffset = line.endOffset;
         }
-        lastCommittedOffset = line.endOffset;
-        if (lastCommittedOffset - commitBase >= COMMIT_AFTER_BYTES) {
+        if (line.endOffset > usageOffset) {
+          const extracted = extractUsageFromLine(
+            line.raw,
+            session.source,
+            usageModel,
+            usageProvider,
+            line.endOffset,
+            key,
+          );
+          usageModel = extracted.model;
+          usageProvider = extracted.provider;
+          if (extracted.sample) this.addUsageSample(extracted.sample);
+          usageOffset = line.endOffset;
+        }
+        const processed = Math.min(searchOffset, usageOffset);
+        if (processed - commitBase >= COMMIT_AFTER_BYTES) {
           commit();
-          commitBase = lastCommittedOffset;
+          commitBase = processed;
           await yieldToWorkerLoop();
           begin();
         }
@@ -626,16 +770,45 @@ export class ThreadSearchWriter {
     this.changedDocuments += 1;
   }
 
+  private addUsageSample(sample: StoredUsageSample): void {
+    if (sample.timestampMs < Date.now() - USAGE_RETENTION_MS) return;
+    this.insertUsageSample.run(
+      sample.sampleKey,
+      sample.timestampMs,
+      sample.provider,
+      sample.model,
+      sample.local ? 1 : 0,
+      sample.inputTokens,
+      sample.cachedInputTokens,
+      sample.cacheWrite5mInputTokens,
+      sample.cacheWrite1hInputTokens,
+      sample.outputTokens,
+      sample.reasoningOutputTokens,
+    );
+  }
+
+  private pruneExpiredUsageSamples(): void {
+    this.db
+      .prepare('DELETE FROM token_usage_samples WHERE timestamp_ms < ?')
+      .run(Date.now() - USAGE_RETENTION_MS);
+  }
+
   private updateFileState(
     key: string,
-    offset: number,
+    searchOffset: number,
+    usageOffset: number,
     lastFingerprint: string,
+    usageModel: string,
+    usageProvider: string,
     stat: fs.Stats,
   ): void {
     this.db
       .prepare(
         `UPDATE search_transcripts
          SET indexed_offset = ?,
+             usage_indexed_offset = ?,
+             usage_model = ?,
+             usage_provider = ?,
              last_fingerprint = ?,
              file_dev = ?,
              file_ino = ?,
@@ -644,7 +817,10 @@ export class ThreadSearchWriter {
          WHERE thread_key = ?`,
       )
       .run(
-        offset,
+        searchOffset,
+        usageOffset,
+        usageModel,
+        usageProvider,
         lastFingerprint,
         stat.dev,
         stat.ino,
@@ -668,6 +844,9 @@ export class ThreadSearchWriter {
              prefix_bytes,
              prefix_hash,
              indexed_offset,
+             usage_indexed_offset,
+             usage_model,
+             usage_provider,
              metadata_signature,
              sidechat_signature,
              last_fingerprint,
@@ -726,13 +905,31 @@ function initializeSchema(db: DatabaseSync): void {
     (db.prepare('PRAGMA user_version').get() as { user_version?: number })
       .user_version ?? 0,
   );
-  if (version !== 0 && version !== SCHEMA_VERSION) {
+  if (
+    version !== 0 &&
+    version !== 1 &&
+    version !== 2 &&
+    version !== SCHEMA_VERSION
+  ) {
     db.exec(`
       DROP TRIGGER IF EXISTS search_documents_ai;
       DROP TRIGGER IF EXISTS search_documents_ad;
       DROP TABLE IF EXISTS search_documents_fts;
       DROP TABLE IF EXISTS search_documents;
+      DROP TABLE IF EXISTS token_usage_samples;
       DROP TABLE IF EXISTS search_transcripts;
+    `);
+  }
+  if (version === 2) {
+    // v2 was only used by pre-release token-insights builds. Its per-thread
+    // samples multiplied forked Codex history and cannot be migrated safely;
+    // preserve the search index and rebuild just the local counters.
+    db.exec(`
+      DROP TABLE IF EXISTS token_usage_samples;
+      UPDATE search_transcripts
+      SET usage_indexed_offset = 0,
+          usage_model = '',
+          usage_provider = '';
     `);
   }
   db.exec(`
@@ -753,6 +950,9 @@ function initializeSchema(db: DatabaseSync): void {
       prefix_bytes INTEGER NOT NULL DEFAULT 0,
       prefix_hash TEXT NOT NULL DEFAULT '',
       indexed_offset INTEGER NOT NULL DEFAULT 0,
+      usage_indexed_offset INTEGER NOT NULL DEFAULT 0,
+      usage_model TEXT NOT NULL DEFAULT '',
+      usage_provider TEXT NOT NULL DEFAULT '',
       metadata_signature TEXT NOT NULL DEFAULT '',
       sidechat_signature TEXT NOT NULL DEFAULT '',
       last_fingerprint TEXT NOT NULL DEFAULT ''
@@ -774,6 +974,22 @@ function initializeSchema(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS search_documents_thread
       ON search_documents(thread_key, origin);
+
+    CREATE TABLE IF NOT EXISTS token_usage_samples(
+      sample_key TEXT PRIMARY KEY,
+      timestamp_ms INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      local INTEGER NOT NULL DEFAULT 0 CHECK(local IN (0, 1)),
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_output_tokens INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS token_usage_time
+      ON token_usage_samples(timestamp_ms, provider, model);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS search_documents_fts USING fts5(
       title,
@@ -834,10 +1050,56 @@ function initializeSchema(db: DatabaseSync): void {
 
     PRAGMA user_version = ${SCHEMA_VERSION};
   `);
+  ensureColumn(
+    db,
+    'search_transcripts',
+    'usage_indexed_offset',
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  ensureColumn(
+    db,
+    'search_transcripts',
+    'usage_model',
+    "TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    db,
+    'search_transcripts',
+    'usage_provider',
+    "TEXT NOT NULL DEFAULT ''",
+  );
   db.exec(`
     INSERT INTO search_documents_fts(search_documents_fts, rank)
     VALUES('rank', 'bm25(30.0, 12.0, 6.0, 4.0, 2.0, 5.0)');
   `);
+}
+
+function ensureColumn(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+  declaration: string,
+): void {
+  const columns = db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as unknown as Array<{ name: string }>;
+  if (columns.some((candidate) => candidate.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
+}
+
+function processedOffset(row: TranscriptRow | null | undefined): number {
+  return row ? Math.min(row.indexed_offset, row.usage_indexed_offset) : 0;
+}
+
+function usageRangeBounds(
+  rangeDays: UsageAnalyticsQuery['rangeDays'],
+  nowMs: number,
+): { startMs: number; endMs: number } {
+  const now = new Date(nowMs);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (rangeDays === 90 ? 90 : 365));
+  return { startMs: start.getTime(), endMs: end.getTime() };
 }
 
 async function* readCompleteJsonlLines(

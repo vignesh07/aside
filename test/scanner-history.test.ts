@@ -55,6 +55,39 @@ describe('historical session discovery', () => {
     });
   });
 
+  it('keeps Codex archived sessions in machine-wide history', () => {
+    const root = tempRoot();
+    const sessionsDir = path.join(root, 'sessions');
+    const archivedSessionsDir = path.join(root, 'archived_sessions');
+    writeOld(path.join(archivedSessionsDir, 'rollout-archived.jsonl'), [
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'codex-archived',
+          cwd: '/Users/test/archived-project',
+          git: { branch: 'main' },
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Remember this work' },
+      },
+    ]);
+
+    const result = scanCodexSessions({
+      sessionsDir,
+      archivedSessionsDir,
+      nowMs: NOW,
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.session).toMatchObject({
+      id: 'codex-archived',
+      projectName: 'archived-project',
+      title: 'Remember this work',
+      status: 'history',
+    });
+  });
+
   it('uses the rollout UUID when a fork copied its ancestor session id', () => {
     const sessionsDir = path.join(tempRoot(), 'sessions');
     const rolloutId = '019f793d-837d-78b3-bde0-cd5de6cb80d4';

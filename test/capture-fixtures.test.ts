@@ -10,6 +10,7 @@ import { buildTodayDiary } from '../src/core/today-diary.js';
 import {
   captureProviderAuthCoordinator,
   captureSideChatService,
+  captureUsageSearchService,
   generatedTodayCaptureFixture,
   TODAY_CAPTURE_MODEL,
   TODAY_CAPTURE_PROVIDER,
@@ -122,5 +123,27 @@ describe('generated Today capture fixture', () => {
     expect(
       captureProviderAuthCoordinator(false).todayRecapsEnabled('claude-cli'),
     ).toBe(false);
+  });
+
+  it('uses deterministic aggregate counters for usage captures', async () => {
+    const search = captureUsageSearchService();
+    const usage = await search.usage?.({
+      rangeDays: 365,
+      providers: [],
+      models: [],
+    });
+
+    expect(usage).toMatchObject({
+      endDate: '2026-07-31',
+      totals: { activeDays: 13 },
+    });
+    expect(usage?.totals.totalTokens).toBeGreaterThan(4_000_000);
+    expect(usage?.providers.map((provider) => provider.id)).toEqual([
+      'openai',
+      'anthropic',
+      'google',
+      'ollama',
+    ]);
+    search.dispose();
   });
 });

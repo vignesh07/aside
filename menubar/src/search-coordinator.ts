@@ -13,8 +13,20 @@ import type {
   ThreadSearchResult,
   ThreadSearchService,
 } from './search-types.js';
+import { emptyUsageSnapshot } from './usage-analytics.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 
-type WorkerResponse = { type: 'status'; status: SearchIndexStatus };
+type WorkerResponse =
+  | { type: 'status'; status: SearchIndexStatus }
+  | {
+      type: 'usage-result';
+      requestId: number;
+      snapshot: UsageAnalyticsSnapshot;
+    }
+  | { type: 'usage-error'; requestId: number; message: string };
 
 export class ThreadSearchCoordinator implements ThreadSearchService {
   private readonly reader: ThreadSearchReader;
@@ -28,6 +40,14 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
   private sideChatSignature = '\u0000';
   private lastSessions: IndexableThread[] = [];
   private lastSideChats: IndexableSideChat[] = [];
+  private usageRequestId = 0;
+  private readonly pendingUsage = new Map<
+    number,
+    {
+      resolve: (snapshot: UsageAnalyticsSnapshot) => void;
+      reject: (error: Error) => void;
+    }
+  >();
   private disposed = false;
 
   constructor(
@@ -48,9 +68,16 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
       throw error;
     }
     this.worker.on('message', (message: WorkerResponse) => {
-      if (message.type !== 'status') return;
-      this.status = message.status;
-      this.emitStatus();
+      if (message.type === 'status') {
+        this.status = message.status;
+        this.emitStatus();
+        return;
+      }
+      const pending = this.pendingUsage.get(message.requestId);
+      if (!pending) return;
+      this.pendingUsage.delete(message.requestId);
+      if (message.type === 'usage-result') pending.resolve(message.snapshot);
+      else pending.reject(new Error(message.message));
     });
     this.worker.on('error', (error) => {
       this.status = {
@@ -58,6 +85,7 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
         phase: 'error',
         message: error.message,
       };
+      this.failPendingUsage(error);
       this.emitStatus();
     });
     this.worker.on('exit', (code) => {
@@ -67,6 +95,9 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
         phase: 'error',
         message: `Search index worker stopped with code ${code}.`,
       };
+      this.failPendingUsage(
+        new Error(`Search index worker stopped with code ${code}.`),
+      );
       this.emitStatus();
     });
   }
@@ -104,6 +135,15 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     return this.reader.search(query, limit);
   }
 
+  usage(query: UsageAnalyticsQuery): Promise<UsageAnalyticsSnapshot> {
+    if (this.disposed) return Promise.resolve(emptyUsageSnapshot(query));
+    const requestId = ++this.usageRequestId;
+    return new Promise((resolve, reject) => {
+      this.pendingUsage.set(requestId, { resolve, reject });
+      this.worker.postMessage({ type: 'usage', requestId, query });
+    });
+  }
+
   rebuild(): void {
     if (this.disposed) return;
     const sessions = this.lastSessions;
@@ -128,6 +168,7 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     if (this.disposed) return;
     this.disposed = true;
     this.listeners.clear();
+    this.failPendingUsage(new Error('Search index closed.'));
     this.worker.postMessage({ type: 'dispose' });
     void this.worker.terminate();
     this.reader.close();
@@ -135,6 +176,11 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
 
   private emitStatus(): void {
     for (const listener of this.listeners) listener();
+  }
+
+  private failPendingUsage(error: Error): void {
+    for (const pending of this.pendingUsage.values()) pending.reject(error);
+    this.pendingUsage.clear();
   }
 }
 
@@ -153,6 +199,9 @@ class UnavailableThreadSearchService implements ThreadSearchService {
   syncSideChats(): void {}
   search(): Promise<ThreadSearchResult[]> {
     return Promise.resolve([]);
+  }
+  usage(query: UsageAnalyticsQuery): Promise<UsageAnalyticsSnapshot> {
+    return Promise.resolve(emptyUsageSnapshot(query));
   }
   rebuild(): void {}
   getStatus(): SearchIndexStatus {
@@ -187,6 +236,30 @@ export function createThreadSearchService(
       );
     }
   }
+}
+
+/** Capture-only reader that renders an already-seeded database without
+ * launching an indexing worker or touching source transcripts. */
+export function createReadOnlyThreadSearchService(
+  databasePath: string,
+): ThreadSearchService {
+  const reader = new ThreadSearchReader(databasePath);
+  return {
+    syncSessions() {},
+    syncSideChats() {},
+    search: async (query, limit) => reader.search(query, limit),
+    usage: async (query) => reader.usage(query),
+    rebuild() {},
+    getStatus: () => ({
+      phase: 'ready',
+      indexedThreads: 0,
+      totalThreads: 0,
+      indexedBytes: 0,
+      totalBytes: 0,
+    }),
+    onStatus: () => () => {},
+    dispose: () => reader.close(),
+  };
 }
 
 function quarantineSearchDatabase(databasePath: string): void {

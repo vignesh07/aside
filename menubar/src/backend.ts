@@ -66,6 +66,11 @@ import type {
   ThreadSearchService,
 } from './search-types.js';
 import { ActivityDatabase } from './activity-database.js';
+import { emptyUsageSnapshot } from './usage-analytics.js';
+import type {
+  UsageAnalyticsQuery,
+  UsageAnalyticsSnapshot,
+} from './usage-types.js';
 
 export interface SessionSummary {
   id: string;
@@ -567,6 +572,12 @@ export class MenubarBackend {
 
   rebuildSearchIndex(): void {
     this.search?.rebuild();
+  }
+
+  async usageAnalytics(
+    query: UsageAnalyticsQuery,
+  ): Promise<UsageAnalyticsSnapshot> {
+    return this.search?.usage?.(query) ?? emptyUsageSnapshot(query);
   }
 
   getState(): MenubarState {
