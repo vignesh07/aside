@@ -758,7 +758,7 @@ export default function Home() {
           <Brand />
           <p>Read-only side chats for coding agents.</p>
           <div>
-            <span>macOS preview · v0.1.8</span>
+            <span>macOS preview · v0.1.9</span>
             <a href="#privacy">Privacy</a>
             <a href="#top">Back to top ↑</a>
           </div>
