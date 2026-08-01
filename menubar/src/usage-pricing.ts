@@ -2,7 +2,7 @@ import type { UsageTokenCounts } from './usage-types.js';
 
 export const USAGE_PRICING_AS_OF = '2026-07-31';
 export const LOCAL_BENCHMARK_LABEL =
-  'GPT-5.6 Luna public API rate ($1 input / $6 output per 1M)';
+  'GPT-5.6 Luna public API rate ($0.20 input / $1.20 output per 1M)';
 
 interface ModelPrice {
   provider: string;
@@ -15,12 +15,14 @@ interface ModelPrice {
 }
 
 // USD per million tokens. Sources checked 2026-07-31:
-// https://developers.openai.com/api/docs/models/compare
+// https://developers.openai.com/api/docs/models/gpt-5.6-sol
+// https://developers.openai.com/api/docs/models/gpt-5.6-terra
+// https://developers.openai.com/api/docs/models/gpt-5.6-luna
 // https://platform.claude.com/docs/en/about-claude/pricing
 // https://ai.google.dev/gemini-api/docs/pricing
 const PRICES: ModelPrice[] = [
-  price('openai', /^gpt-5\.6-terra(?:-|$)/, 2.5, 0.25, 3.125, 15),
-  price('openai', /^gpt-5\.6-luna(?:-|$)/, 1, 0.1, 1.25, 6),
+  price('openai', /^gpt-5\.6-terra(?:-|$)/, 2, 0.2, 2.5, 12),
+  price('openai', /^gpt-5\.6-luna(?:-|$)/, 0.2, 0.02, 0.25, 1.2),
   price('openai', /^gpt-5\.6(?:-sol)?(?:-|$)/, 5, 0.5, 6.25, 30),
   price('openai', /^gpt-5\.5(?!-pro)(?:-|$)/, 5, 0.5, 6.25, 30),
   price('openai', /^gpt-5\.5-pro(?:-|$)/, 30, 30, 30, 180),
@@ -45,7 +47,7 @@ const PRICES: ModelPrice[] = [
 ];
 
 const LOCAL_BENCHMARK: ModelPrice =
-  price('local', /.*/, 1, 0.1, 1.25, 6);
+  price('local', /.*/, 0.2, 0.02, 0.25, 1.2);
 
 export interface UsageEstimate {
   costUsd: number;

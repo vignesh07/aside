@@ -67,6 +67,10 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /You choose whether Today can send/);
   assert.match(html, /limited, redacted set of relevant activity/);
   assert.match(html, /recap and its evidence links are saved locally/);
+  assert.match(html, /Usage sits beside Today\./);
+  assert.match(html, /90-day or\s+one-year view of token and model activity/);
+  assert.match(html, /API-equivalent estimates, not invoices/);
+  assert.match(html, /local-model equivalents/);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
   assert.match(html, /Open source · MIT/);
   assert.match(html, /Aside is open source\./);

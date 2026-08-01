@@ -21,6 +21,14 @@ const todayAuthorization = fs.readFileSync(
   new URL('../menubar/src/today-authorization.ts', import.meta.url),
   'utf8',
 );
+const searchCoordinator = fs.readFileSync(
+  new URL('../menubar/src/search-coordinator.ts', import.meta.url),
+  'utf8',
+);
+const searchWorker = fs.readFileSync(
+  new URL('../menubar/src/search-worker.ts', import.meta.url),
+  'utf8',
+);
 
 describe('menubar product surfaces', () => {
   it('keeps account management global instead of duplicating it in the composer', () => {
@@ -142,7 +150,15 @@ describe('menubar product surfaces', () => {
     expect(indexHtml).toContain('id="usage-grid"');
     expect(indexHtml).toContain('API equivalent');
     expect(indexHtml).toContain('Local equivalent');
+    expect(renderer).toContain("title: 'Usage'");
+    expect(renderer).toContain('usage: true');
     expect(renderer).toContain('window.aside.getUsage(usageQuery())');
     expect(renderer).toContain('unknown cloud models stay unpriced');
+    expect(renderer).toContain('Aside’s own observer sessions are excluded.');
+    expect(renderer).toContain('if (!usageRefreshTimer)');
+    expect(searchCoordinator).toContain(
+      "this.worker.postMessage({ type: 'usage', requestId, query })",
+    );
+    expect(searchWorker).toContain("message.type === 'usage'");
   });
 });

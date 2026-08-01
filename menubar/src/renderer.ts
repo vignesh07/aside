@@ -2728,11 +2728,12 @@ function render(state: MenubarState): void {
     `${state.searchIndex.phase}:${state.searchIndex.indexedBytes}:${state.searchIndex.totalBytes}`;
   if (activeView === 'usage' && nextUsageIndexSignature !== usageIndexSignature) {
     usageIndexSignature = nextUsageIndexSignature;
-    if (usageRefreshTimer) clearTimeout(usageRefreshTimer);
-    usageRefreshTimer = setTimeout(() => {
-      usageRefreshTimer = null;
-      if (activeView === 'usage') void loadUsage();
-    }, 600);
+    if (!usageRefreshTimer) {
+      usageRefreshTimer = setTimeout(() => {
+        usageRefreshTimer = null;
+        if (activeView === 'usage') void loadUsage();
+      }, 600);
+    }
   }
 }
 
@@ -2817,7 +2818,8 @@ function renderUsage(snapshot: UsageAnalyticsSnapshot): void {
     `API-equivalent estimates use public list prices checked ${formatShortDate(snapshot.pricingAsOf)}. ` +
     'They are not invoices and exclude subscriptions, free tiers, taxes, tool-call charges, ' +
     'and special regional or long-context rates. ' +
-    `Local equivalents use a conservative ${snapshot.localBenchmark}; unknown cloud models stay unpriced.`;
+    `Local equivalents use a conservative ${snapshot.localBenchmark}; unknown cloud models stay unpriced. ` +
+    'Aside’s own observer sessions are excluded.';
 }
 
 function renderUsageProviders(snapshot: UsageAnalyticsSnapshot): void {

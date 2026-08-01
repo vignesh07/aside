@@ -27,6 +27,10 @@ thread, history, and observer model remain independent from every other thread.
   recap when the saved recap is missing or stale. The supporting work stays
   grouped by project and thread, with waiting and ready-to-review states kept
   visible.
+- **Local usage history.** Open **Usage** beside Today for a 90-day or one-year
+  view of token and model activity across Codex, Claude Code, and Pi/OpenCode
+  where logs expose it. Cost figures are API-equivalent estimates, not
+  invoices; local runs show local-model equivalents.
 - **Fleet thread.** Ask across recent agents and query-relevant history.
 - **Machine-wide full-content search.** Search user prompts, agent replies,
   commands, file targets, failures, and Aside side chats across every discovered

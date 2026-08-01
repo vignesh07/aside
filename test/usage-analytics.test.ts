@@ -157,7 +157,7 @@ describe('local token usage analytics', () => {
       unpricedTokens: 0,
     });
     expect(snapshot.totals.estimatedCostUsd).toBeCloseTo(0.014375, 8);
-    expect(snapshot.totals.estimatedSavingsUsd).toBeCloseTo(0.000401, 8);
+    expect(snapshot.totals.estimatedSavingsUsd).toBeCloseTo(0.0000802, 8);
     expect(snapshot.currentStreak).toBe(2);
     expect(snapshot.longestStreak).toBe(2);
     expect(snapshot.providers.map((provider) => provider.id)).toEqual([
@@ -302,6 +302,46 @@ describe('local token usage analytics', () => {
       },
     );
     expect(estimate).toEqual({ costUsd: 0, savingsUsd: 0, priced: false });
+  });
+
+  it('uses the published GPT-5.6 Terra and Luna token rates', () => {
+    const oneMillionEach = {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 1_000_000,
+      cacheWrite5mInputTokens: 1_000_000,
+      cacheWrite1hInputTokens: 0,
+      outputTokens: 1_000_000,
+      reasoningOutputTokens: 0,
+      totalTokens: 4_000_000,
+      requests: 1,
+    };
+
+    const terra = estimateUsage(
+      'openai',
+      'gpt-5.6-terra',
+      false,
+      oneMillionEach,
+    );
+    expect(terra.priced).toBe(true);
+    expect(terra.costUsd).toBeCloseTo(16.7, 8);
+
+    const luna = estimateUsage(
+      'openai',
+      'gpt-5.6-luna',
+      false,
+      oneMillionEach,
+    );
+    expect(luna.priced).toBe(true);
+    expect(luna.costUsd).toBeCloseTo(1.67, 8);
+
+    const local = estimateUsage('ollama', 'qwen3-coder:30b', true, {
+      ...oneMillionEach,
+      cachedInputTokens: 0,
+      cacheWrite5mInputTokens: 0,
+      totalTokens: 2_000_000,
+    });
+    expect(local).toMatchObject({ costUsd: 0, priced: true });
+    expect(local.savingsUsd).toBeCloseTo(1.4, 8);
   });
 
   it('rejects malformed and implausible transcript counters without storing raw IDs', () => {

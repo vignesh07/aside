@@ -361,6 +361,13 @@ export default function Home() {
                 relevant activity to a cloud model. The recap and its evidence
                 links are saved locally on your Mac.
               </p>
+              <p className="feature-note">
+                <strong>Usage sits beside Today.</strong> Open a 90-day or
+                one-year view of token and model activity across Codex, Claude
+                Code, and Pi/OpenCode where logs expose it. Cost figures are
+                API-equivalent estimates, not invoices; local runs show
+                local-model equivalents.
+              </p>
             </div>
             <div
               className="feature-visual today-feature-visual"
