@@ -1,10 +1,57 @@
-import { getProviders, listInstalledModels } from '../core/providers/index.js';
+import {
+  getProviders,
+  listConfiguredPiModels,
+  listInstalledModels,
+} from '../core/providers/index.js';
 
 export interface ModelOption {
   provider: string;
   model: string;
   recommended?: boolean;
   label?: string;
+}
+
+interface ConfiguredPiModel {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+const PI_PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  'openai-codex': 'ChatGPT',
+  google: 'Google',
+  'github-copilot': 'GitHub Copilot',
+  openrouter: 'OpenRouter',
+  ollama: 'Ollama',
+  'amazon-bedrock': 'Amazon Bedrock',
+  'azure-openai': 'Azure OpenAI',
+  'vercel-ai-gateway': 'Vercel AI Gateway',
+};
+
+/** Keep Pi's upstream recipient visible instead of presenting Pi as the cloud. */
+export function configuredPiModelOptions(
+  models: readonly ConfiguredPiModel[],
+): ModelOption[] {
+  return models.map((model) => ({
+    provider: 'pi-cli',
+    // Pin both halves. A bare model id could silently resolve to another Pi
+    // provider with a model of the same name.
+    model: `${model.provider}/${model.id}`,
+    label: `${piProviderLabel(model.provider)} · ${model.name}`,
+    recommended: true,
+  }));
+}
+
+function piProviderLabel(provider: string): string {
+  const known = PI_PROVIDER_LABELS[provider.toLowerCase()];
+  if (known) return known;
+  return provider
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || provider;
 }
 
 /**
@@ -30,21 +77,30 @@ export function flattenModelCatalog(): ModelOption[] {
 }
 
 /**
- * The catalog, plus whatever local models are actually installed.
+ * The catalog, plus models discovered from the user's local runtimes.
  *
  * The static Ollama entries are guesses at common models; this reports what the
- * user really pulled. Best-effort — with no local runtime running the result is
- * just the static catalog, so callers need no fallback path.
+ * user really pulled. Pi is different: Aside exposes only the exact upstream
+ * provider/model Pi reports as configured, rather than dumping Pi's enormous
+ * registry into a compact Mac picker. Both lookups are best-effort.
  */
 export async function flattenModelCatalogWithLocal(): Promise<ModelOption[]> {
   const base = flattenModelCatalog();
-  const installed = await listInstalledModels();
-  if (installed.length === 0) return base;
+  const [installed, configuredPi] = await Promise.all([
+    listInstalledModels(),
+    listConfiguredPiModels(),
+  ]);
 
-  // Real installed models replace the guessed Ollama entries entirely.
-  const withoutGuesses = base.filter((o) => o.provider !== 'ollama');
+  // Pi has no useful static guess: its configured upstream is the privacy and
+  // routing boundary. Real Ollama models replace guesses only when detected.
+  const withoutDynamicEntries = base.filter(
+    (option) =>
+      option.provider !== 'pi-cli' &&
+      (installed.length === 0 || option.provider !== 'ollama'),
+  );
   return [
-    ...withoutGuesses,
+    ...withoutDynamicEntries,
+    ...configuredPiModelOptions(configuredPi),
     ...installed.map((m, i) => ({
       provider: 'ollama',
       model: m.id,

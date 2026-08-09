@@ -280,6 +280,7 @@ function activeSession(state: MenubarState): SessionSummary | undefined {
 function providerMark(provider: ProviderAuthId): string {
   if (provider === 'codex-cli') return 'G';
   if (provider === 'claude-cli') return 'C';
+  if (provider === 'pi-cli') return 'P';
   return 'O';
 }
 
@@ -725,16 +726,57 @@ async function disconnectProvider(provider: ProviderAuthId): Promise<void> {
   }
 }
 
+function providerRecoveryLink(status: ProviderAuthStatus) {
+  if (
+    status.state === 'missing' ||
+    (status.provider === 'pi-cli' &&
+      (status.reason === 'no_models' || status.reason === 'client_too_old'))
+  ) {
+    return providerHelpLink(status.provider);
+  }
+  return undefined;
+}
+
+function configuredPiModelLabel(): string | null {
+  const options = latestState?.models.filter(
+    (model) => model.provider === 'pi-cli',
+  ) ?? [];
+  const selected = options.find((model) => model.recommended) ?? options[0];
+  if (!selected) return null;
+  return (selected.label ?? selected.model).replace(/\s+\([^()]+\)$/, '');
+}
+
+function providerDetail(status: ProviderAuthStatus): string {
+  if (status.provider === 'pi-cli' && status.state === 'configured') {
+    const recipient = configuredPiModelLabel();
+    return recipient
+      ? `${recipient} via Pi`
+      : 'Configured upstream model via Pi';
+  }
+  return providerStatusText(status);
+}
+
+function disconnectDetail(status: ProviderAuthStatus): string {
+  if (status.provider === 'pi-cli') {
+    return 'Only disconnects from Aside. Pi accounts and settings stay unchanged.';
+  }
+  if (status.provider === 'ollama') {
+    return 'Only disconnects from Aside. Ollama stays available on this Mac.';
+  }
+  return `Only disconnects from Aside. ${providerDisplayName(status.provider)} stays signed in.`;
+}
+
 function providerActionLabel(status: ProviderAuthStatus): string {
   if (busyProviderId === status.provider) {
     return status.state === 'signed_out' ? 'Waiting…' : 'Working…';
   }
   if (canDisconnectProvider(status)) return 'Disconnect';
-  const help = status.state === 'missing'
-    ? providerHelpLink(status.provider)
-    : undefined;
-  if (help) return help.label;
+  const help = providerRecoveryLink(status);
+  if (help) {
+    return status.reason === 'client_too_old' ? 'Update Guide…' : help.label;
+  }
   if (status.state === 'signed_in') return `Use ${providerDisplayName(status.provider)}`;
+  if (status.state === 'configured') return 'Use Pi';
   if (status.state === 'local_ready') return 'Use Ollama';
   if (status.state === 'signed_out') return 'Sign in';
   if (status.reason === 'no_models') return 'No models';
@@ -743,9 +785,7 @@ function providerActionLabel(status: ProviderAuthStatus): string {
 }
 
 function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
-  const help = status.state === 'missing'
-    ? providerHelpLink(status.provider)
-    : undefined;
+  const help = providerRecoveryLink(status);
   const row = document.createElement('div');
   row.className = `provider-row${isProviderUsable(status) ? ' usable' : ''}`;
 
@@ -762,12 +802,13 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
   detail.className = 'provider-detail';
   detail.textContent =
     pendingDisconnectId === status.provider
-      ? `Only disconnect from Aside. ${providerDisplayName(status.provider)} stays signed in.`
+      ? disconnectDetail(status)
       : busyProviderId === status.provider
         ? status.state === 'signed_out'
           ? 'Waiting for sign-in in your browser…'
           : 'Updating Aside…'
-        : providerStatusText(status);
+        : providerDetail(status);
+  detail.title = detail.textContent;
   copy.append(name, detail);
 
   row.append(mark, copy);
@@ -798,7 +839,10 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
   action.type = 'button';
   action.className = `provider-action${
     !status.enabled &&
-    (status.state === 'signed_in' || status.state === 'local_ready' || help)
+    (status.state === 'signed_in' ||
+      status.state === 'configured' ||
+      status.state === 'local_ready' ||
+      help)
       ? ' primary'
       : ''
   }`;
@@ -807,7 +851,8 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
   action.disabled =
     Boolean(busyProviderId) ||
     (!status.enabled &&
-      ((status.state === 'missing' && !help) || status.reason === 'no_models'));
+      ((status.state === 'missing' && !help) ||
+        (status.reason === 'no_models' && !help)));
   action.addEventListener('click', () => {
     if (canDisconnectProvider(status)) {
       pendingDisconnectId = status.provider;
@@ -843,6 +888,11 @@ function fillProviderList(container: HTMLElement): void {
 function renderProviderSurfaces(): void {
   const key = JSON.stringify({
     providerAuth,
+    models: latestState?.models.map((model) => ({
+      provider: model.provider,
+      model: model.model,
+      label: model.label,
+    })),
     authPhase,
     authError,
     busyProviderId,
@@ -2389,7 +2439,9 @@ function renderModels(state: MenubarState): void {
     activeKey,
     activeProviderLabel,
     activeAvailable ? 'active' : 'locked',
-    ...available.map((model) => modelKey(model.provider, model.model)),
+    ...available.map(
+      (model) => `${modelKey(model.provider, model.model)}:${model.label ?? ''}`,
+    ),
   ].join('|');
   if (modelsEl.dataset['key'] !== modelsKey) {
     modelsEl.dataset['key'] = modelsKey;

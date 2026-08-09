@@ -4,6 +4,7 @@ import type {
 } from '../../dist/types/activity.js';
 import type { GeneratedDailyRecapArtifact } from '../../dist/types/generated-artifact.js';
 import type { TrackedSession } from '../../dist/types/session.js';
+import type { ModelOption } from '../../dist/config/model-catalog.js';
 import { curateNarrativeActivity } from '../../dist/core/activity-narrative.js';
 import { packActivityEvidence } from '../../dist/core/activity-evidence-pack.js';
 import { SideChatService } from '../../dist/core/side-chat-service.js';
@@ -22,6 +23,9 @@ const TODAY_CAPTURE_DAY = '2026-07-31';
 const TODAY_CAPTURE_TIME_ZONE = 'UTC';
 export const TODAY_CAPTURE_PROVIDER = 'claude-cli';
 export const TODAY_CAPTURE_MODEL = 'claude-haiku-4-5-20251001';
+const PI_CAPTURE_PROVIDER = 'anthropic';
+const PI_CAPTURE_MODEL = 'claude-sonnet-4-6';
+const PI_CAPTURE_MODEL_NAME = 'Claude Sonnet 4.6';
 
 export interface GeneratedTodayCaptureFixture {
   now: string;
@@ -31,6 +35,30 @@ export interface GeneratedTodayCaptureFixture {
   sessions: TrackedSession[];
 }
 
+/** Runtime model choices for captures, including Pi's exact upstream target. */
+export function captureModelCatalog(): ModelOption[] {
+  return [
+    {
+      provider: 'claude-cli',
+      model: TODAY_CAPTURE_MODEL,
+      label: 'Claude Haiku 4.5 (claude-haiku-4-5-20251001)',
+      recommended: true,
+    },
+    {
+      provider: 'codex-cli',
+      model: 'gpt-5.6-sol',
+      label: 'GPT-5.6 Sol (gpt-5.6-sol)',
+      recommended: true,
+    },
+    {
+      provider: 'pi-cli',
+      model: `${PI_CAPTURE_PROVIDER}/${PI_CAPTURE_MODEL}`,
+      label: `Anthropic · ${PI_CAPTURE_MODEL_NAME}`,
+      recommended: true,
+    },
+  ];
+}
+
 /** Provider/account state for captures, with no filesystem, CLI, or HTTP I/O. */
 export function captureProviderAuthCoordinator(
   todayRecapsEnabled = true,
@@ -38,7 +66,11 @@ export function captureProviderAuthCoordinator(
   return new ProviderAuthCoordinator({
     consentStore: {
       load: () => ({
-        enabled: new Set<ProviderAuthId>(['codex-cli', 'claude-cli']),
+        enabled: new Set<ProviderAuthId>([
+          'codex-cli',
+          'claude-cli',
+          'pi-cli',
+        ]),
         todayRecaps: new Set<ProviderAuthId>(
           todayRecapsEnabled ? ['codex-cli', 'claude-cli'] : [],
         ),
@@ -56,6 +88,14 @@ export function captureProviderAuthCoordinator(
       stderr: '',
       timedOut: false,
       spawnFailed: false,
+    }),
+    inspectPi: async () => ({
+      state: 'ready',
+      model: {
+        provider: PI_CAPTURE_PROVIDER,
+        id: PI_CAPTURE_MODEL,
+        name: PI_CAPTURE_MODEL_NAME,
+      },
     }),
     buildEnvironment: () => ({ PATH: '/capture/bin' }),
     fetch: async () =>

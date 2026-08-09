@@ -16,6 +16,7 @@ describe('createVendorCliEnv', () => {
       XDG_CONFIG_HOME: '/Users/me/.config',
       CODEX_HOME: '/Users/me/.codex-work',
       CLAUDE_CONFIG_DIR: '/Users/me/.claude-work',
+      PI_CODING_AGENT_DIR: '/Users/me/.pi-work',
     });
 
     expect(result).toEqual({
@@ -31,6 +32,7 @@ describe('createVendorCliEnv', () => {
       XDG_CONFIG_HOME: '/Users/me/.config',
       CODEX_HOME: '/Users/me/.codex-work',
       CLAUDE_CONFIG_DIR: '/Users/me/.claude-work',
+      PI_CODING_AGENT_DIR: '/Users/me/.pi-work',
     });
   });
 
@@ -44,6 +46,7 @@ describe('createVendorCliEnv', () => {
       ANTHROPIC_API_KEY: 'anthropic-key',
       ANTHROPIC_AUTH_TOKEN: 'anthropic-token',
       CLAUDE_CODE_OAUTH_TOKEN: 'claude-token',
+      PI_API_KEY: 'pi-key',
       SOME_API_KEY: 'other-key',
       GITHUB_TOKEN: 'github-token',
       AWS_SECRET_ACCESS_KEY: 'aws-secret',

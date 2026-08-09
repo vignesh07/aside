@@ -8,6 +8,7 @@ import { curateNarrativeActivity } from '../dist/core/activity-narrative.js';
 import { packActivityEvidence } from '../dist/core/activity-evidence-pack.js';
 import { buildTodayDiary } from '../src/core/today-diary.js';
 import {
+  captureModelCatalog,
   captureProviderAuthCoordinator,
   captureSideChatService,
   captureUsageSearchService,
@@ -113,6 +114,7 @@ describe('generated Today capture fixture', () => {
     ).resolves.toEqual([
       { provider: 'codex-cli', state: 'signed_in', enabled: true },
       { provider: 'claude-cli', state: 'signed_in', enabled: true },
+      { provider: 'pi-cli', state: 'configured', enabled: true },
       {
         provider: 'ollama',
         state: 'error',
@@ -123,6 +125,20 @@ describe('generated Today capture fixture', () => {
     expect(
       captureProviderAuthCoordinator(false).todayRecapsEnabled('claude-cli'),
     ).toBe(false);
+    expect(
+      captureProviderAuthCoordinator().todayRecapsEnabled('pi-cli'),
+    ).toBe(false);
+  });
+
+  it('names Pi\'s exact upstream recipient in deterministic captures', () => {
+    expect(
+      captureModelCatalog().find((model) => model.provider === 'pi-cli'),
+    ).toEqual({
+      provider: 'pi-cli',
+      model: 'anthropic/claude-sonnet-4-6',
+      label: 'Anthropic · Claude Sonnet 4.6',
+      recommended: true,
+    });
   });
 
   it('uses deterministic aggregate counters for usage captures', async () => {

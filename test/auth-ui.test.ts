@@ -21,6 +21,11 @@ const models = [
   { provider: 'codex-cli', model: 'codex-fast', recommended: true },
   { provider: 'codex-cli', model: 'codex-deep' },
   { provider: 'claude-cli', model: 'claude-fast', recommended: true },
+  {
+    provider: 'pi-cli',
+    model: 'openai-codex/gpt-5.4',
+    recommended: true,
+  },
   { provider: 'openai', model: 'direct-api' },
 ];
 
@@ -33,7 +38,9 @@ describe('auth UI state', () => {
 
   it('allows only enabled and ready providers', () => {
     expect(isProviderUsable(auth('codex-cli', 'signed_in', true))).toBe(true);
+    expect(isProviderUsable(auth('pi-cli', 'configured', true))).toBe(true);
     expect(isProviderUsable(auth('ollama', 'local_ready', true))).toBe(true);
+    expect(isProviderUsable(auth('pi-cli', 'configured'))).toBe(false);
     expect(isProviderUsable(auth('claude-cli', 'signed_out', true))).toBe(false);
     expect(isProviderUsable(auth('claude-cli', 'error', true))).toBe(false);
   });
@@ -77,6 +84,9 @@ describe('auth UI state', () => {
     expect(
       recommendedModelForProvider(models, 'claude-cli')?.model,
     ).toBe('claude-fast');
+    expect(
+      recommendedModelForProvider(models, 'pi-cli')?.model,
+    ).toBe('openai-codex/gpt-5.4');
     expect(recommendedModelForProvider(models, 'ollama')).toBeUndefined();
   });
 
@@ -98,7 +108,46 @@ describe('auth UI state', () => {
       title: 'Open the official Claude Code setup guide',
       url: 'https://code.claude.com/docs/en/getting-started',
     });
+    expect(providerStatusText(auth('pi-cli', 'missing'))).toBe(
+      'Pi was not found',
+    );
+    expect(
+      providerStatusText({
+        provider: 'pi-cli',
+        state: 'signed_out',
+        enabled: false,
+        reason: 'no_models',
+      }),
+    ).toBe('No models configured in Pi');
+    expect(
+      providerStatusText({
+        provider: 'pi-cli',
+        state: 'error',
+        enabled: false,
+        reason: 'client_too_old',
+      }),
+    ).toBe('Pi needs to be updated');
+    expect(providerHelpLink('pi-cli')).toEqual({
+      label: 'Setup Guide…',
+      title: 'Open the official Pi provider setup guide',
+      url: 'https://pi.dev/docs/latest/providers',
+    });
     expect(providerHelpLink('ollama')).toBeUndefined();
+  });
+
+  it('shows models delegated through an explicitly enabled Pi client', () => {
+    expect(
+      visibleModels(models, [auth('pi-cli', 'configured', true)]),
+    ).toEqual([
+      {
+        provider: 'pi-cli',
+        model: 'openai-codex/gpt-5.4',
+        recommended: true,
+      },
+    ]);
+    expect(providerStatusText(auth('pi-cli', 'configured'))).toBe(
+      'Models configured in Pi',
+    );
   });
 
   it('surfaces unreadable Aside consent instead of blaming vendor sign-in', () => {

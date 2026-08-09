@@ -16,6 +16,7 @@ import {
 import { assembleSystemPrompt } from '../src/core/providers/types.js';
 import { isObserverSession } from '../src/core/session-scanner.js';
 import { DEFAULT_PROVIDER } from '../src/config/defaults.js';
+import { configuredPiModelOptions } from '../src/config/model-catalog.js';
 import { composeClaudeTurnContent } from '../src/core/providers/claude-session.js';
 import { claudeObserverArgs } from '../src/core/providers/claude-session.js';
 import { codexObserverArgs } from '../src/core/providers/codex-cli.js';
@@ -49,20 +50,21 @@ function bodyOf(fn: ReturnType<typeof stubFetch>) {
 }
 
 describe('registry', () => {
-  it('leads with the login-backed providers, then the key-backed ones', () => {
-    // Both CLI providers delegate to a vendor client the user is already signed
-    // into, so neither costs them a credential.
+  it('leads with the delegating clients, then the key-backed ones', () => {
+    // These providers delegate to a client the user already configured, so
+    // Aside never needs to copy its credentials.
     expect(getProviders().map((p) => p.id)).toEqual([
       'claude-cli',
       'codex-cli',
+      'pi-cli',
       'anthropic',
       'openai',
       'ollama',
     ]);
   });
 
-  it('offers a login for each vendor, needing no key', () => {
-    for (const id of ['claude-cli', 'codex-cli']) {
+  it('needs no Aside-owned key for each delegating client', () => {
+    for (const id of ['claude-cli', 'codex-cli', 'pi-cli']) {
       const provider = getProvider(id)!;
       expect(provider.requiresApiKey).toBe(false);
       expect(provider.apiKeyEnv).toEqual([]);
@@ -89,6 +91,47 @@ describe('registry', () => {
     await expect(
       complete('gemini', { model: 'x', systemPrompt: 's', context: '', history: '', question: 'q' }),
     ).rejects.toThrow(/Unknown provider "gemini".*anthropic/s);
+  });
+
+  it('pins Pi model choices to a readable upstream provider and model', () => {
+    expect(
+      configuredPiModelOptions([
+        {
+          provider: 'anthropic',
+          id: 'claude-sonnet-4-6',
+          name: 'Claude Sonnet 4.6',
+        },
+        {
+          provider: 'github-copilot',
+          id: 'gpt-5',
+          name: 'GPT-5',
+        },
+        {
+          provider: 'openai-codex',
+          id: 'gpt-5.4',
+          name: 'GPT-5.4',
+        },
+      ]),
+    ).toEqual([
+      {
+        provider: 'pi-cli',
+        model: 'anthropic/claude-sonnet-4-6',
+        label: 'Anthropic · Claude Sonnet 4.6',
+        recommended: true,
+      },
+      {
+        provider: 'pi-cli',
+        model: 'github-copilot/gpt-5',
+        label: 'GitHub Copilot · GPT-5',
+        recommended: true,
+      },
+      {
+        provider: 'pi-cli',
+        model: 'openai-codex/gpt-5.4',
+        label: 'ChatGPT · GPT-5.4',
+        recommended: true,
+      },
+    ]);
   });
 });
 

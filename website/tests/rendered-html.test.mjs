@@ -72,11 +72,13 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /API-equivalent estimates, not invoices/);
   assert.match(html, /local-model equivalents/);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
+  assert.match(html, /exact\s+provider and model configured in Pi/);
+  assert.match(html, /provider account configured inside Pi/);
   assert.match(html, /Open source · MIT/);
   assert.match(html, /Aside is open source\./);
   assert.match(html, /View the source on GitHub/);
   assert.match(html, /https:\/\/github\.com\/vignesh07\/aside/);
-  assert.match(html, /macOS preview · v0\.1\.10/);
+  assert.match(html, /macOS preview · v0\.1\.11/);
   assert.match(
     html,
     /https:\/\/aside\.vgnsh\.xyz\/download\/mac-arm64/,

@@ -1,10 +1,10 @@
 /**
  * Build the environment for a vendor-owned CLI process.
  *
- * Aside delegates subscription-backed inference to the installed Codex and
- * Claude clients. Those clients must be able to find their own cached login
- * (through HOME, their config directory, or the OS credential store), but they
- * must not inherit an API key or bearer token from Aside's parent process.
+ * Aside delegates subscription-backed inference to the installed Codex,
+ * Claude, and Pi clients. Those clients must be able to find their own cached
+ * login (through HOME, their config directory, or the OS credential store), but
+ * they must not inherit an API key or bearer token from Aside's parent process.
  *
  * This is an allowlist rather than a list of known secrets. New credentials,
  * unrelated service tokens, and shell-only process hooks therefore stay out by
@@ -69,6 +69,7 @@ const ALLOWED_EXACT = new Set([
   'XDG_STATE_HOME',
   'CODEX_HOME',
   'CLAUDE_CONFIG_DIR',
+  'PI_CODING_AGENT_DIR',
 ]);
 
 function isAllowed(name: string): boolean {
@@ -77,7 +78,7 @@ function isAllowed(name: string): boolean {
 }
 
 /**
- * Return a fresh, credential-free environment suitable for Codex or Claude.
+ * Return a fresh, credential-free environment suitable for Codex, Claude, or Pi.
  *
  * The original key spelling is retained so lowercase proxy variables and
  * platform-specific PATH casing continue to work.

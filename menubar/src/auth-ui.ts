@@ -27,6 +27,11 @@ const PROVIDER_HELP_LINKS: Partial<Record<ProviderAuthId, ProviderHelpLink>> = {
     title: 'Open the official Claude Code setup guide',
     url: 'https://code.claude.com/docs/en/getting-started',
   },
+  'pi-cli': {
+    label: 'Setup Guide…',
+    title: 'Open the official Pi provider setup guide',
+    url: 'https://pi.dev/docs/latest/providers',
+  },
 };
 
 export function providerHelpLink(
@@ -38,7 +43,9 @@ export function providerHelpLink(
 export function isProviderUsable(status: ProviderAuthStatus): boolean {
   return (
     status.enabled &&
-    (status.state === 'signed_in' || status.state === 'local_ready')
+    (status.state === 'signed_in' ||
+      status.state === 'configured' ||
+      status.state === 'local_ready')
   );
 }
 
@@ -91,6 +98,7 @@ export function recommendedModelForProvider<T extends AuthModelOption>(
 export function providerDisplayName(provider: ProviderAuthId): string {
   if (provider === 'codex-cli') return 'ChatGPT';
   if (provider === 'claude-cli') return 'Claude';
+  if (provider === 'pi-cli') return 'Pi';
   return 'Ollama';
 }
 
@@ -104,14 +112,21 @@ export function providerStatusText(status: ProviderAuthStatus): string {
       ? 'ChatGPT sign-in required'
       : 'Claude account sign-in required';
   }
+  if (status.reason === 'no_models') {
+    return status.provider === 'pi-cli'
+      ? 'No models configured in Pi'
+      : 'No local models installed';
+  }
+  if (status.reason === 'client_too_old') return 'Pi needs to be updated';
   if (status.state === 'signed_in') return 'Signed in on this Mac';
+  if (status.state === 'configured') return 'Models configured in Pi';
   if (status.state === 'local_ready') return 'Ready on this Mac';
   if (status.state === 'signed_out') return 'Not signed in';
   if (status.reason === 'local_unreachable') return 'Ollama is not running';
-  if (status.reason === 'no_models') return 'No local models installed';
   if (status.state === 'missing') {
     if (status.provider === 'codex-cli') return 'Codex CLI was not found';
     if (status.provider === 'claude-cli') return 'Claude Code was not found';
+    if (status.provider === 'pi-cli') return 'Pi was not found';
     return 'Not installed';
   }
   return 'Could not check status';

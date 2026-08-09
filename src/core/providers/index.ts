@@ -1,5 +1,6 @@
 import { claudeCli } from './claude-cli.js';
 import { codexCli } from './codex-cli.js';
+import { piCli } from './pi-cli.js';
 import { anthropic } from './anthropic.js';
 import { openai } from './openai.js';
 import { ollama } from './ollama.js';
@@ -9,6 +10,13 @@ import type { CompletionRequest, Provider } from './types.js';
 export { ProviderError } from './types.js';
 export type { CompletionRequest, ModelSpec, Provider } from './types.js';
 export { listInstalledModels } from './ollama.js';
+export {
+  inspectPi,
+  listConfiguredPiModels,
+  piObserverArgs,
+  resolvePiBinary,
+} from './pi-cli.js';
+export type { PiConfiguredModel, PiInspection } from './pi-cli.js';
 export { createVendorCliEnv } from './vendor-cli-env.js';
 export {
   OBSERVER_CWD,
@@ -20,16 +28,23 @@ export {
 /**
  * Registration order is picker order, and the first entry is the default.
  *
- * The two login-backed providers lead deliberately. Anyone watching Claude Code
- * or Codex sessions already has that CLI and is already signed in — so the
+ * The three CLI-backed providers lead deliberately. Anyone watching Claude Code,
+ * Codex, or Pi sessions already has that CLI, so the
  * out-of-the-box path should cost them nothing. Making someone fetch a second,
  * separately-billed API key to ask questions about the subscription they already
  * pay for is a bad trade, and an API key default quietly imposes exactly that.
  *
- * Both work by delegation: aside runs the vendor's own client and never touches
+ * All three work by delegation: aside runs the user's own client and never touches
  * a credential. Keys remain available; they're just not the toll.
  */
-const PROVIDERS: readonly Provider[] = [claudeCli, codexCli, anthropic, openai, ollama];
+const PROVIDERS: readonly Provider[] = [
+  claudeCli,
+  codexCli,
+  piCli,
+  anthropic,
+  openai,
+  ollama,
+];
 
 export function getProviders(): Provider[] {
   return [...PROVIDERS];

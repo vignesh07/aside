@@ -5,15 +5,25 @@
  * owned by the vendor CLI, while this module records only whether the user has
  * explicitly allowed Aside to use that already-authenticated client.
  */
-export const PROVIDER_AUTH_IDS = ['codex-cli', 'claude-cli', 'ollama'] as const;
+export const PROVIDER_AUTH_IDS = [
+  'codex-cli',
+  'claude-cli',
+  'pi-cli',
+  'ollama',
+] as const;
 
 export type ProviderAuthId = (typeof PROVIDER_AUTH_IDS)[number];
-export type VendorProviderAuthId = Exclude<ProviderAuthId, 'ollama'>;
+/** Clients whose own non-interactive login flow Aside can safely invoke. */
+export type VendorProviderAuthId = Extract<
+  ProviderAuthId,
+  'codex-cli' | 'claude-cli'
+>;
 
 export type ProviderProbeState =
   | 'missing'
   | 'signed_out'
   | 'signed_in'
+  | 'configured'
   | 'local_ready'
   | 'error';
 
@@ -26,6 +36,7 @@ export type ProviderAuthReason =
   | 'executable_missing'
   | 'local_unreachable'
   | 'no_models'
+  | 'client_too_old'
   | 'account_login_required'
   | 'probe_failed'
   | 'consent_unavailable';
@@ -68,9 +79,11 @@ function messageFor(code: ProviderAuthErrorCode, provider?: ProviderAuthId): str
       ? 'ChatGPT'
       : provider === 'claude-cli'
         ? 'Claude'
-        : provider === 'ollama'
-          ? 'Ollama'
-          : 'provider';
+        : provider === 'pi-cli'
+          ? 'Pi'
+          : provider === 'ollama'
+            ? 'Ollama'
+            : 'provider';
   switch (code) {
     case 'invalid_provider':
       return 'That provider is not supported.';

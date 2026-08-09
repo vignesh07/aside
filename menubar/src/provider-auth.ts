@@ -4,6 +4,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveCodexBinary } from '../../dist/core/providers/codex-cli.js';
+import {
+  inspectPi as inspectPiClient,
+  type PiInspection,
+} from '../../dist/core/providers/pi-cli.js';
 import { createVendorCliEnv } from '../../dist/core/providers/vendor-cli-env.js';
 import {
   FileProviderConsentStore,
@@ -79,10 +83,15 @@ export type ProviderBinaryResolver = (
   env: NodeJS.ProcessEnv,
 ) => string | null;
 
+export type PiInspector = (
+  env?: NodeJS.ProcessEnv,
+) => PiInspection | Promise<PiInspection>;
+
 export interface ProviderAuthDeps {
   consentStore?: ProviderConsentStore;
   resolveBinary?: ProviderBinaryResolver;
   runCommand?: ProviderCommandRunner;
+  inspectPi?: PiInspector;
   buildEnvironment?: () => NodeJS.ProcessEnv;
   fetch?: typeof globalThis.fetch;
   ollamaHost?: () => string;
@@ -107,15 +116,16 @@ interface ConsentRead {
 /**
  * Coordinates vendor-owned login state with Aside-owned consent.
  *
- * It never reads or stores a token. `connect()` either records consent for an
- * already-authenticated vendor client or asks that client to run its own
- * browser login. `disconnect()` revokes only Aside consent and deliberately
- * never invokes a vendor logout command.
+ * It never reads or stores a token. `connect()` records consent for a ready
+ * client, asking only Codex or Claude to run their own browser login when
+ * needed. Pi setup remains entirely Pi-owned. `disconnect()` revokes only
+ * Aside consent and deliberately never invokes a vendor logout command.
  */
 export class ProviderAuthCoordinator {
   private readonly consentStore: ProviderConsentStore;
   private readonly resolveBinary: ProviderBinaryResolver;
   private readonly runCommand: ProviderCommandRunner;
+  private readonly inspectPi: PiInspector;
   private readonly buildEnvironment: () => NodeJS.ProcessEnv;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly ollamaHost: () => string;
@@ -127,6 +137,7 @@ export class ProviderAuthCoordinator {
     this.consentStore = deps.consentStore ?? new FileProviderConsentStore();
     this.resolveBinary = deps.resolveBinary ?? defaultProviderBinaryResolver;
     this.runCommand = deps.runCommand ?? runProviderCommand;
+    this.inspectPi = deps.inspectPi ?? inspectPiClient;
     this.buildEnvironment = deps.buildEnvironment ?? (() => createVendorCliEnv());
     this.fetchImpl = deps.fetch ?? globalThis.fetch;
     this.ollamaHost = deps.ollamaHost ?? defaultOllamaHost;
@@ -201,6 +212,20 @@ export class ProviderAuthCoordinator {
       return { ...withoutBinary(probe), enabled: true };
     }
 
+    // Pi owns all provider setup. Aside only records permission after the
+    // installed client reports at least one configured model; it never tries
+    // to drive Pi's interactive /login or /logout UI through a hidden process.
+    if (provider === 'pi-cli') {
+      if (probe.state === 'missing') {
+        throw new ProviderAuthError('provider_missing', provider);
+      }
+      if (probe.state !== 'configured') {
+        throw new ProviderAuthError('provider_unavailable', provider);
+      }
+      this.saveConsent(provider, true);
+      return { ...withoutBinary(probe), enabled: true };
+    }
+
     if (probe.state === 'missing') {
       throw new ProviderAuthError('provider_missing', provider);
     }
@@ -249,6 +274,7 @@ export class ProviderAuthCoordinator {
 
   private async probeRaw(provider: ProviderAuthId): Promise<RawProbe> {
     if (provider === 'ollama') return this.probeOllama();
+    if (provider === 'pi-cli') return this.probePi();
 
     let env: NodeJS.ProcessEnv;
     let binary: string | null;
@@ -313,6 +339,40 @@ export class ProviderAuthCoordinator {
     return state === 'error'
       ? { provider, state, reason: 'probe_failed', binary }
       : { provider, state, binary };
+  }
+
+  private async probePi(): Promise<RawProbe> {
+    let inspection: PiInspection;
+    try {
+      inspection = await this.inspectPi(this.buildEnvironment());
+    } catch {
+      return { provider: 'pi-cli', state: 'error', reason: 'probe_failed' };
+    }
+
+    switch (inspection.state) {
+      case 'missing':
+        return {
+          provider: 'pi-cli',
+          state: 'missing',
+          reason: 'executable_missing',
+        };
+      case 'unsupported':
+        return {
+          provider: 'pi-cli',
+          state: 'error',
+          reason: 'client_too_old',
+        };
+      case 'unconfigured':
+        return {
+          provider: 'pi-cli',
+          state: 'signed_out',
+          reason: 'no_models',
+        };
+      case 'ready':
+        return { provider: 'pi-cli', state: 'configured' };
+      case 'error':
+        return { provider: 'pi-cli', state: 'error', reason: 'probe_failed' };
+    }
   }
 
   private async probeOllama(): Promise<RawProbe> {

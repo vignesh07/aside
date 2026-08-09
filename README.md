@@ -48,8 +48,9 @@ thread, history, and observer model remain independent from every other thread.
   waiting for you.
 - **Cross-vendor.** Claude Code, Codex CLI/Desktop, and Pi appear in one place.
 - **Bring your observer.** In the Mac app, explicitly connect an existing
-  ChatGPT or Claude account sign-in, or use local Ollama. The TUI also supports
-  direct API providers. Model choice persists per thread.
+  ChatGPT or Claude account sign-in, delegate to the exact provider/model
+  already configured in Pi, or use local Ollama. The TUI also supports direct
+  API providers. Model choice persists per thread.
 - **Read-only.** Aside has no agent tools. It never sends messages into an agent,
   edits a project, or runs a command on the agent's behalf.
 
@@ -102,10 +103,14 @@ prepare a Today recap.
   `~/.aside/search.sqlite`. Indexed text is redacted with the same common-secret
   safety net used before provider calls, and search queries never leave the
   machine.
-- Aside never reads or copies OAuth tokens from Claude Code, Codex, Keychain, or
-  their auth files. It delegates account-backed replies to the installed vendor
-  client in a sanitized child environment with API-key and token variables
-  removed.
+- Aside never reads or copies credentials from Claude Code, Codex, Pi, Keychain,
+  or their auth files. Claude Code, Codex, and Pi retain ownership of their
+  accounts and token refresh. Aside invokes the selected client in a sanitized
+  child environment with API-key and token variables removed.
+- Using Pi as the observer sends the scoped, redacted context to the exact
+  upstream provider/model named in Aside’s picker. It starts an isolated,
+  sessionless Pi request; it never resumes or writes to the Pi session being
+  observed.
 
 The Mac app shows this boundary on first run and keeps it available under
 **Aside Settings**.
@@ -154,13 +159,18 @@ Spotlight or Applications; the existing app window will come forward instead
 of starting a duplicate process.
 
 On first launch, Aside detects whether the installed Codex and Claude clients
-already have an account sign-in, but does not use either one automatically.
-Choose **Use ChatGPT** or **Use Claude** to allow that client for Aside side
-chats. **Disconnect** revokes only Aside's permission; it does not sign Codex,
-Claude Code, ChatGPT, or Claude out on the rest of the Mac. Today asks
-separately before it may prepare cloud recaps automatically when opened.
-Aside stores only these allow/deny choices at `~/.aside/providers.json`, never
-a credential.
+have an account sign-in and whether Pi has a provider/model configured, but it
+does not use any of them automatically. Choose **Use ChatGPT**, **Use Claude**,
+or **Use Pi** to allow that client for Aside side chats. **Disconnect** revokes
+only Aside's permission; it does not sign Codex, Claude Code, ChatGPT, or Claude
+out, and it does not change Pi's accounts or settings. Today asks separately
+before it may prepare cloud recaps automatically when opened. Aside stores only
+these allow/deny choices at `~/.aside/providers.json`, never a credential.
+
+For Pi, configure the credential in Pi itself (`/login` or Pi's auth store) and
+select a model. Aside deliberately does not inherit shell-only API-key
+environment variables. Its isolated observer path requires a current Pi release
+with `--no-context-files`; the in-app **Setup Guide** covers setup and updates.
 
 The [release manifest](https://aside-production-fd82.up.railway.app/releases/latest.json)
 contains the current version, filenames, byte sizes, and SHA-256 checksums.
@@ -190,6 +200,7 @@ aside --project myrepo
 
 # Observer options
 aside --provider codex-cli
+aside --provider pi-cli --model anthropic/claude-sonnet-4-6
 aside --provider ollama --model llama3.2
 aside --provider openai --model gpt-4o-mini
 ```
@@ -197,6 +208,8 @@ aside --provider openai --model gpt-4o-mini
 The default observer delegates to your installed `claude` CLI with all tools
 disabled. Claude Code retains responsibility for authentication and token
 refresh. `codex-cli` similarly delegates to your installed Codex client.
+`pi-cli` delegates to Pi while pinning the exact upstream `provider/model`
+shown in the picker; Pi retains responsibility for that provider's credentials.
 
 API-backed providers use their normal environment variables:
 
@@ -204,6 +217,7 @@ API-backed providers use their normal environment variables:
 |---|---|
 | `claude-cli` | existing Claude Code login |
 | `codex-cli` | existing Codex login |
+| `pi-cli` | provider/model configured inside Pi; credentials remain Pi-owned |
 | `ollama` | none; local inference |
 | `anthropic` | `ANTHROPIC_API_KEY` |
 | `openai` | `OPENAI_API_KEY` |
@@ -308,10 +322,10 @@ the same core in TUI and Mac app.
 
 The preview DMGs are distributed from a private Railway Bucket through stable
 public download routes. The Mac app has explicit provider onboarding and
-revocation: it recognizes account-backed Codex and Claude client sessions,
-requires per-provider permission before any transcript context can be sent, and
-keeps API-key-backed sessions out of the account-login path. Direct API providers
-remain available only in the TUI.
+revocation: it recognizes account-backed Codex and Claude clients plus Pi's
+configured upstream model, requires per-client permission before any transcript
+context can be sent, and keeps API-key-backed sessions out of the account-login
+path. Direct API providers remain available only in the TUI.
 
 ## License
 

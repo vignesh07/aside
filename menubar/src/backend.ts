@@ -210,7 +210,7 @@ const THREAD_REVIEW_EVIDENCE_LIMIT = 240;
 export class MenubarBackend {
   private readonly service: SideChatService;
   private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
-  /** Catalogued once: it's a static registry, not live state. */
+  /** Starts with the static registry, then refreshes runtime-discovered models. */
   private models: ModelOption[];
   private readonly loadModels: (() => Promise<ModelOption[]>) | null;
   private readonly storagePath: string;
@@ -361,7 +361,7 @@ export class MenubarBackend {
     this.emit();
   }
 
-  /** Replace guessed Ollama entries with the models actually installed. */
+  /** Refresh models discovered from Pi and Ollama without blocking startup. */
   async refreshModels(): Promise<void> {
     if (!this.loadModels) return;
     const next = await this.loadModels();

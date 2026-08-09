@@ -110,4 +110,31 @@ describe('main-process Today authorization', () => {
     ).resolves.toBe('local');
     expect(generate).toHaveBeenCalledOnce();
   });
+
+  it('treats configured Pi as usable but still requires separate Today consent', async () => {
+    const piTarget = {
+      ...target,
+      provider: 'pi-cli',
+      model: 'openai-codex/gpt-5.4',
+    };
+    const source = authSource({
+      provider: 'pi-cli',
+      state: 'configured',
+      enabled: true,
+    });
+    const generate = vi.fn(async () => 'pi recap');
+
+    await expect(
+      runAuthorizedTodayRecap(piTarget, source, generate),
+    ).rejects.toThrow('Allow Today recaps before generating.');
+    expect(generate).not.toHaveBeenCalled();
+
+    await expect(
+      grantTodayRecapPermission('pi-cli', piTarget, source),
+    ).resolves.toBe(true);
+    await expect(
+      runAuthorizedTodayRecap(piTarget, source, generate),
+    ).resolves.toBe('pi recap');
+    expect(generate).toHaveBeenCalledOnce();
+  });
 });

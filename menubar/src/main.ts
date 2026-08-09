@@ -90,6 +90,7 @@ import {
 } from './search-coordinator.js';
 import { feedbackIssueUrl } from './feedback-link.js';
 import {
+  captureModelCatalog,
   captureProviderAuthCoordinator,
   captureSideChatService,
   captureUsageSearchService,
@@ -728,6 +729,7 @@ app.whenReady().then(() => {
         ? () => ({ sessions: todayCapture.sessions, jsonlPaths: new Map() })
         : undefined,
       service: todayCapture ? captureSideChatService() : undefined,
+      models: CAPTURE_PATH ? captureModelCatalog : undefined,
       search: CAPTURE_PATH && CAPTURE_USAGE
           ? captureUsageSearchService()
           : todayCapture
@@ -763,7 +765,7 @@ app.whenReady().then(() => {
     },
   );
   backend.start();
-  providerAuth = todayCapture
+  providerAuth = CAPTURE_PATH
     ? captureProviderAuthCoordinator(!CAPTURE_TODAY_PERMISSION)
     : new ProviderAuthCoordinator();
   appUpdates = new AppUpdateController({
@@ -895,7 +897,10 @@ app.whenReady().then(() => {
     backend.setModel(provider, model, target);
   });
   ipcMain.handle('aside:auth:get', () => refreshProviderAuth());
-  ipcMain.handle('aside:auth:refresh', () => refreshProviderAuth());
+  ipcMain.handle('aside:auth:refresh', async () => {
+    await backend?.refreshModels();
+    return refreshProviderAuth();
+  });
   ipcMain.handle('aside:auth:connect', async (_e, value: unknown) => {
     const provider = validatedProvider(value);
     if (!provider || !providerAuth) {
@@ -904,7 +909,9 @@ app.whenReady().then(() => {
     authFlowActive = true;
     try {
       await providerAuth.connect(provider);
-      if (provider === 'ollama') await backend?.refreshModels();
+      if (provider === 'ollama' || provider === 'pi-cli') {
+        await backend?.refreshModels();
+      }
       const statuses = await refreshProviderAuth();
       const state = backend?.getState();
       if (backend && state && !canAskWithProvider(statuses, state.provider)) {

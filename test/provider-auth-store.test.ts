@@ -100,11 +100,13 @@ describe('provider consent store version compatibility', () => {
       enabled: {
         'codex-cli': true,
         'claude-cli': true,
+        'pi-cli': false,
         ollama: false,
       },
       todayRecaps: {
         'codex-cli': true,
         'claude-cli': true,
+        'pi-cli': false,
         ollama: false,
       },
     });
@@ -116,6 +118,43 @@ describe('provider consent store version compatibility', () => {
     expect(fs.readdirSync(path.dirname(store.location))).toEqual([
       'providers.json',
     ]);
+  });
+
+  it('keeps older consent valid and adds Pi without changing the version', () => {
+    const store = tempStore();
+    writeConsent(store, {
+      version: 1,
+      enabled: {
+        'codex-cli': true,
+        'claude-cli': false,
+        ollama: false,
+      },
+      todayRecaps: {
+        'codex-cli': true,
+      },
+    });
+
+    expect(store.load()).toEqual({
+      enabled: new Set(['codex-cli']),
+      todayRecaps: new Set(['codex-cli']),
+    });
+
+    store.setEnabled('pi-cli', true);
+    expect(readConsent(store)).toEqual({
+      version: 1,
+      enabled: {
+        'codex-cli': true,
+        'claude-cli': false,
+        'pi-cli': true,
+        ollama: false,
+      },
+      todayRecaps: {
+        'codex-cli': true,
+        'claude-cli': false,
+        'pi-cli': false,
+        ollama: false,
+      },
+    });
   });
 
   it.each([

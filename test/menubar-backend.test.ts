@@ -58,6 +58,12 @@ function fakeSession(id: string, status: TrackedSession['status'] = 'active'): T
 const FAKE_MODELS = [
   { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', recommended: true },
   { provider: 'openai', model: 'gpt-4o-mini' },
+  {
+    provider: 'pi-cli',
+    model: 'anthropic/claude-sonnet-4-6',
+    label: 'Anthropic · Claude Sonnet 4.6',
+    recommended: true,
+  },
 ];
 
 const ANALYSIS_NOW = new Date('2026-07-26T18:00:00.000Z');
@@ -314,7 +320,11 @@ describe('MenubarBackend', () => {
     backend.refresh();
     // Cross-provider is the product's whole position; a fixed-model menubar
     // can't deliver it.
-    expect(backend.getState().models.map((m) => m.provider)).toEqual(['anthropic', 'openai']);
+    expect(backend.getState().models.map((m) => m.provider)).toEqual([
+      'anthropic',
+      'openai',
+      'pi-cli',
+    ]);
   });
 
   it('routes a model switch to the engine and reflects it in state', () => {
@@ -324,6 +334,29 @@ describe('MenubarBackend', () => {
     expect(setModelCalls).toEqual([['openai', 'gpt-4o-mini']]);
     expect(backend.getState().provider).toBe('openai');
     expect(backend.getState().model).toBe('gpt-4o-mini');
+  });
+
+  it('routes Pi through the exact configured upstream provider and model', () => {
+    const { backend, setModelCalls } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    backend.setModel('pi-cli', 'anthropic/claude-sonnet-4-6');
+
+    expect(setModelCalls).toEqual([
+      ['pi-cli', 'anthropic/claude-sonnet-4-6'],
+    ]);
+    expect(backend.getState()).toMatchObject({
+      provider: 'pi-cli',
+      model: 'anthropic/claude-sonnet-4-6',
+    });
+  });
+
+  it('does not accept a bare Pi model id outside the pinned catalog', () => {
+    const { backend, setModelCalls } = makeBackend([fakeSession('a')]);
+    backend.refresh();
+    backend.setModel('pi-cli', 'claude-sonnet-4-6');
+
+    expect(setModelCalls).toEqual([]);
+    expect(backend.getState().provider).toBe('claude-cli');
   });
 
   it('retargets untouched threads when the connected-account default changes', () => {

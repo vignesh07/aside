@@ -590,8 +590,9 @@ export default function Home() {
               <span>03</span>
               <h3>Your login stays with the vendor.</h3>
               <p>
-                Aside delegates replies to Codex or Claude Code. It never reads
-                their OAuth tokens or imports API keys from your shell.
+                Aside delegates through Codex, Claude Code, or the exact
+                provider and model configured in Pi. It never reads their OAuth
+                tokens or imports API keys from your shell.
               </p>
             </article>
           </div>
@@ -725,8 +726,9 @@ export default function Home() {
             </summary>
             <p>
               No. Aside can use the ChatGPT account already connected through
-              Codex or the Claude account connected through Claude Code. It
-              does not copy their credentials.
+              Codex, the Claude account connected through Claude Code, or a
+              provider account configured inside Pi. It does not copy their
+              credentials.
             </p>
           </details>
           <details className="reveal">
@@ -765,7 +767,7 @@ export default function Home() {
           <Brand />
           <p>Read-only side chats for coding agents.</p>
           <div>
-            <span>macOS preview · v0.1.10</span>
+            <span>macOS preview · v0.1.11</span>
             <a href="#privacy">Privacy</a>
             <a href="#top">Back to top ↑</a>
           </div>

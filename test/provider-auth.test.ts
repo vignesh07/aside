@@ -8,10 +8,10 @@ import {
   ProviderAuthError,
   resolveAbsoluteExecutable,
   runProviderCommand,
-  type ProviderAuthId,
   type ProviderCommand,
   type ProviderCommandResult,
   type ProviderConsentStore,
+  type VendorProviderAuthId,
 } from '../menubar/src/provider-auth.js';
 
 const tempDirs: string[] = [];
@@ -40,7 +40,7 @@ function result(overrides: Partial<ProviderCommandResult> = {}): ProviderCommand
   };
 }
 
-function signedInResult(provider: ProviderAuthId): ProviderCommandResult {
+function signedInResult(provider: VendorProviderAuthId): ProviderCommandResult {
   if (provider === 'codex-cli') {
     return result({ stdout: 'Logged in using ChatGPT\n' });
   }
@@ -54,7 +54,7 @@ function signedInResult(provider: ProviderAuthId): ProviderCommandResult {
   });
 }
 
-function signedOutResult(provider: ProviderAuthId): ProviderCommandResult {
+function signedOutResult(provider: VendorProviderAuthId): ProviderCommandResult {
   if (provider === 'codex-cli') {
     return result({ exitCode: 1, stdout: 'Not logged in\n' });
   }
@@ -68,7 +68,7 @@ function signedOutResult(provider: ProviderAuthId): ProviderCommandResult {
   });
 }
 
-function commandProvider(command: ProviderCommand): ProviderAuthId {
+function commandProvider(command: ProviderCommand): VendorProviderAuthId {
   return command.executable.endsWith('/codex') ? 'codex-cli' : 'claude-cli';
 }
 
@@ -91,6 +91,7 @@ function coordinatorWith(
     resolveBinary: (provider) =>
       provider === 'codex-cli' ? '/test/bin/codex' : '/test/bin/claude',
     runCommand,
+    inspectPi: async () => ({ state: 'ready' }),
     buildEnvironment: () => ({ PATH: '/test/bin' }),
     fetch: readyOllamaFetch(),
     ollamaHost: () => 'http://127.0.0.1:11434',
@@ -99,7 +100,7 @@ function coordinatorWith(
 }
 
 describe('provider probe and Aside consent are separate', () => {
-  it('does not auto-enable an existing Codex or Claude login', async () => {
+  it('does not auto-enable existing vendor login or Pi configuration', async () => {
     const store = tempStore();
     const auth = coordinatorWith(store, async (command) =>
       signedInResult(commandProvider(command)),
@@ -109,6 +110,7 @@ describe('provider probe and Aside consent are separate', () => {
     expect(statuses).toEqual([
       { provider: 'codex-cli', state: 'signed_in', enabled: false },
       { provider: 'claude-cli', state: 'signed_in', enabled: false },
+      { provider: 'pi-cli', state: 'configured', enabled: false },
       { provider: 'ollama', state: 'local_ready', enabled: false },
     ]);
   });
@@ -349,6 +351,96 @@ describe('connect and disconnect', () => {
     expect(auth.todayRecapsEnabled('ollama')).toBe(true);
   });
 
+  it('records Pi consent only when Pi reports a configured model', async () => {
+    const store = tempStore();
+    const runCommand = vi.fn(async () => result());
+    const inspectPi = vi.fn(async (env?: NodeJS.ProcessEnv) => {
+      expect(env).toEqual({ PATH: '/test/bin' });
+      return { state: 'ready' } as const;
+    });
+    const auth = coordinatorWith(store, runCommand, { inspectPi });
+
+    await expect(auth.connect('pi-cli')).resolves.toEqual({
+      provider: 'pi-cli',
+      state: 'configured',
+      enabled: true,
+    });
+    expect(inspectPi).toHaveBeenCalledOnce();
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(store.load().enabled).toContain('pi-cli');
+    expect(auth.todayRecapsEnabled('pi-cli')).toBe(false);
+
+    auth.allowTodayRecaps('pi-cli');
+    expect(auth.todayRecapsEnabled('pi-cli')).toBe(true);
+    expect(store.load().todayRecaps).toContain('pi-cli');
+  });
+
+  it.each([
+    ['unconfigured', 'signed_out', 'no_models'],
+    ['unsupported', 'error', 'client_too_old'],
+    ['error', 'error', 'probe_failed'],
+  ] as const)(
+    'does not enable Pi when inspection reports %s',
+    async (inspectionState, state, reason) => {
+      const store = tempStore();
+      const runCommand = vi.fn(async () => result());
+      const auth = coordinatorWith(store, runCommand, {
+        inspectPi: async () => ({ state: inspectionState }),
+      });
+
+      await expect(auth.probe('pi-cli')).resolves.toEqual({
+        provider: 'pi-cli',
+        state,
+        enabled: false,
+        reason,
+      });
+      await expect(auth.connect('pi-cli')).rejects.toMatchObject({
+        code: 'provider_unavailable',
+      });
+      expect(store.load().enabled).not.toContain('pi-cli');
+      expect(runCommand).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports missing Pi separately and never tries to install or log in', async () => {
+    const runCommand = vi.fn(async () => result());
+    const auth = coordinatorWith(tempStore(), runCommand, {
+      inspectPi: async () => ({ state: 'missing' }),
+    });
+
+    await expect(auth.probe('pi-cli')).resolves.toEqual({
+      provider: 'pi-cli',
+      state: 'missing',
+      enabled: false,
+      reason: 'executable_missing',
+    });
+    await expect(auth.connect('pi-cli')).rejects.toMatchObject({
+      code: 'provider_missing',
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it('disconnects Pi from Aside without invoking Pi logout', async () => {
+    const store = tempStore();
+    store.setEnabled('pi-cli', true);
+    store.setTodayRecapsEnabled('pi-cli', true);
+    const runCommand = vi.fn(async () => result());
+    const inspectPi = vi.fn(async () => ({ state: 'ready' }) as const);
+    const auth = coordinatorWith(store, runCommand, { inspectPi });
+
+    await expect(auth.disconnect('pi-cli')).resolves.toEqual({
+      provider: 'pi-cli',
+      state: 'configured',
+      enabled: false,
+    });
+    expect(store.load()).toEqual({
+      enabled: new Set(),
+      todayRecaps: new Set(),
+    });
+    expect(inspectPi).toHaveBeenCalledOnce();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it('cannot grant Today consent before the provider is enabled', () => {
     const auth = coordinatorWith(tempStore(), async () =>
       signedInResult('codex-cli'),
@@ -441,11 +533,13 @@ describe('private atomic consent storage', () => {
       enabled: {
         'codex-cli': true,
         'claude-cli': false,
+        'pi-cli': false,
         ollama: true,
       },
       todayRecaps: {
         'codex-cli': false,
         'claude-cli': false,
+        'pi-cli': false,
         ollama: false,
       },
     });
