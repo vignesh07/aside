@@ -56,6 +56,16 @@ export function captureModelCatalog(): ModelOption[] {
       label: `Anthropic · ${PI_CAPTURE_MODEL_NAME}`,
       recommended: true,
     },
+    {
+      provider: 'pi-cli',
+      model: 'openai-codex/gpt-5.4',
+      label: 'ChatGPT · GPT-5.4',
+    },
+    {
+      provider: 'pi-cli',
+      model: 'github-copilot/gpt-5',
+      label: 'GitHub Copilot · GPT-5',
+    },
   ];
 }
 
@@ -91,11 +101,28 @@ export function captureProviderAuthCoordinator(
     }),
     inspectPi: async () => ({
       state: 'ready',
-      model: {
+      selectedModel: {
         provider: PI_CAPTURE_PROVIDER,
         id: PI_CAPTURE_MODEL,
         name: PI_CAPTURE_MODEL_NAME,
       },
+      models: [
+        {
+          provider: PI_CAPTURE_PROVIDER,
+          id: PI_CAPTURE_MODEL,
+          name: PI_CAPTURE_MODEL_NAME,
+        },
+        {
+          provider: 'openai-codex',
+          id: 'gpt-5.4',
+          name: 'GPT-5.4',
+        },
+        {
+          provider: 'github-copilot',
+          id: 'gpt-5',
+          name: 'GPT-5',
+        },
+      ],
     }),
     buildEnvironment: () => ({ PATH: '/capture/bin' }),
     fetch: async () =>

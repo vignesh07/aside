@@ -70,6 +70,25 @@ export function canAskWithProvider(
   );
 }
 
+/**
+ * Provider consent alone is not enough for a Pi thread. Pi can expose many
+ * credential-backed upstream models, and an existing thread remains pinned to
+ * one exact provider/model pair. Fail closed when that route disappears rather
+ * than silently sending the thread to Pi's current default.
+ */
+export function canAskWithModel<T extends AuthModelOption>(
+  statuses: readonly ProviderAuthStatus[],
+  models: readonly T[],
+  provider: string,
+  model: string,
+): boolean {
+  if (!canAskWithProvider(statuses, provider)) return false;
+  if (provider !== 'pi-cli') return true;
+  return models.some(
+    (option) => option.provider === provider && option.model === model,
+  );
+}
+
 export function visibleModels<T extends AuthModelOption>(
   models: readonly T[],
   statuses: readonly ProviderAuthStatus[],
@@ -96,8 +115,8 @@ export function recommendedModelForProvider<T extends AuthModelOption>(
 }
 
 export function providerDisplayName(provider: ProviderAuthId): string {
-  if (provider === 'codex-cli') return 'ChatGPT';
-  if (provider === 'claude-cli') return 'Claude';
+  if (provider === 'codex-cli') return 'Codex';
+  if (provider === 'claude-cli') return 'Claude Code';
   if (provider === 'pi-cli') return 'Pi';
   return 'Ollama';
 }
@@ -109,17 +128,17 @@ export function providerStatusText(status: ProviderAuthStatus): string {
   }
   if (status.reason === 'account_login_required') {
     return status.provider === 'codex-cli'
-      ? 'ChatGPT sign-in required'
-      : 'Claude account sign-in required';
+      ? 'Codex sign-in required'
+      : 'Claude Code sign-in required';
   }
   if (status.reason === 'no_models') {
     return status.provider === 'pi-cli'
-      ? 'No models configured in Pi'
+      ? 'No authenticated models in Pi'
       : 'No local models installed';
   }
   if (status.reason === 'client_too_old') return 'Pi needs to be updated';
   if (status.state === 'signed_in') return 'Signed in on this Mac';
-  if (status.state === 'configured') return 'Models configured in Pi';
+  if (status.state === 'configured') return 'Models available through Pi';
   if (status.state === 'local_ready') return 'Ready on this Mac';
   if (status.state === 'signed_out') return 'Not signed in';
   if (status.reason === 'local_unreachable') return 'Ollama is not running';

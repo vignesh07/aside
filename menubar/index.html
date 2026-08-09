@@ -2124,7 +2124,7 @@
         <div id="settings-view" class="settings-body">
           <div class="settings-section">
             <h3>Accounts</h3>
-            <p>Aside only uses clients you connect here. Disconnecting does not sign out Codex or Claude, or change Pi’s accounts and settings.</p>
+            <p>Aside can use models through Codex, Claude Code, Pi, or local Ollama. Credentials stay with those clients; Disconnect only revokes Aside’s permission.</p>
             <div id="settings-error" class="surface-message" role="status" aria-live="polite" hidden></div>
             <div id="settings-providers"></div>
           </div>
@@ -2144,7 +2144,7 @@
           <div class="settings-section">
             <h3>Observer boundary</h3>
             <p>Aside only reads local agent session logs. It never writes to an agent session or project.</p>
-            <p>Codex and Claude send scoped context to their services. Pi sends it to the upstream provider and model named in the picker. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
+            <p>Codex and Claude Code send scoped context to their services. Pi sends it to the exact upstream provider and model chosen for this thread. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
           </div>
           <div class="settings-section">
             <h3>Thread list</h3>

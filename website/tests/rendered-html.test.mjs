@@ -72,8 +72,9 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /API-equivalent estimates, not invoices/);
   assert.match(html, /local-model equivalents/);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
-  assert.match(html, /exact\s+provider and model configured in Pi/);
-  assert.match(html, /provider account configured inside Pi/);
+  assert.match(html, /any model Pi reports from accounts authenticated there/);
+  assert.match(html, /exact\s+provider\/model chosen for each thread/);
+  assert.match(html, /any account already\s+authenticated in Pi/);
   assert.match(html, /Open source · MIT/);
   assert.match(html, /Aside is open source\./);
   assert.match(html, /View the source on GitHub/);

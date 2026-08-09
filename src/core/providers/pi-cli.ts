@@ -55,7 +55,10 @@ export interface PiConfiguredModel {
 
 export interface PiInspection {
   state: 'missing' | 'unsupported' | 'unconfigured' | 'ready' | 'error';
-  model?: PiConfiguredModel;
+  /** Every exact upstream provider/model for which Pi reports configured auth. */
+  models?: PiConfiguredModel[];
+  /** Pi's current default, retained only as a picker recommendation hint. */
+  selectedModel?: PiConfiguredModel;
 }
 
 interface RpcResult<T> {
@@ -66,10 +69,9 @@ interface RpcResult<T> {
 }
 
 interface PiInspectionProjection {
-  stateSeen: boolean;
   selectedModel: PiConfiguredModel | null;
   availableModelsSeen: boolean;
-  availableModelKeys: Set<string>;
+  availableModels: PiConfiguredModel[];
 }
 
 interface PromiseCacheEntry<T> {
@@ -164,8 +166,9 @@ async function scanPiCandidates(env: NodeJS.ProcessEnv): Promise<PiCandidateScan
 }
 
 /**
- * Check that Pi exposes the isolation controls Aside requires, then inspect its
- * selected model through the documented in-memory RPC protocol.
+ * Check that Pi exposes the isolation controls Aside requires, then inspect the
+ * authenticated models it makes available through the documented in-memory RPC
+ * protocol.
  */
 export async function inspectPi(
   sourceEnv: NodeJS.ProcessEnv = process.env,
@@ -181,12 +184,12 @@ export async function inspectPi(
   );
 }
 
-/** Return only Pi's current exact model, projecting away every other field. */
+/** Return Pi's auth-backed models, projecting away every other field. */
 export async function listConfiguredPiModels(
   sourceEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<PiConfiguredModel[]> {
   const inspection = await inspectPi(sourceEnv);
-  return inspection.state === 'ready' && inspection.model ? [inspection.model] : [];
+  return inspection.state === 'ready' ? [...(inspection.models ?? [])] : [];
 }
 
 /**
@@ -209,7 +212,7 @@ export function piObserverArgs(model: string, systemPrompt: string): string[] {
 
 export const piCli: Provider = {
   id: 'pi-cli',
-  label: 'Pi (your configured model account)',
+  label: 'Pi (your authenticated models)',
   apiKeyEnv: [],
   requiresApiKey: false,
   // Pi owns this dynamic catalog. listConfiguredPiModels() supplies the picker.
@@ -232,24 +235,20 @@ async function askPi(req: CompletionRequest): Promise<string> {
   }
 
   // The model named in Aside is a routing/privacy boundary, not a suggestion.
-  // If Pi changed since this side thread was configured, do not silently send
-  // the transcript to either the stale target or Pi's new default.
+  // Pi's interactive default is irrelevant: the exact saved target must still
+  // be auth-available immediately before any transcript context is sent.
   const expected = splitConfiguredModel(req.model);
   const inspection = await inspectPreparedPi(prepared);
   if (inspection.state === 'unconfigured') {
-    throw new Error('pi-cli: Pi has no configured model. Open Pi, run `/login`, and select a model.');
+    throw new Error('pi-cli: Pi has no available models. Open Pi and run `/login`.');
   }
-  if (inspection.state !== 'ready' || !inspection.model) {
-    throw new Error('pi-cli: Aside could not verify Pi’s selected model safely.');
+  if (inspection.state !== 'ready' || !inspection.models) {
+    throw new Error('pi-cli: Aside could not verify Pi’s available models safely.');
   }
-  if (
-    inspection.model.provider !== expected.provider ||
-    inspection.model.id !== expected.id
-  ) {
+  if (!inspection.models.some((model) => modelKey(model) === modelKey(expected))) {
     throw new Error(
-      `pi-cli: this thread is pinned to ${expected.provider}/${expected.id}, but Pi is now ` +
-        `set to ${inspection.model.provider}/${inspection.model.id}. Refresh Accounts and choose ` +
-        'the current Pi model for this thread.',
+      `pi-cli: this thread is pinned to ${expected.provider}/${expected.id}, but that model ` +
+        'is no longer available through Pi. Refresh Accounts and choose another Pi model.',
     );
   }
 
@@ -315,16 +314,30 @@ async function inspectPreparedPi(
   const result = await runInspectionRpc(prepared.binary, prepared.env);
   if (!result.error && result.exitCode === 0 && result.value) {
     const projection = result.value;
-    if (!projection.stateSeen || !projection.availableModelsSeen) {
+    if (!projection.availableModelsSeen) {
       return { state: 'error' };
     }
-    if (
-      projection.selectedModel &&
-      projection.availableModelKeys.has(modelKey(projection.selectedModel))
-    ) {
-      return { state: 'ready', model: projection.selectedModel };
-    }
-    return { state: 'unconfigured' };
+    if (projection.availableModels.length === 0) return { state: 'unconfigured' };
+
+    const selected = projection.selectedModel;
+    const selectedIndex = selected
+      ? projection.availableModels.findIndex(
+          (model) => modelKey(model) === modelKey(selected),
+        )
+      : -1;
+    const selectedModel = selectedIndex >= 0 ? selected ?? undefined : undefined;
+    const models = selectedIndex > 0
+      ? [
+          projection.availableModels[selectedIndex]!,
+          ...projection.availableModels.slice(0, selectedIndex),
+          ...projection.availableModels.slice(selectedIndex + 1),
+        ]
+      : projection.availableModels;
+    return {
+      state: 'ready',
+      models,
+      ...(selectedModel ? { selectedModel } : {}),
+    };
   }
   if (isUnconfigured(result)) return { state: 'unconfigured' };
   return { state: 'error' };
@@ -410,10 +423,9 @@ function runInspectionRpc(
     let buffer = '';
     let stderr = '';
     const projected: PiInspectionProjection = {
-      stateSeen: false,
       selectedModel: null,
       availableModelsSeen: false,
-      availableModelKeys: new Set(),
+      availableModels: [],
     };
     let totalBytes = 0;
     let terminalError: Error | undefined;
@@ -596,30 +608,34 @@ function projectInspectionResponse(
 ): void {
   const selectedModel = projectStateModel(response);
   if (selectedModel !== undefined) {
-    projection.stateSeen = true;
     projection.selectedModel = selectedModel;
     return;
   }
 
-  const availableModelKeys = projectAvailableModelKeys(response);
-  if (availableModelKeys !== undefined) {
+  const availableModels = projectAvailableModels(response);
+  if (availableModels !== undefined) {
     projection.availableModelsSeen = true;
-    projection.availableModelKeys = availableModelKeys;
+    projection.availableModels = availableModels;
   }
 }
 
-function projectAvailableModelKeys(response: unknown): Set<string> | undefined {
+function projectAvailableModels(response: unknown): PiConfiguredModel[] | undefined {
   const record = successfulResponse(response, 'aside-models');
   if (!record) return undefined;
   const data = asRecord(record['data']);
   if (!Array.isArray(data?.['models'])) return undefined;
 
+  const models: PiConfiguredModel[] = [];
   const keys = new Set<string>();
   for (const rawModel of data['models']) {
     const model = projectModel(rawModel);
-    if (model) keys.add(modelKey(model));
+    if (!model) continue;
+    const key = modelKey(model);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    models.push(model);
   }
-  return keys;
+  return models;
 }
 
 function modelKey(model: Pick<PiConfiguredModel, 'provider' | 'id'>): string {

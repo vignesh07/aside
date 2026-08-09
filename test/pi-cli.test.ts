@@ -31,6 +31,9 @@ interface FakePiOptions {
   unconfigured?: boolean;
   model?: { provider: string; id: string; name: string } | null;
   availableModels?: Array<{ provider: string; id: string; name: string }>;
+  availableModelsByInspection?: Array<
+    Array<{ provider: string; id: string; name: string }>
+  >;
   bytewiseUnicode?: boolean;
   exitOnRpc?: boolean;
   ignoreSigterm?: boolean;
@@ -118,7 +121,10 @@ describe.sequential('Pi CLI observer provider', () => {
     await expect(resolvePiBinary(env)).resolves.toBe(compatible);
     await expect(inspectPi(env)).resolves.toEqual({
       state: 'ready',
-      model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      models: [
+        { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      ],
+      selectedModel: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
     });
     expect(
       readLog(path.join(root, 'newer.log')).some(
@@ -185,20 +191,30 @@ describe.sequential('Pi CLI observer provider', () => {
     });
   });
 
-  it('projects the current model immediately and exposes only that model', async () => {
+  it('projects every safe auth-backed model, dedupes exact targets, and keeps the selected model only as a hint', async () => {
     const root = tempRoot();
     const log = path.join(root, 'pi.log');
     const binary = createFakePi(path.join(root, 'bin'), log, {
       model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      availableModels: [
+        { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+        { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+        { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Duplicate must lose' },
+      ],
     });
     const env = providerEnv(root, path.dirname(binary));
 
     await expect(inspectPi(env)).resolves.toEqual({
       state: 'ready',
-      model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      models: [
+        { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+        { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+      ],
+      selectedModel: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
     });
     await expect(listConfiguredPiModels(env)).resolves.toEqual([
       { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
     ]);
 
     const commands = readLog(log)
@@ -209,7 +225,7 @@ describe.sequential('Pi CLI observer provider', () => {
     expect(JSON.stringify(await inspectPi(env))).not.toContain('do-not-leak');
   });
 
-  it('treats a selected model without configured auth as unconfigured', async () => {
+  it('uses available auth-backed models even when Pi selects a different unavailable model', async () => {
     const root = tempRoot();
     const log = path.join(root, 'pi.log');
     const binary = createFakePi(path.join(root, 'bin'), log, {
@@ -220,14 +236,54 @@ describe.sequential('Pi CLI observer provider', () => {
     });
     const env = providerEnv(root, path.dirname(binary));
 
-    await expect(inspectPi(env)).resolves.toEqual({ state: 'unconfigured' });
-    await expect(listConfiguredPiModels(env)).resolves.toEqual([]);
+    await expect(inspectPi(env)).resolves.toEqual({
+      state: 'ready',
+      models: [
+        { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+      ],
+    });
+    await expect(listConfiguredPiModels(env)).resolves.toEqual([
+      { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+    ]);
     expect(JSON.stringify(await inspectPi(env))).not.toContain('do-not-leak');
 
     const commands = readLog(log)
       .filter((entry) => entry['kind'] === 'command')
       .map((entry) => (entry['command'] as Record<string, unknown>)['type']);
     expect(commands).toEqual(['get_state', 'get_available_models']);
+  });
+
+  it('is ready without a selected default and unconfigured only when no models have auth', async () => {
+    const readyRoot = tempRoot();
+    const readyBinary = createFakePi(
+      path.join(readyRoot, 'bin'),
+      path.join(readyRoot, 'pi.log'),
+      {
+        model: null,
+        availableModels: [
+          { provider: 'github-copilot', id: 'gpt-5', name: 'GPT-5' },
+        ],
+      },
+    );
+    await expect(
+      inspectPi(providerEnv(readyRoot, path.dirname(readyBinary))),
+    ).resolves.toEqual({
+      state: 'ready',
+      models: [{ provider: 'github-copilot', id: 'gpt-5', name: 'GPT-5' }],
+    });
+
+    const emptyRoot = tempRoot();
+    const emptyBinary = createFakePi(
+      path.join(emptyRoot, 'bin'),
+      path.join(emptyRoot, 'pi.log'),
+      {
+        model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+        availableModels: [],
+      },
+    );
+    await expect(
+      inspectPi(providerEnv(emptyRoot, path.dirname(emptyBinary))),
+    ).resolves.toEqual({ state: 'unconfigured' });
   });
 
   it('coalesces staggered preparation and inspection while each probe is pending', async () => {
@@ -251,9 +307,21 @@ describe.sequential('Pi CLI observer provider', () => {
 
     const results = await Promise.all([first, second, third]);
     expect(results).toEqual([
-      { state: 'ready', model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' } },
-      { state: 'ready', model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' } },
-      { state: 'ready', model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' } },
+      {
+        state: 'ready',
+        models: [{ provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' }],
+        selectedModel: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      },
+      {
+        state: 'ready',
+        models: [{ provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' }],
+        selectedModel: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      },
+      {
+        state: 'ready',
+        models: [{ provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' }],
+        selectedModel: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      },
     ]);
 
     const entries = readLog(log);
@@ -324,11 +392,15 @@ describe.sequential('Pi CLI observer provider', () => {
     });
   });
 
-  it('refuses to route a saved thread after Pi changes its selected model', async () => {
+  it('routes a pinned model even when Pi has a different interactive default', async () => {
     const root = tempRoot();
     const log = path.join(root, 'pi.log');
     const binary = createFakePi(path.join(root, 'bin'), log, {
       model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      availableModels: [
+        { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+        { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+      ],
     });
     const env = providerEnv(root, path.dirname(binary));
     for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value ?? '');
@@ -341,7 +413,61 @@ describe.sequential('Pi CLI observer provider', () => {
         history: '',
         question: 'What changed?',
       }),
-    ).rejects.toThrow(/pinned to anthropic\/claude-opus-4-6.*Pi is now set to openai-codex\/gpt-5\.4/s);
+    ).resolves.toBe('Everything is ready.');
+
+    const entries = readLog(log);
+    expect(
+      entries.some(
+        (entry) =>
+          entry['kind'] === 'command' &&
+          (entry['command'] as Record<string, unknown>)['type'] === 'prompt',
+      ),
+    ).toBe(true);
+    const promptStart = entries.find(
+      (entry) =>
+        entry['kind'] === 'start' &&
+        ((entry['args'] as string[]) ?? []).includes('rpc') &&
+        ((entry['args'] as string[]) ?? []).includes('--provider'),
+    );
+    expect(promptStart?.['args']).toEqual(expect.arrayContaining([
+      '--provider',
+      'anthropic',
+      '--model',
+      'claude-opus-4-6',
+    ]));
+  });
+
+  it('refuses a disappeared pinned model before sending any prompt', async () => {
+    const root = tempRoot();
+    const log = path.join(root, 'pi.log');
+    const binary = createFakePi(path.join(root, 'bin'), log, {
+      model: { provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' },
+      availableModelsByInspection: [
+        [{ provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' }],
+        [{ provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' }],
+      ],
+    });
+    const env = providerEnv(root, path.dirname(binary));
+
+    // Prime the public inspection cache while the pinned target is available.
+    // complete() must bypass that cache and inspect again before sending.
+    await expect(inspectPi(env)).resolves.toMatchObject({
+      state: 'ready',
+      models: [{ provider: 'openai-codex', id: 'gpt-5.4' }],
+    });
+    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value ?? '');
+
+    await expect(
+      piCli.complete({
+        model: 'openai-codex/gpt-5.4',
+        systemPrompt: 'You are Aside.',
+        context: 'Must not be sent',
+        history: '',
+        question: 'What changed?',
+      }),
+    ).rejects.toThrow(
+      /pinned to openai-codex\/gpt-5\.4.*no longer available through Pi/s,
+    );
 
     expect(
       readLog(log).some(
@@ -390,7 +516,7 @@ describe.sequential('Pi CLI observer provider', () => {
         history: '',
         question: 'Will this exit?',
       }),
-    ).rejects.toThrow(/could not verify Pi’s selected model safely/);
+    ).rejects.toThrow(/could not verify Pi’s available models safely/);
   });
 });
 
@@ -424,6 +550,7 @@ function createFakePi(directory: string, log: string, options: FakePiOptions = {
     unconfigured: options.unconfigured ?? false,
     model: selectedModel,
     availableModels: options.availableModels ?? (selectedModel ? [selectedModel] : []),
+    availableModelsByInspection: options.availableModelsByInspection ?? null,
     bytewiseUnicode: options.bytewiseUnicode ?? false,
     exitOnRpc: options.exitOnRpc ?? false,
     ignoreSigterm: options.ignoreSigterm ?? false,
@@ -509,12 +636,23 @@ function handle(command) {
     return;
   }
   if (command.type === 'get_available_models') {
+    const inspections = fs.readFileSync(log, 'utf8')
+      .trim()
+      .split('\\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.kind === 'command' && entry.command?.type === 'get_available_models')
+      .length;
+    const sequence = behavior.availableModelsByInspection;
+    const availableModels = sequence
+      ? sequence[Math.min(Math.max(0, inspections - 1), sequence.length - 1)]
+      : behavior.availableModels;
     console.log(JSON.stringify({
       id: command.id,
       type: 'response',
       command: 'get_available_models',
       success: true,
-      data: { models: behavior.availableModels.map(withPrivateFields) },
+      data: { models: availableModels.map(withPrivateFields) },
     }));
     return;
   }

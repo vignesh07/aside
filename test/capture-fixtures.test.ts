@@ -132,13 +132,25 @@ describe('generated Today capture fixture', () => {
 
   it('names Pi\'s exact upstream recipient in deterministic captures', () => {
     expect(
-      captureModelCatalog().find((model) => model.provider === 'pi-cli'),
-    ).toEqual({
-      provider: 'pi-cli',
-      model: 'anthropic/claude-sonnet-4-6',
-      label: 'Anthropic · Claude Sonnet 4.6',
-      recommended: true,
-    });
+      captureModelCatalog().filter((model) => model.provider === 'pi-cli'),
+    ).toEqual([
+      {
+        provider: 'pi-cli',
+        model: 'anthropic/claude-sonnet-4-6',
+        label: 'Anthropic · Claude Sonnet 4.6',
+        recommended: true,
+      },
+      {
+        provider: 'pi-cli',
+        model: 'openai-codex/gpt-5.4',
+        label: 'ChatGPT · GPT-5.4',
+      },
+      {
+        provider: 'pi-cli',
+        model: 'github-copilot/gpt-5',
+        label: 'GitHub Copilot · GPT-5',
+      },
+    ]);
   });
 
   it('uses deterministic aggregate counters for usage captures', async () => {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   canDisconnectProvider,
+  canAskWithModel,
   canAskWithProvider,
   isProviderUsable,
+  providerDisplayName,
   providerHelpLink,
   providerStatusText,
   recommendedModelForProvider,
@@ -77,6 +79,51 @@ describe('auth UI state', () => {
     expect(canAskWithProvider(statuses, 'claude-cli')).toBe(false);
   });
 
+  it('requires an enabled Pi thread\'s exact upstream model to remain available', () => {
+    const statuses = [auth('pi-cli', 'configured', true)];
+
+    expect(
+      canAskWithModel(
+        statuses,
+        models,
+        'pi-cli',
+        'openai-codex/gpt-5.4',
+      ),
+    ).toBe(true);
+    expect(
+      canAskWithModel(
+        statuses,
+        models,
+        'pi-cli',
+        'anthropic/claude-sonnet-4-6',
+      ),
+    ).toBe(false);
+    expect(
+      canAskWithModel(
+        [auth('pi-cli', 'configured')],
+        models,
+        'pi-cli',
+        'openai-codex/gpt-5.4',
+      ),
+    ).toBe(false);
+
+    // Static vendor clients keep their existing provider-level auth contract.
+    expect(
+      canAskWithModel(
+        [auth('codex-cli', 'signed_in', true)],
+        [],
+        'codex-cli',
+        'codex-fast',
+      ),
+    ).toBe(true);
+  });
+
+  it('names account routes after the clients Aside delegates through', () => {
+    expect(providerDisplayName('codex-cli')).toBe('Codex');
+    expect(providerDisplayName('claude-cli')).toBe('Claude Code');
+    expect(providerDisplayName('pi-cli')).toBe('Pi');
+  });
+
   it('chooses a provider recommendation without crossing providers', () => {
     expect(
       recommendedModelForProvider(models, 'codex-cli')?.model,
@@ -118,7 +165,7 @@ describe('auth UI state', () => {
         enabled: false,
         reason: 'no_models',
       }),
-    ).toBe('No models configured in Pi');
+    ).toBe('No authenticated models in Pi');
     expect(
       providerStatusText({
         provider: 'pi-cli',
@@ -146,7 +193,7 @@ describe('auth UI state', () => {
       },
     ]);
     expect(providerStatusText(auth('pi-cli', 'configured'))).toBe(
-      'Models configured in Pi',
+      'Models available through Pi',
     );
   });
 

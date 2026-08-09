@@ -590,9 +590,10 @@ export default function Home() {
               <span>03</span>
               <h3>Your login stays with the vendor.</h3>
               <p>
-                Aside delegates through Codex, Claude Code, or the exact
-                provider and model configured in Pi. It never reads their OAuth
-                tokens or imports API keys from your shell.
+                Aside can use your existing Codex or Claude Code sign-in, or
+                any model Pi reports from accounts authenticated there.
+                Credentials stay with those clients; Aside stores only your
+                permission and the exact provider/model chosen for each thread.
               </p>
             </article>
           </div>
@@ -725,10 +726,9 @@ export default function Home() {
               Do I need separate API keys? <span>+</span>
             </summary>
             <p>
-              No. Aside can use the ChatGPT account already connected through
-              Codex, the Claude account connected through Claude Code, or a
-              provider account configured inside Pi. It does not copy their
-              credentials.
+              No. Aside can use Codex&apos;s existing ChatGPT sign-in, Claude
+              Code&apos;s existing Claude account, or any account already
+              authenticated in Pi. Aside never copies those credentials.
             </p>
           </details>
           <details className="reveal">

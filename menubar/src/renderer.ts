@@ -43,6 +43,7 @@ import type {
 } from './usage-types.js';
 import {
   canDisconnectProvider,
+  canAskWithModel,
   canAskWithProvider,
   isProviderUsable,
   providerDisplayName,
@@ -257,6 +258,24 @@ function observerModelLabel(provider: string, model: string): string {
   return `${providerLabel} · ${modelLabel}`;
 }
 
+function isUnavailablePiModel(provider: string, model: string): boolean {
+  return (
+    provider === 'pi-cli' &&
+    canAskWithProvider(providerAuth, provider) &&
+    !canAskWithModel(
+      providerAuth,
+      latestState?.models ?? [],
+      provider,
+      model,
+    )
+  );
+}
+
+function unavailablePiModelCopy(provider: string, model: string): string {
+  return `${observerModelLabel(provider, model)} is no longer available. ` +
+    'Reauthenticate that provider in Pi or choose another model.';
+}
+
 function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -278,7 +297,7 @@ function activeSession(state: MenubarState): SessionSummary | undefined {
 }
 
 function providerMark(provider: ProviderAuthId): string {
-  if (provider === 'codex-cli') return 'G';
+  if (provider === 'codex-cli') return 'X';
   if (provider === 'claude-cli') return 'C';
   if (provider === 'pi-cli') return 'P';
   return 'O';
@@ -458,7 +477,12 @@ function maybeGenerateTodayForEntry(): void {
     hasArtifact: todayView.artifact !== null,
     artifactIsStale: todayView.artifactIsStale,
     authReady: authPhase === 'ready',
-    providerUsable: canAskWithProvider(providerAuth, todayView.provider),
+    providerUsable: canAskWithModel(
+      providerAuth,
+      latestState?.models ?? [],
+      todayView.provider,
+      todayView.model,
+    ),
     consentGranted:
       todayConsentProvider === todayView.provider && todayConsentGranted,
   })) return;
@@ -737,21 +761,26 @@ function providerRecoveryLink(status: ProviderAuthStatus) {
   return undefined;
 }
 
-function configuredPiModelLabel(): string | null {
+function configuredPiModelSummary(): string | null {
   const options = latestState?.models.filter(
     (model) => model.provider === 'pi-cli',
   ) ?? [];
-  const selected = options.find((model) => model.recommended) ?? options[0];
-  if (!selected) return null;
-  return (selected.label ?? selected.model).replace(/\s+\([^()]+\)$/, '');
+  if (options.length === 0) return null;
+  const upstreamProviders = new Set(
+    options
+      .map((option) => option.model.slice(0, option.model.indexOf('/')))
+      .filter(Boolean),
+  );
+  const modelCopy = `${options.length} ${options.length === 1 ? 'model' : 'models'}`;
+  const providerCopy = `${upstreamProviders.size} ${
+    upstreamProviders.size === 1 ? 'provider' : 'providers'
+  }`;
+  return `${modelCopy} · ${providerCopy}`;
 }
 
 function providerDetail(status: ProviderAuthStatus): string {
   if (status.provider === 'pi-cli' && status.state === 'configured') {
-    const recipient = configuredPiModelLabel();
-    return recipient
-      ? `${recipient} via Pi`
-      : 'Configured upstream model via Pi';
+    return configuredPiModelSummary() ?? 'Authenticated models available through Pi';
   }
   return providerStatusText(status);
 }
@@ -2114,9 +2143,15 @@ function renderTodayContent(view: TodayViewState): void {
   // On an empty day, `diary.overview` is sufficient; avoid adding a second,
   // visually heavier empty state below it.
   if (view.diary.counts.eventCount > 0) {
+    const modelUnavailable = isUnavailablePiModel(view.provider, view.model);
     const canGenerate =
       authPhase === 'ready' &&
-      canAskWithProvider(providerAuth, view.provider);
+      canAskWithModel(
+        providerAuth,
+        latestState?.models ?? [],
+        view.provider,
+        view.model,
+      );
     const recapNeedsGeneration =
       view.artifact === null || view.artifactIsStale;
     const consentGranted =
@@ -2127,9 +2162,11 @@ function renderTodayContent(view: TodayViewState): void {
       appendGeneratedArtifact(content, {
         kind: 'today',
         title: 'Daily recap',
-        emptyCopy: canGenerate
-          ? 'Preparing today’s recap…'
-          : 'Connect the selected observer account to add a generated recap.',
+        emptyCopy: modelUnavailable
+          ? unavailablePiModelCopy(view.provider, view.model)
+          : canGenerate
+            ? 'Preparing today’s recap…'
+            : 'Connect the selected observer account to add a generated recap.',
         buttonId: 'update-today-recap',
         artifact: view.artifact,
         evidence: view.artifactEvidence,
@@ -2192,11 +2229,13 @@ function renderReviewContent(view: ThreadReviewViewState): void {
     );
   } else {
     appendInsights(content, view.insights);
+    const modelUnavailable = isUnavailablePiModel(view.provider, view.model);
     appendGeneratedArtifact(content, {
       kind: 'review',
       title: 'Thread review',
-      emptyCopy:
-        'Generate a review of the goal, approach, friction, observed outcome, and possible next step.',
+      emptyCopy: modelUnavailable
+        ? unavailablePiModelCopy(view.provider, view.model)
+        : 'Generate a review of the goal, approach, friction, observed outcome, and possible next step.',
       buttonId: 'generate-review',
       artifact: view.artifact,
       evidence: view.artifactEvidence,
@@ -2209,7 +2248,12 @@ function renderReviewContent(view: ThreadReviewViewState): void {
       error: reviewGenerationError,
       disabled:
         authPhase !== 'ready' ||
-        !canAskWithProvider(providerAuth, view.provider),
+        !canAskWithModel(
+          providerAuth,
+          latestState?.models ?? [],
+          view.provider,
+          view.model,
+        ),
       onGenerate: () => void generateThreadReview(),
     });
 
@@ -2233,7 +2277,16 @@ function renderReviewContent(view: ThreadReviewViewState): void {
 }
 
 async function generateTodayRecap(): Promise<void> {
-  if (todayGenerating || !todayView) return;
+  if (
+    todayGenerating ||
+    !todayView ||
+    !canAskWithModel(
+      providerAuth,
+      latestState?.models ?? [],
+      todayView.provider,
+      todayView.model,
+    )
+  ) return;
   todayEntryGenerationAttempted = true;
   todayGenerating = true;
   todayGenerationError = null;
@@ -2263,7 +2316,18 @@ async function generateTodayRecap(): Promise<void> {
 async function generateThreadReview(): Promise<void> {
   const threadId = reviewThreadId;
   const source = reviewThreadSource;
-  if (reviewGenerating || !reviewView || !threadId || !source) return;
+  if (
+    reviewGenerating ||
+    !reviewView ||
+    !threadId ||
+    !source ||
+    !canAskWithModel(
+      providerAuth,
+      latestState?.models ?? [],
+      reviewView.provider,
+      reviewView.model,
+    )
+  ) return;
   reviewGenerating = true;
   reviewGenerationError = null;
   renderAnalysisView();
@@ -2435,6 +2499,10 @@ function renderModels(state: MenubarState): void {
   const activeProviderLabel = activeProvider
     ? providerDisplayName(activeProvider.provider)
     : state.provider;
+  const activePiModelUnavailable = isUnavailablePiModel(
+    state.provider,
+    state.model,
+  );
   const modelsKey = [
     activeKey,
     activeProviderLabel,
@@ -2449,7 +2517,9 @@ function renderModels(state: MenubarState): void {
     if (!activeAvailable) {
       const locked = document.createElement('option');
       locked.value = activeKey;
-      locked.textContent = `${activeProviderLabel} · disconnected`;
+      locked.textContent = activePiModelUnavailable
+        ? `${activeProviderLabel} · ${state.model} · unavailable`
+        : `${activeProviderLabel} · disconnected`;
       locked.disabled = true;
       modelsEl.appendChild(locked);
     }
@@ -2690,9 +2760,18 @@ function render(state: MenubarState): void {
   const activeProviderLabel = activeAuth
     ? providerDisplayName(activeAuth.provider)
     : state.provider;
+  const activePiModelUnavailable = isUnavailablePiModel(
+    state.provider,
+    state.model,
+  );
   const canAsk =
     authPhase === 'ready' &&
-    canAskWithProvider(providerAuth, state.provider);
+    canAskWithModel(
+      providerAuth,
+      state.models,
+      state.provider,
+      state.model,
+    );
   const onboardingCompleted = localStorage.getItem('aside:onboarding:v1') === '1';
   const firstRun =
     authPhase === 'ready' &&
@@ -2717,6 +2796,8 @@ function render(state: MenubarState): void {
         ? 'Checking account status…'
         : firstRun
           ? 'Choose an account above to chat…'
+          : activePiModelUnavailable
+            ? 'Choose another Pi model to chat…'
           : activeAuth
             ? `${activeAuth.enabled ? 'Reconnect' : 'Connect'} ${activeProviderLabel} to chat…`
             : 'Connect an account to chat…';
@@ -2729,12 +2810,18 @@ function render(state: MenubarState): void {
       ? 'Checking account status…'
       : firstRun
         ? 'Choose a model account above to unlock this side chat.'
+        : activePiModelUnavailable
+          ? unavailablePiModelCopy(state.provider, state.model)
         : activeAuth
           ? `This thread uses ${activeProviderLabel}. ${
               activeAuth.enabled ? 'Reconnect it' : 'Connect it'
             } or choose a connected model.`
           : 'Connect an account before sending transcript context to a model.';
-  providerLockActionEl.textContent = activeAuth?.enabled ? 'Reconnect…' : 'Connect…';
+  providerLockActionEl.textContent = activePiModelUnavailable
+    ? 'Choose model…'
+    : activeAuth?.enabled
+      ? 'Reconnect…'
+      : 'Connect…';
 
   const usable = providerAuth.filter(isProviderUsable);
   accountsButtonEl.classList.toggle('connected', usable.length > 0);
@@ -3135,7 +3222,12 @@ formEl.addEventListener('submit', (event) => {
     !question ||
     !latestState ||
     latestState.thinking ||
-    !canAskWithProvider(providerAuth, latestState.provider)
+    !canAskWithModel(
+      providerAuth,
+      latestState.models,
+      latestState.provider,
+      latestState.model,
+    )
   ) {
     return;
   }
@@ -3182,7 +3274,22 @@ accountsButtonEl.addEventListener('click', () => {
   else hideAccounts();
 });
 accountsCloseEl.addEventListener('click', hideAccounts);
-providerLockActionEl.addEventListener('click', showAccounts);
+providerLockActionEl.addEventListener('click', () => {
+  if (
+    latestState &&
+    isUnavailablePiModel(latestState.provider, latestState.model)
+  ) {
+    const picker = modelsEl as HTMLSelectElement & { showPicker?: () => void };
+    picker.focus();
+    try {
+      picker.showPicker?.();
+    } catch {
+      // Focusing the native select is still a useful fallback on older Electron.
+    }
+    return;
+  }
+  showAccounts();
+});
 accountsSettingsEl.addEventListener('click', () => {
   hideAccounts();
   showSettings();

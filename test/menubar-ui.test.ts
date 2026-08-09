@@ -131,6 +131,20 @@ describe('menubar product surfaces', () => {
     );
   });
 
+  it('fails closed when a thread\'s exact Pi model is no longer available', () => {
+    expect(renderer).toContain('canAskWithModel');
+    expect(renderer).toContain('isUnavailablePiModel');
+    expect(renderer).toContain('unavailablePiModelCopy');
+    expect(renderer).toContain('Reauthenticate that provider in Pi or choose another model.');
+    expect(renderer).toContain('Choose another Pi model to chat…');
+    expect(renderer).toContain('· unavailable`');
+    expect(renderer).toContain('function configuredPiModelSummary');
+    expect(renderer).toContain('return `${modelCopy} · ${providerCopy}`');
+    expect(renderer).toContain("? 'Choose model…'");
+    expect(renderer).toContain('picker.showPicker?.()');
+    expect(renderer).not.toContain('configuredPiModelLabel');
+  });
+
   it('refreshes activity views for ledger, read-state, and local-day changes', () => {
     expect(renderer).toContain('state.activityHighWaterSeq');
     expect(renderer).toContain('state.activityCursorRevision');

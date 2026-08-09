@@ -123,13 +123,11 @@ describe('registry', () => {
         provider: 'pi-cli',
         model: 'github-copilot/gpt-5',
         label: 'GitHub Copilot · GPT-5',
-        recommended: true,
       },
       {
         provider: 'pi-cli',
         model: 'openai-codex/gpt-5.4',
         label: 'ChatGPT · GPT-5.4',
-        recommended: true,
       },
     ]);
   });

@@ -34,13 +34,13 @@ const PI_PROVIDER_LABELS: Readonly<Record<string, string>> = {
 export function configuredPiModelOptions(
   models: readonly ConfiguredPiModel[],
 ): ModelOption[] {
-  return models.map((model) => ({
+  return models.map((model, index) => ({
     provider: 'pi-cli',
     // Pin both halves. A bare model id could silently resolve to another Pi
     // provider with a model of the same name.
     model: `${model.provider}/${model.id}`,
     label: `${piProviderLabel(model.provider)} · ${model.name}`,
-    recommended: true,
+    ...(index === 0 ? { recommended: true } : {}),
   }));
 }
 
@@ -80,9 +80,9 @@ export function flattenModelCatalog(): ModelOption[] {
  * The catalog, plus models discovered from the user's local runtimes.
  *
  * The static Ollama entries are guesses at common models; this reports what the
- * user really pulled. Pi is different: Aside exposes only the exact upstream
- * provider/model Pi reports as configured, rather than dumping Pi's enormous
- * registry into a compact Mac picker. Both lookups are best-effort.
+ * user really pulled. Pi is different: Aside exposes the credential-backed
+ * models Pi reports as available while keeping every upstream provider/model
+ * pair exact. Both lookups are best-effort.
  */
 export async function flattenModelCatalogWithLocal(): Promise<ModelOption[]> {
   const base = flattenModelCatalog();
@@ -91,8 +91,9 @@ export async function flattenModelCatalogWithLocal(): Promise<ModelOption[]> {
     listConfiguredPiModels(),
   ]);
 
-  // Pi has no useful static guess: its configured upstream is the privacy and
-  // routing boundary. Real Ollama models replace guesses only when detected.
+  // Pi has no useful static guess: each available upstream provider/model is a
+  // privacy and routing boundary. Real Ollama models replace guesses only when
+  // detected.
   const withoutDynamicEntries = base.filter(
     (option) =>
       option.provider !== 'pi-cli' &&
