@@ -42,7 +42,16 @@ export function extractUsageFromLine(
   if (source === 'claude') {
     return extractClaude(parsed, currentModel, currentProvider, lineEndOffset, sampleNamespace);
   }
-  return extractPi(parsed, currentModel, currentProvider, lineEndOffset, sampleNamespace);
+  if (source === 'pi') {
+    return extractPi(parsed, currentModel, currentProvider, lineEndOffset, sampleNamespace);
+  }
+  return extractOpenCode(
+    parsed,
+    currentModel,
+    currentProvider,
+    lineEndOffset,
+    sampleNamespace,
+  );
 }
 
 function extractCodex(
@@ -215,6 +224,45 @@ function extractPi(
     cacheWrite1hInputTokens: 0,
     outputTokens: tokens(usage['output']),
     reasoningOutputTokens: 0,
+  });
+  return { model, provider, ...(sample ? { sample } : {}) };
+}
+
+function extractOpenCode(
+  parsed: Record<string, unknown>,
+  currentModel: string,
+  currentProvider: string,
+  lineEndOffset: number,
+  sampleNamespace: string,
+): UsageExtractionResult {
+  if (parsed['schema'] !== 'aside.opencode.v1') {
+    return { model: currentModel, provider: currentProvider };
+  }
+  const recordedModel = cleanModel(parsed['modelID']);
+  const recordedProvider = stringValue(parsed['providerID']);
+  const model = recordedModel || currentModel || 'unknown';
+  const provider = recordedProvider
+    ? normalizeProvider(recordedProvider)
+    : currentProvider || 'unknown';
+  if (parsed['type'] !== 'usage') return { model, provider };
+  const usage = record(parsed['tokens']);
+  if (!usage) return { model, provider };
+  const id = stringValue(parsed['id']) ||
+    stringValue(parsed['messageId']);
+  const sample = usageSample({
+    sampleKey: stableSampleKey(
+      id ? ['opencode', id] : ['opencode', sampleNamespace, lineEndOffset],
+    ),
+    timestamp: parsed['timestamp'],
+    provider,
+    model,
+    local: isLocalProvider(provider),
+    inputTokens: tokens(usage['input']),
+    cachedInputTokens: tokens(usage['cacheRead']),
+    cacheWrite5mInputTokens: tokens(usage['cacheWrite']),
+    cacheWrite1hInputTokens: 0,
+    outputTokens: tokens(usage['output']),
+    reasoningOutputTokens: tokens(usage['reasoning']),
   });
   return { model, provider, ...(sample ? { sample } : {}) };
 }

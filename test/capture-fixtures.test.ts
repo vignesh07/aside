@@ -115,6 +115,7 @@ describe('generated Today capture fixture', () => {
       { provider: 'codex-cli', state: 'signed_in', enabled: true },
       { provider: 'claude-cli', state: 'signed_in', enabled: true },
       { provider: 'pi-cli', state: 'configured', enabled: true },
+      { provider: 'opencode-cli', state: 'configured', enabled: true },
       {
         provider: 'ollama',
         state: 'error',
@@ -151,6 +152,36 @@ describe('generated Today capture fixture', () => {
         label: 'GitHub Copilot · GPT-5',
       },
     ]);
+  });
+
+  it('names OpenCode\'s exact upstream recipients in deterministic captures', () => {
+    expect(
+      captureModelCatalog().filter((model) => model.provider === 'opencode-cli'),
+    ).toEqual([
+      {
+        provider: 'opencode-cli',
+        model: 'openai/gpt-5.4',
+        label: 'OpenAI · GPT-5.4',
+      },
+      {
+        provider: 'opencode-cli',
+        model: 'anthropic/claude-sonnet-4-6',
+        label: 'Anthropic · Claude Sonnet 4.6',
+      },
+    ]);
+  });
+
+  it('can deterministically stress the model picker with 10,000 OpenCode routes', () => {
+    const openCode = captureModelCatalog({ openCodeRouteCount: 10_000 })
+      .filter((model) => model.provider === 'opencode-cli');
+
+    expect(openCode).toHaveLength(10_000);
+    expect(new Set(openCode.map((model) => model.model)).size).toBe(10_000);
+    expect(openCode[0]).toMatchObject({ model: 'openai/gpt-5.4' });
+    expect(openCode.at(-1)).toMatchObject({
+      model: 'anthropic/capture-route-10000',
+      label: 'Anthropic · Capture Route 10000',
+    });
   });
 
   it('uses deterministic aggregate counters for usage captures', async () => {

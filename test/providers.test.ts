@@ -16,7 +16,10 @@ import {
 import { assembleSystemPrompt } from '../src/core/providers/types.js';
 import { isObserverSession } from '../src/core/session-scanner.js';
 import { DEFAULT_PROVIDER } from '../src/config/defaults.js';
-import { configuredPiModelOptions } from '../src/config/model-catalog.js';
+import {
+  configuredOpenCodeModelOptions,
+  configuredPiModelOptions,
+} from '../src/config/model-catalog.js';
 import { composeClaudeTurnContent } from '../src/core/providers/claude-session.js';
 import { claudeObserverArgs } from '../src/core/providers/claude-session.js';
 import { codexObserverArgs } from '../src/core/providers/codex-cli.js';
@@ -57,6 +60,7 @@ describe('registry', () => {
       'claude-cli',
       'codex-cli',
       'pi-cli',
+      'opencode-cli',
       'anthropic',
       'openai',
       'ollama',
@@ -64,7 +68,7 @@ describe('registry', () => {
   });
 
   it('needs no Aside-owned key for each delegating client', () => {
-    for (const id of ['claude-cli', 'codex-cli', 'pi-cli']) {
+    for (const id of ['claude-cli', 'codex-cli', 'pi-cli', 'opencode-cli']) {
       const provider = getProvider(id)!;
       expect(provider.requiresApiKey).toBe(false);
       expect(provider.apiKeyEnv).toEqual([]);
@@ -128,6 +132,30 @@ describe('registry', () => {
         provider: 'pi-cli',
         model: 'openai-codex/gpt-5.4',
         label: 'ChatGPT · GPT-5.4',
+      },
+    ]);
+  });
+
+  it('pins OpenCode model choices to a readable upstream provider and model', () => {
+    expect(
+      configuredOpenCodeModelOptions([
+        { provider: 'openai', id: 'gpt-5.4', name: 'GPT-5.4' },
+        {
+          provider: 'anthropic',
+          id: 'claude-sonnet-4-6',
+          name: 'Claude Sonnet 4.6',
+        },
+      ]),
+    ).toEqual([
+      {
+        provider: 'opencode-cli',
+        model: 'openai/gpt-5.4',
+        label: 'OpenAI · GPT-5.4',
+      },
+      {
+        provider: 'opencode-cli',
+        model: 'anthropic/claude-sonnet-4-6',
+        label: 'Anthropic · Claude Sonnet 4.6',
       },
     ]);
   });

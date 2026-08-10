@@ -40,7 +40,9 @@ export function extractSearchDocuments(
       ? extractCodex(parsed)
       : source === 'claude'
         ? extractClaude(parsed)
-        : extractPi(parsed);
+        : source === 'pi'
+          ? extractPi(parsed)
+          : extractOpenCode(parsed);
 
   return candidates.flatMap(([kind, value]): SearchDocument[] => {
     const body = normalizeSearchText(value);
@@ -172,6 +174,32 @@ function extractPi(
     return textBlocks(content, new Set(['text'])).map((text) => ['error', text]);
   }
   return [];
+}
+
+function extractOpenCode(
+  parsed: Record<string, unknown>,
+): Array<[SearchDocumentKind, unknown]> {
+  if (parsed['schema'] !== 'aside.opencode.v1') return [];
+  const type = parsed['type'];
+  if (type === 'text') {
+    const role = parsed['role'];
+    if (role === 'user') return [['user', parsed['text']]];
+    if (role === 'assistant') return [['assistant', parsed['text']]];
+    return [];
+  }
+  if (type !== 'tool') return [];
+  const target = [
+    stringValue(parsed['tool']),
+    stringValue(parsed['title']),
+    safeJson(parsed['input']),
+  ].filter(Boolean).join(' ');
+  const out: Array<[SearchDocumentKind, unknown]> = target
+    ? [['tool', target]]
+    : [];
+  if (parsed['state'] === 'error') {
+    out.push(['error', parsed['error']]);
+  }
+  return out;
 }
 
 function codexErrorOutput(value: unknown): string {

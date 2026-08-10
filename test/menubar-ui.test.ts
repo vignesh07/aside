@@ -131,18 +131,65 @@ describe('menubar product surfaces', () => {
     );
   });
 
-  it('fails closed when a thread\'s exact Pi model is no longer available', () => {
+  it('fails closed when a thread\'s exact brokered model is no longer available', () => {
     expect(renderer).toContain('canAskWithModel');
-    expect(renderer).toContain('isUnavailablePiModel');
-    expect(renderer).toContain('unavailablePiModelCopy');
-    expect(renderer).toContain('Reauthenticate that provider in Pi or choose another model.');
-    expect(renderer).toContain('Choose another Pi model to chat…');
+    expect(renderer).toContain('isUnavailableBrokeredModel');
+    expect(renderer).toContain('unavailableBrokeredModelCopy');
+    expect(renderer).toContain("'Check that model route in OpenCode'");
+    expect(renderer).toContain("'Reconnect that provider in Pi'");
+    expect(renderer).toContain('Choose another model for this account…');
     expect(renderer).toContain('· unavailable`');
-    expect(renderer).toContain('function configuredPiModelSummary');
+    expect(renderer).toContain('function configuredBrokerModelSummary');
     expect(renderer).toContain('return `${modelCopy} · ${providerCopy}`');
     expect(renderer).toContain("? 'Choose model…'");
-    expect(renderer).toContain('picker.showPicker?.()');
+    expect(renderer).toContain('openModelPicker(provider)');
     expect(renderer).not.toContain('configuredPiModelLabel');
+  });
+
+  it('uses a searchable, grouped, virtualized observer-model picker', () => {
+    expect(indexHtml).toContain('id="model-trigger"');
+    expect(indexHtml).toContain('id="model-popover"');
+    expect(indexHtml).toContain('id="model-search"');
+    expect(indexHtml).toContain('role="combobox"');
+    expect(indexHtml).toContain('id="model-options" role="listbox"');
+    expect(indexHtml).toContain('id="model-connect"');
+    expect(renderer).toContain('function searchableModel');
+    expect(renderer).toContain('model.searchText.includes(query)');
+    expect(renderer).toContain('function upstreamProviderLabel');
+    expect(renderer).toContain('`${providerLabel} · ${upstreamProviderLabel(upstream)}`');
+    expect(renderer).toContain('modelPickerModels = [...groupedModels.values()].flat()');
+    expect(renderer).toContain('const byGroup = new Map');
+    expect(renderer).toContain("kind: 'group'");
+    expect(renderer).toContain('MODEL_OVERSCAN_PX');
+    expect(renderer).toContain('renderVirtualModelRows');
+    expect(renderer).toContain('firstVisibleModelEntry(minimum)');
+    expect(renderer).toContain('entry.top + entry.height < minimum');
+    expect(renderer).toContain('modelPickerOptionEntries[optionIndex] = entry');
+    expect(renderer).not.toContain('modelPickerModels.indexOf(model)');
+    expect(renderer).toContain('route.textContent = model.model');
+    expect(renderer).toContain("event.key === 'PageDown'");
+    expect(renderer).toContain("event.key === 'Home'");
+    expect(renderer).toContain("event.key === 'Escape'");
+    expect(renderer).toContain('selectModelPickerIndex(modelPickerActiveIndex)');
+    expect(renderer).toContain('.setModel(model.provider, model.model)');
+    expect(renderer).toContain('modelOptionsEl.scrollTop = Math.max');
+    expect(renderer).toContain('closeModelPicker(false);\n  showAccounts();');
+    expect(renderer).toContain("provider === 'opencode-cli'");
+    expect(renderer).toContain('pendingModelProvider = provider');
+  });
+
+  it('presents OpenCode as a first-class session and observer source', () => {
+    expect(indexHtml).toContain('Codex, Claude Code, Pi, OpenCode, or local Ollama');
+    expect(indexHtml).toContain('Pi and OpenCode send it to the exact upstream provider and model');
+    expect(indexHtml).toContain('OpenCode uses audited 1.18.15 routes in a tool-free sandbox');
+    expect(indexHtml).toContain('Zen works without credentials');
+    expect(indexHtml).toContain('OAuth and well-known routes are not supported yet');
+    expect(main).toContain('publishProviderFailureStatus(error)');
+    expect(main).toContain('status.provider === failed.provider ? failed : status');
+    expect(renderer).toContain("status.provider === 'opencode-cli' && !status.enabled");
+    expect(renderer).toContain('void connectProvider(status.provider)');
+    expect(renderer).toContain("if (source === 'pi') return 'P'");
+    expect(renderer).toContain("if (provider === 'opencode-cli') return 'OC'");
   });
 
   it('refreshes activity views for ledger, read-state, and local-day changes', () => {

@@ -14,7 +14,7 @@ const cli = meow(
     $ aside install [--write]    Add a tmux key (<prefix> C-a) to summon the dock
 
   Persistent read-only side chats for your AI coding agents. Open one fleet
-  thread across every Claude Code, Codex and Pi session, or select a session
+  thread across every Claude Code, Codex, Pi, and OpenCode session, or select a session
   and keep a separate conversation about only that work.
 
   It only ever reads. It has no tools and cannot touch your sessions.
@@ -24,7 +24,7 @@ const cli = meow(
     -m, --model        Model id for the side chat (default: claude-haiku-4-5-20251001)
     --project          Watch only sessions for this project name
     --session          Watch a specific session id (repeatable)
-    --source           Watch only "claude", "codex", or "pi" sessions
+    --source           Watch only "claude", "codex", "pi", or "opencode" sessions
     --side             Dock side: "right" (default) or "bottom"
     --size             Dock pane size (default: 40%)
     --write            (install) append the binding to ~/.tmux.conf
@@ -94,7 +94,12 @@ if (cli.flags.project) {
 if (cli.flags.session && cli.flags.session.length > 0) {
   scopeFilter.sessionIds = cli.flags.session;
 }
-if (cli.flags.source === 'claude' || cli.flags.source === 'codex' || cli.flags.source === 'pi') {
+if (
+  cli.flags.source === 'claude' ||
+  cli.flags.source === 'codex' ||
+  cli.flags.source === 'pi' ||
+  cli.flags.source === 'opencode'
+) {
   scopeFilter.source = cli.flags.source as SessionSource;
 }
 

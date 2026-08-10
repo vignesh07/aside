@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { scopeFromThreadId } from '../types/chat.js';
 import type { ChatThread, ChatTurn } from '../types/chat.js';
 
 const STORE_VERSION = 1;
@@ -22,8 +23,13 @@ interface StoredState {
 
 export interface ThreadStore {
   load(): ChatThread[];
-  save(threads: ChatThread[]): void;
+  save(threads: ChatThread[], options?: ThreadStoreSaveOptions): void;
   readonly location?: string;
+}
+
+export interface ThreadStoreSaveOptions {
+  /** Exact old id → canonical id rewrites applied atomically under the lock. */
+  migrations?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -84,7 +90,7 @@ export class FileThreadStore implements ThreadStore {
     }
   }
 
-  save(threads: ChatThread[]): void {
+  save(threads: ChatThread[], options: ThreadStoreSaveOptions = {}): void {
     let lockFd: number | null = null;
     let lockPath = '';
     try {
@@ -97,7 +103,10 @@ export class FileThreadStore implements ThreadStore {
 
       // Both frontends may be open. Merge under the lock so a TUI write cannot
       // erase a newer menubar thread (or vice versa).
-      const merged = mergeThreads(this.load(), threads);
+      const merged = applyThreadMigrations(
+        mergeThreads(this.load(), threads),
+        options.migrations,
+      );
       const state: StoredState = {
         version: STORE_VERSION,
         threads: merged.map(serializeThread),
@@ -118,6 +127,35 @@ export class FileThreadStore implements ThreadStore {
       }
     }
   }
+}
+
+function applyThreadMigrations(
+  threads: ChatThread[],
+  migrations?: ReadonlyMap<string, string>,
+): ChatThread[] {
+  if (!migrations || migrations.size === 0) return threads;
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
+  for (const [oldId, canonicalId] of migrations) {
+    if (oldId === canonicalId) continue;
+    const legacy = byId.get(oldId);
+    if (!legacy) continue;
+    const canonical = byId.get(canonicalId);
+    const newer =
+      canonical && canonical.updatedAt >= legacy.updatedAt ? canonical : legacy;
+    const turns = new Map(legacy.turns.map((turn) => [turn.id, turn]));
+    for (const turn of canonical?.turns ?? []) turns.set(turn.id, turn);
+    byId.set(canonicalId, {
+      ...newer,
+      id: canonicalId,
+      scope: scopeFromThreadId(canonicalId),
+      turns: [...turns.values()]
+        .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime())
+        .slice(-MAX_TURNS_PER_THREAD),
+      thinking: false,
+    });
+    byId.delete(oldId);
+  }
+  return [...byId.values()];
 }
 
 function serializeThread(thread: ChatThread): StoredThread {

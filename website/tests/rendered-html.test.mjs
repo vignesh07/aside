@@ -55,6 +55,8 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /Subagent work stays attached:/);
   assert.match(html, /Codex and Claude\s+Code subagents fold beneath/);
   assert.match(html, /Search queries never leave your machine\./);
+  assert.match(html, /private,\s+rebuildable local transcript cache/);
+  assert.match(html, /observes that session being deleted in OpenCode/);
   assert.match(html, /Open Today\. Get the day(?:&#x27;|')s recap\./);
   assert.match(
     html,
@@ -72,14 +74,24 @@ test("server-renders the finished Aside landing page", async () => {
   assert.match(html, /API-equivalent estimates, not invoices/);
   assert.match(html, /local-model equivalents/);
   assert.match(html, /Read-only is a boundary, not a slogan\./);
-  assert.match(html, /any model Pi reports from accounts authenticated there/);
-  assert.match(html, /exact\s+provider\/model chosen for each thread/);
-  assert.match(html, /any account already\s+authenticated in Pi/);
+  assert.match(html, /audited OpenCode 1\.18\.15 routes/);
+  assert.match(html, /OpenCode requests run tool-free/);
+  assert.match(html, /external plugins, custom endpoints, or\s+shell API-key variables/);
+  assert.match(html, /route chosen for each thread/);
+  assert.match(html, /Zen routes need no credential/);
+  assert.match(html, /OAuth and well-known\s+routes are not supported yet/);
+  assert.match(html, /never modifies OpenCode(?:&#x27;|')s\s+canonical auth file/);
+  assert.match(html, /Do the coding tools need to be installed\?/);
+  assert.match(html, /OpenCode\s+provider access currently requires the audited OpenCode 1\.18\.15/);
+  assert.match(html, /credential-free Zen routes work without another account/);
+  assert.match(html, /Codex, Claude Code, Pi, and OpenCode/);
+  assert.match(html, /<b>O<\/b> OpenCode/);
   assert.match(html, /Open source · MIT/);
   assert.match(html, /Aside is open source\./);
   assert.match(html, /View the source on GitHub/);
   assert.match(html, /https:\/\/github\.com\/vignesh07\/aside/);
-  assert.match(html, /macOS preview · v0\.1\.11/);
+  assert.match(html, /macOS preview/);
+  assert.doesNotMatch(html, /macOS preview · v\d/);
   assert.match(
     html,
     /https:\/\/aside\.vgnsh\.xyz\/download\/mac-arm64/,

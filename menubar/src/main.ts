@@ -441,6 +441,11 @@ function checkForUpdatesInBackground(): void {
 async function refreshProviderAuth(): Promise<ProviderAuthStatus[]> {
   if (!providerAuth) return [];
   const statuses = await providerAuth.getStatuses();
+  await backend?.refreshModels({
+    includeOpenCode: statuses.some(
+      (status) => status.provider === 'opencode-cli' && status.enabled,
+    ),
+  });
   broadcastProviderAuth(statuses);
   return statuses;
 }
@@ -494,6 +499,30 @@ function safeProviderError(error: unknown): Error {
   );
 }
 
+async function publishProviderFailureStatus(error: unknown): Promise<void> {
+  const failed = error instanceof ProviderAuthError ? error.status : undefined;
+  if (!failed || !providerAuth) return;
+
+  // The explicit OpenCode probe may produce an actionable, renderer-safe
+  // reason without granting consent. Preserve that result instead of replacing
+  // it immediately with the metadata-only pre-consent row. Model refresh stays
+  // uncredentialed because the failed provider remains disabled.
+  let statuses: ProviderAuthStatus[];
+  try {
+    statuses = (await providerAuth.getStatuses()).map((status) =>
+      status.provider === failed.provider ? failed : status,
+    );
+  } catch {
+    return;
+  }
+  try {
+    await backend?.refreshModels({ includeOpenCode: false });
+  } catch {
+    // The diagnostic remains useful even if an unrelated local catalog failed.
+  }
+  broadcastProviderAuth(statuses);
+}
+
 function threadTarget(state: MenubarState): MenubarThreadTarget {
   return {
     threadId: state.activeThreadId,
@@ -511,7 +540,10 @@ function sessionTarget(
     !threadId.startsWith('session:') ||
     threadId.length <= 'session:'.length ||
     threadId.length > 500 ||
-    (source !== 'claude' && source !== 'codex' && source !== 'pi')
+    (source !== 'claude' &&
+      source !== 'codex' &&
+      source !== 'pi' &&
+      source !== 'opencode')
   ) {
     return null;
   }
@@ -897,10 +929,7 @@ app.whenReady().then(() => {
     backend.setModel(provider, model, target);
   });
   ipcMain.handle('aside:auth:get', () => refreshProviderAuth());
-  ipcMain.handle('aside:auth:refresh', async () => {
-    await backend?.refreshModels();
-    return refreshProviderAuth();
-  });
+  ipcMain.handle('aside:auth:refresh', () => refreshProviderAuth());
   ipcMain.handle('aside:auth:connect', async (_e, value: unknown) => {
     const provider = validatedProvider(value);
     if (!provider || !providerAuth) {
@@ -909,9 +938,6 @@ app.whenReady().then(() => {
     authFlowActive = true;
     try {
       await providerAuth.connect(provider);
-      if (provider === 'ollama' || provider === 'pi-cli') {
-        await backend?.refreshModels();
-      }
       const statuses = await refreshProviderAuth();
       const state = backend?.getState();
       if (backend && state && !canAskWithProvider(statuses, state.provider)) {
@@ -923,6 +949,7 @@ app.whenReady().then(() => {
       }
       return statuses;
     } catch (error) {
+      await publishProviderFailureStatus(error);
       throw safeProviderError(error);
     } finally {
       authFlowActive = false;
@@ -944,9 +971,15 @@ app.whenReady().then(() => {
       throw safeProviderError(error);
     }
   });
-  ipcMain.handle('aside:auth:help', async (_e, value: unknown) => {
+  ipcMain.handle('aside:auth:help', async (_e, value: unknown, reason: unknown) => {
     const provider = validatedProvider(value);
-    const help = provider ? providerHelpLink(provider) : undefined;
+    const safeReason = typeof reason === 'string' ? reason : undefined;
+    const help = provider
+      ? providerHelpLink(
+          provider,
+          safeReason === 'client_unsupported' ? safeReason : undefined,
+        )
+      : undefined;
     if (!help) {
       throw new Error('No setup guide is available for that provider.');
     }

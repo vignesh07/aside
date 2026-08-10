@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   MenubarBackend,
   type MenubarSessionTarget,
@@ -233,8 +236,8 @@ describe('MenubarBackend', () => {
     expect(backend.getState().activeThreadId).toBe('fleet');
     expect(backend.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
     expect(backend.getState().sessions.map((s) => s.threadId)).toEqual([
-      'session:a',
-      'session:b',
+      'session:claude:a',
+      'session:claude:b',
     ]);
   });
 
@@ -243,7 +246,7 @@ describe('MenubarBackend', () => {
     backend.refresh();
     backend.selectThread('session:b');
     backend.refresh();
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('returns to fleet when the selected session disappears', () => {
@@ -254,6 +257,149 @@ describe('MenubarBackend', () => {
     sessions.pop(); // 'b' vanishes
     backend.refresh();
     expect(backend.getState().activeThreadId).toBe('fleet');
+  });
+
+  it('retains a non-authoritative OpenCode scan and deletes only on authoritative empty', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-authority-refresh-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const sessionId = 'authority-session';
+    const threadId = `session:opencode:${sessionId}`;
+    const rawLine = JSON.stringify({
+      schema: 'aside.opencode.v1',
+      id: 'authority-text',
+      sourceId: 'authority-text',
+      sessionId,
+      timestamp: ANALYSIS_NOW.toISOString(),
+      type: 'text',
+      role: 'assistant',
+      text: 'Retain this canonical transcript',
+    });
+    fs.writeFileSync(jsonlPath, `${rawLine}\n`);
+    const openCode = {
+      ...fakeSession(sessionId),
+      source: 'opencode' as const,
+      jsonlPath,
+      cwd: root,
+      projectDir: root,
+      lastEventTime: ANALYSIS_NOW,
+    };
+    const activity = new ActivityLedger(
+      new InMemoryActivityLedgerStore(),
+      () => ANALYSIS_NOW,
+    );
+    const service = new SideChatService(
+      {
+        ask: async () => 'answer',
+        setModel: () => {},
+      },
+      {
+        onProjectionReset: (id, source) =>
+          activity.beginAgentProjectionRebase(id, source),
+        onProjectionResetAbort: (id, source) =>
+          activity.abortAgentProjectionRebase(id, source),
+        onProjectionResetComplete: (
+          id,
+          source,
+          canonicalComplete,
+          discardMissing,
+        ) => activity.finishAgentProjectionRebase(
+          id,
+          source,
+          canonicalComplete,
+          discardMissing,
+        ),
+        onEvent: (id, source, event, seeded, line, ordinal) =>
+          activity.recordAgentEvent({
+            sessionId: id,
+            source,
+            event,
+            seeded,
+            rawLine: line,
+            ordinal,
+          }),
+      },
+      () => ANALYSIS_NOW,
+    );
+    let scanState: {
+      sessions: TrackedSession[];
+      jsonlPaths: Map<string, string>;
+      authoritativeSources: Set<TrackedSession['source']>;
+    } = {
+      sessions: [openCode],
+      jsonlPaths: new Map([[threadId, jsonlPath]]),
+      authoritativeSources: new Set(['opencode']),
+    };
+    const backend = new MenubarBackend(
+      { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+      () => {},
+      {
+        scan: () => ({
+          sessions: [...scanState.sessions],
+          jsonlPaths: new Map(scanState.jsonlPaths),
+          authoritativeSources: new Set(scanState.authoritativeSources),
+        }),
+        service,
+        activity,
+        models: () => FAKE_MODELS,
+        artifacts: new MemoryArtifactStore(),
+        analysis: analysisEngine().engine,
+        now: () => ANALYSIS_NOW,
+      },
+    );
+
+    try {
+      backend.refresh();
+      backend.selectThread(threadId);
+      expect(backend.getState().sessions.map((session) => session.id)).toEqual([
+        sessionId,
+      ]);
+      expect(service.getTranscript(openCode)).toContainEqual(
+        expect.objectContaining({ preview: 'Retain this canonical transcript' }),
+      );
+      expect(activity.getEvents().map((event) => event.summary)).toContain(
+        'Retain this canonical transcript',
+      );
+
+      scanState = {
+        sessions: [],
+        jsonlPaths: new Map(),
+        authoritativeSources: new Set(),
+      };
+      backend.refresh();
+      expect(backend.getState()).toMatchObject({
+        activeThreadId: threadId,
+        sessions: [expect.objectContaining({ id: sessionId })],
+      });
+      expect(service.getTranscript(openCode)).toContainEqual(
+        expect.objectContaining({ preview: 'Retain this canonical transcript' }),
+      );
+      expect(activity.getEvents()).toHaveLength(1);
+
+      scanState = {
+        sessions: [openCode],
+        jsonlPaths: new Map([[threadId, jsonlPath]]),
+        authoritativeSources: new Set(['opencode']),
+      };
+      backend.refresh();
+      expect(backend.getState().activeThreadId).toBe(threadId);
+      expect(activity.getEvents()).toHaveLength(1);
+
+      scanState = {
+        sessions: [],
+        jsonlPaths: new Map(),
+        authoritativeSources: new Set(['opencode']),
+      };
+      backend.refresh();
+      expect(backend.getState()).toMatchObject({
+        activeThreadId: 'fleet',
+        sessions: [],
+      });
+      expect(service.getTranscript(openCode)).toEqual([]);
+      expect(activity.getEvents()).toEqual([]);
+    } finally {
+      backend.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('propagates thread selection to the scoped service conversation', () => {
@@ -294,8 +440,8 @@ describe('MenubarBackend', () => {
     backend.selectThread('session:b');
     await backend.ask('still about a', target);
 
-    expect(askCalls[0]?.threadId).toBe('session:a');
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(askCalls[0]?.threadId).toBe('session:claude:a');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('rejects a captured ask if that thread changed provider meanwhile', async () => {
@@ -399,7 +545,7 @@ describe('MenubarBackend', () => {
 
     expect(service.getThread('session:a').provider).toBe('openai');
     expect(service.getThread('session:b').provider).toBe('claude-cli');
-    expect(backend.getState().activeThreadId).toBe('session:b');
+    expect(backend.getState().activeThreadId).toBe('session:claude:b');
   });
 
   it('rejects a model outside the catalog', () => {
@@ -997,11 +1143,11 @@ describe('MenubarBackend', () => {
     );
     backend.refresh();
     const rootSelection: MenubarSessionTarget = {
-      threadId: 'session:root',
+      threadId: 'session:codex:root',
       source: 'codex',
     };
     const childSelection: MenubarSessionTarget = {
-      threadId: 'session:child',
+      threadId: 'session:codex:child',
       source: 'codex',
     };
 
@@ -1036,7 +1182,7 @@ describe('MenubarBackend', () => {
       'child-event',
     ]);
     expect(backend.getThreadReviewAnalysisTarget(childSelection)).toMatchObject({
-      threadId: 'session:child',
+      threadId: 'session:codex:child',
       provider: childReview.provider,
       model: childReview.model,
     });
@@ -1082,7 +1228,7 @@ describe('MenubarBackend', () => {
     );
     backend.refresh();
     const selection: MenubarSessionTarget = {
-      threadId: 'session:root',
+      threadId: 'session:codex:root',
       source: 'codex',
     };
 
@@ -1136,7 +1282,7 @@ describe('MenubarBackend', () => {
     expect(
       backend
         .getThreadReview({
-          threadId: 'session:same-id',
+          threadId: 'session:codex:same-id',
           source: 'codex',
         })
         .evidence.map((event) => event.eventId),
@@ -1149,7 +1295,7 @@ describe('MenubarBackend', () => {
     ).toThrow('valid agent thread');
     expect(() =>
       backend.getThreadReview({
-        threadId: 'session:missing',
+        threadId: 'session:codex:missing',
         source: 'codex',
       }),
     ).toThrow('no longer available');
@@ -1193,7 +1339,7 @@ describe('MenubarBackend', () => {
 
     expect(
       backend.getThreadReview({
-        threadId: 'session:root',
+        threadId: 'session:codex:root',
         source: 'codex',
       }),
     ).toMatchObject({
@@ -1224,7 +1370,7 @@ describe('MenubarBackend', () => {
     });
     backend.refresh();
     const selection: MenubarSessionTarget = {
-      threadId: 'session:root',
+      threadId: 'session:codex:root',
       source: 'codex',
     };
 

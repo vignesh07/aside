@@ -27,6 +27,8 @@ export type ThreadAttentionKind =
 export interface ActivityEventRecord {
   /** Monotonic local ordering, independent of vendor clock skew. */
   seq: number;
+  /** Canonical order inside the current source projection (v4+). */
+  canonicalOrder?: number;
   /** Stable across restarts and repeated transcript-tail hydration. */
   eventId: string;
   threadKey: string;

@@ -19,6 +19,7 @@ import { useSessions } from './hooks/use-sessions.js';
 import { useSideChat } from './hooks/use-side-chat.js';
 import { flattenModelCatalog, findModelOptionIndex } from './config/model-catalog.js';
 import type { ScopeFilter } from './types/session.js';
+import { sessionThreadId } from './types/chat.js';
 
 export interface AppProps {
   provider: string;
@@ -55,15 +56,20 @@ export function App({ provider, model, scopeFilter }: AppProps) {
   } = useSideChat({
     sessions,
     jsonlPaths,
-    selectedSessionId: selectedId,
+    selectedThreadId: selectedId,
     defaultProvider: provider,
     defaultModel: model,
     onSessionActivity: setSessionActivity,
   });
 
-  const focusedSession = sessions.find((s) => s.id === selectedId) ?? null;
+  const focusedSession = sessions.find(
+    (session) =>
+      sessionThreadId(session.source, session.id) === selectedId,
+  ) ?? null;
   const needsUserCount = sessions.filter(
-    (session) => attentionBySession.get(session.id)?.needsUser,
+    (session) =>
+      attentionBySession.get(sessionThreadId(session.source, session.id))
+        ?.needsUser,
   ).length;
   const recentSessionCount = sessions.filter(
     (session) => session.status === 'active' || session.status === 'idle',

@@ -11,12 +11,14 @@ export function SourceBadge({ source }: SourceBadgeProps) {
   const label =
     source === 'claude' ? 'CC' :
     source === 'codex' ? 'CX' :
-    'PI';
+    source === 'pi' ? 'PI' :
+    'OC';
 
   const color =
     source === 'claude' ? COLORS.badgeClaude :
     source === 'codex' ? COLORS.badgeCodex :
-    COLORS.badgePi;
+    source === 'pi' ? COLORS.badgePi :
+    COLORS.badgeOpenCode;
 
   return (
     <Text color={color} bold>

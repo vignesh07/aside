@@ -101,12 +101,14 @@ describe('provider consent store version compatibility', () => {
         'codex-cli': true,
         'claude-cli': true,
         'pi-cli': false,
+        'opencode-cli': false,
         ollama: false,
       },
       todayRecaps: {
         'codex-cli': true,
         'claude-cli': true,
         'pi-cli': false,
+        'opencode-cli': false,
         ollama: false,
       },
     });
@@ -146,12 +148,14 @@ describe('provider consent store version compatibility', () => {
         'codex-cli': true,
         'claude-cli': false,
         'pi-cli': true,
+        'opencode-cli': false,
         ollama: false,
       },
       todayRecaps: {
         'codex-cli': true,
         'claude-cli': false,
         'pi-cli': false,
+        'opencode-cli': false,
         ollama: false,
       },
     });

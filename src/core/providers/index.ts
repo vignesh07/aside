@@ -1,6 +1,7 @@
 import { claudeCli } from './claude-cli.js';
 import { codexCli } from './codex-cli.js';
 import { piCli } from './pi-cli.js';
+import { openCodeCli } from './opencode-cli.js';
 import { anthropic } from './anthropic.js';
 import { openai } from './openai.js';
 import { ollama } from './ollama.js';
@@ -17,6 +18,16 @@ export {
   resolvePiBinary,
 } from './pi-cli.js';
 export type { PiConfiguredModel, PiInspection } from './pi-cli.js';
+export {
+  inspectOpenCode,
+  listConfiguredOpenCodeModels,
+  openCodeObserverArgs,
+  resolveOpenCodeBinary,
+} from './opencode-cli.js';
+export type {
+  OpenCodeConfiguredModel,
+  OpenCodeInspection,
+} from './opencode-cli.js';
 export { createVendorCliEnv } from './vendor-cli-env.js';
 export {
   OBSERVER_CWD,
@@ -28,19 +39,24 @@ export {
 /**
  * Registration order is picker order, and the first entry is the default.
  *
- * The three CLI-backed providers lead deliberately. Anyone watching Claude Code,
- * Codex, or Pi sessions already has that CLI, so the
+ * The CLI-backed providers lead deliberately. Anyone watching Claude Code,
+ * Codex, Pi, or OpenCode sessions already has that CLI, so the
  * out-of-the-box path should cost them nothing. Making someone fetch a second,
  * separately-billed API key to ask questions about the subscription they already
  * pay for is a bad trade, and an API key default quietly imposes exactly that.
  *
- * All three work by delegation: aside runs the user's own client and never touches
- * a credential. Keys remain available; they're just not the toll.
+ * All four work by delegation: Aside runs the user's own client instead of
+ * asking for a second API key. Claude Code, Codex, and Pi keep credential access
+ * entirely inside their clients. After explicit consent, OpenCode receives a
+ * short-lived private snapshot containing API entries only during discovery and
+ * only the selected provider's API entry during a prompt. Zen needs none;
+ * OAuth and well-known credential routes are excluded.
  */
 const PROVIDERS: readonly Provider[] = [
   claudeCli,
   codexCli,
   piCli,
+  openCodeCli,
   anthropic,
   openai,
   ollama,

@@ -8,6 +8,11 @@ import {
   inspectPi as inspectPiClient,
   type PiInspection,
 } from '../../dist/core/providers/pi-cli.js';
+import {
+  inspectOpenCode as inspectOpenCodeClient,
+  type OpenCodeInspection,
+  type OpenCodeInspectionOptions,
+} from '../../dist/core/providers/opencode-cli.js';
 import { createVendorCliEnv } from '../../dist/core/providers/vendor-cli-env.js';
 import {
   FileProviderConsentStore,
@@ -87,11 +92,17 @@ export type PiInspector = (
   env?: NodeJS.ProcessEnv,
 ) => PiInspection | Promise<PiInspection>;
 
+export type OpenCodeInspector = (
+  env?: NodeJS.ProcessEnv,
+  options?: OpenCodeInspectionOptions,
+) => OpenCodeInspection | Promise<OpenCodeInspection>;
+
 export interface ProviderAuthDeps {
   consentStore?: ProviderConsentStore;
   resolveBinary?: ProviderBinaryResolver;
   runCommand?: ProviderCommandRunner;
   inspectPi?: PiInspector;
+  inspectOpenCode?: OpenCodeInspector;
   buildEnvironment?: () => NodeJS.ProcessEnv;
   fetch?: typeof globalThis.fetch;
   ollamaHost?: () => string;
@@ -116,16 +127,18 @@ interface ConsentRead {
 /**
  * Coordinates vendor-owned login state with Aside-owned consent.
  *
- * It never reads or stores a token. `connect()` records consent for a ready
- * client, asking only Codex or Claude to run their own browser login when
- * needed. Pi setup remains entirely Pi-owned. `disconnect()` revokes only
- * Aside consent and deliberately never invokes a vendor logout command.
+ * It never persists a token. `connect()` records consent for a ready client,
+ * asking only Codex or Claude to run their own browser login when needed. Pi and
+ * OpenCode setup remain client-owned; the OpenCode inspector transiently filters
+ * its private auth file into an isolated API-only snapshot. `disconnect()`
+ * revokes only Aside consent and deliberately never invokes a logout command.
  */
 export class ProviderAuthCoordinator {
   private readonly consentStore: ProviderConsentStore;
   private readonly resolveBinary: ProviderBinaryResolver;
   private readonly runCommand: ProviderCommandRunner;
   private readonly inspectPi: PiInspector;
+  private readonly inspectOpenCode: OpenCodeInspector;
   private readonly buildEnvironment: () => NodeJS.ProcessEnv;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly ollamaHost: () => string;
@@ -138,6 +151,7 @@ export class ProviderAuthCoordinator {
     this.resolveBinary = deps.resolveBinary ?? defaultProviderBinaryResolver;
     this.runCommand = deps.runCommand ?? runProviderCommand;
     this.inspectPi = deps.inspectPi ?? inspectPiClient;
+    this.inspectOpenCode = deps.inspectOpenCode ?? inspectOpenCodeClient;
     this.buildEnvironment = deps.buildEnvironment ?? (() => createVendorCliEnv());
     this.fetchImpl = deps.fetch ?? globalThis.fetch;
     this.ollamaHost = deps.ollamaHost ?? defaultOllamaHost;
@@ -149,17 +163,23 @@ export class ProviderAuthCoordinator {
   async getStatuses(): Promise<ProviderAuthStatus[]> {
     const consent = this.readConsent();
     const probes = await Promise.all(
-      PROVIDER_AUTH_IDS.map((provider) => this.probeRaw(provider)),
+      PROVIDER_AUTH_IDS.map((provider) =>
+        this.probeRaw(
+          provider,
+          consent.available && consent.snapshot.enabled.has(provider),
+        ),
+      ),
     );
     return probes.map((probe) => this.withConsent(probe, consent));
   }
 
   async probe(providerValue: string): Promise<ProviderAuthStatus> {
     const provider = requireProvider(providerValue);
-    const [probe, consent] = await Promise.all([
-      this.probeRaw(provider),
-      Promise.resolve(this.readConsent()),
-    ]);
+    const consent = this.readConsent();
+    const probe = await this.probeRaw(
+      provider,
+      consent.available && consent.snapshot.enabled.has(provider),
+    );
     return this.withConsent(probe, consent);
   }
 
@@ -200,7 +220,9 @@ export class ProviderAuthCoordinator {
       throw new ProviderAuthError('consent_unavailable', provider);
     }
 
-    let probe = await this.probeRaw(provider);
+    // Clicking Use OpenCode is the explicit boundary that permits one
+    // credential-backed route inspection before consent is persisted.
+    let probe = await this.probeRaw(provider, provider === 'opencode-cli');
     if (provider === 'ollama') {
       if (probe.state === 'missing') {
         throw new ProviderAuthError('provider_missing', provider);
@@ -212,15 +234,27 @@ export class ProviderAuthCoordinator {
       return { ...withoutBinary(probe), enabled: true };
     }
 
-    // Pi owns all provider setup. Aside only records permission after the
-    // installed client reports at least one configured model; it never tries
-    // to drive Pi's interactive /login or /logout UI through a hidden process.
-    if (provider === 'pi-cli') {
+    // These clients own all provider setup. Aside records permission only
+    // after the installed client reports at least one available model route; it
+    // never drives an interactive login or logout through a hidden process.
+    if (provider === 'pi-cli' || provider === 'opencode-cli') {
       if (probe.state === 'missing') {
-        throw new ProviderAuthError('provider_missing', provider);
+        throw new ProviderAuthError(
+          'provider_missing',
+          provider,
+          provider === 'opencode-cli'
+            ? { ...withoutBinary(probe), enabled: false }
+            : undefined,
+        );
       }
       if (probe.state !== 'configured') {
-        throw new ProviderAuthError('provider_unavailable', provider);
+        throw new ProviderAuthError(
+          'provider_unavailable',
+          provider,
+          provider === 'opencode-cli'
+            ? { ...withoutBinary(probe), enabled: false }
+            : undefined,
+        );
       }
       this.saveConsent(provider, true);
       return { ...withoutBinary(probe), enabled: true };
@@ -252,7 +286,7 @@ export class ProviderAuthCoordinator {
 
       // A zero exit alone is not proof of a usable account. Re-probe the vendor
       // client and persist consent only after it independently reports signed in.
-      probe = await this.probeRaw(provider);
+      probe = await this.probeRaw(provider, false);
       if (probe.state !== 'signed_in') {
         throw new ProviderAuthError('login_failed', provider);
       }
@@ -268,13 +302,19 @@ export class ProviderAuthCoordinator {
   async disconnect(providerValue: string): Promise<ProviderAuthStatus> {
     const provider = requireProvider(providerValue);
     this.saveConsent(provider, false);
-    const probe = await this.probeRaw(provider);
+    const probe = await this.probeRaw(provider, false);
     return { ...withoutBinary(probe), enabled: false };
   }
 
-  private async probeRaw(provider: ProviderAuthId): Promise<RawProbe> {
+  private async probeRaw(
+    provider: ProviderAuthId,
+    allowAuthenticatedDiscovery = false,
+  ): Promise<RawProbe> {
     if (provider === 'ollama') return this.probeOllama();
     if (provider === 'pi-cli') return this.probePi();
+    if (provider === 'opencode-cli') {
+      return this.probeOpenCode(allowAuthenticatedDiscovery);
+    }
 
     let env: NodeJS.ProcessEnv;
     let binary: string | null;
@@ -372,6 +412,70 @@ export class ProviderAuthCoordinator {
         return { provider: 'pi-cli', state: 'configured' };
       case 'error':
         return { provider: 'pi-cli', state: 'error', reason: 'probe_failed' };
+    }
+  }
+
+  private async probeOpenCode(allowAuthenticatedDiscovery: boolean): Promise<RawProbe> {
+    let inspection: OpenCodeInspection;
+    try {
+      inspection = await this.inspectOpenCode(this.buildEnvironment(), {
+        includeModels: allowAuthenticatedDiscovery,
+      });
+    } catch {
+      return {
+        provider: 'opencode-cli',
+        state: 'error',
+        reason: 'probe_failed',
+      };
+    }
+
+    if (!allowAuthenticatedDiscovery && inspection.state === 'ready') {
+      return {
+        provider: 'opencode-cli',
+        state: 'signed_out',
+        reason: 'access_not_granted',
+      };
+    }
+
+    switch (inspection.state) {
+      case 'missing':
+        return {
+          provider: 'opencode-cli',
+          state: 'missing',
+          reason: 'executable_missing',
+        };
+      case 'unsupported':
+        return {
+          provider: 'opencode-cli',
+          state: 'error',
+          reason: 'client_unsupported',
+        };
+      case 'auth_unsupported':
+        return {
+          provider: 'opencode-cli',
+          state: 'error',
+          reason: 'auth_configuration_unsupported',
+        };
+      case 'unconfigured':
+        return {
+          provider: 'opencode-cli',
+          state: 'signed_out',
+          reason: 'no_models',
+        };
+      case 'routes_unsupported':
+        return {
+          provider: 'opencode-cli',
+          state: 'error',
+          reason: 'no_audited_models',
+        };
+      case 'ready':
+        return { provider: 'opencode-cli', state: 'configured' };
+      case 'error':
+        return {
+          provider: 'opencode-cli',
+          state: 'error',
+          reason: 'probe_failed',
+        };
     }
   }
 

@@ -63,7 +63,12 @@ export function buildDockArgs(flags: DockFlags, defaults: DockDefaults): string[
   if (flags.provider !== defaults.provider) args.push('--provider', flags.provider);
   if (flags.model !== defaults.model) args.push('--model', flags.model);
   if (flags.project) args.push('--project', flags.project);
-  if (flags.source === 'claude' || flags.source === 'codex' || flags.source === 'pi') {
+  if (
+    flags.source === 'claude' ||
+    flags.source === 'codex' ||
+    flags.source === 'pi' ||
+    flags.source === 'opencode'
+  ) {
     args.push('--source', flags.source);
   }
   for (const id of flags.session ?? []) args.push('--session', id);

@@ -1,11 +1,12 @@
 {
   "name": "@vignesh07/aside",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "private": true,
-  "description": "Persistent read-only side chats for every Claude Code, Codex, and Pi session on your machine, plus one fleet-wide thread.",
+  "description": "Persistent read-only side chats for every Claude Code, Codex, Pi, and OpenCode session on your machine, plus one fleet-wide thread.",
   "keywords": [
     "claude-code",
     "codex",
+    "opencode",
     "ai-agents",
     "observability",
     "tui",
@@ -65,7 +66,7 @@
     "yaml": "^2.9.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.16"
   },
   "license": "MIT"
 }

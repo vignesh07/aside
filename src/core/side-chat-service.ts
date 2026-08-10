@@ -5,8 +5,9 @@
 // merely highlight the same global conversation.
 
 import {
+  MAX_CANONICAL_RESET_BYTES,
+  MAX_CANONICAL_RESET_LINES,
   SessionTailer,
-  readJsonlTailLines,
   tryReadJsonlTailLines,
 } from './session-tailer.js';
 import * as fs from 'node:fs';
@@ -15,6 +16,7 @@ import { disposeClaudeSession } from './providers/index.js';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '../config/defaults.js';
 import {
   FLEET_THREAD_ID,
+  legacySessionThreadId,
   scopeFromThreadId,
   sessionThreadId,
 } from '../types/chat.js';
@@ -45,8 +47,6 @@ const SEARCH_TAIL_BYTES = 128 * 1024;
  */
 export const MAX_ATTENTION_SEEDS_PER_SYNC = 32;
 export const HISTORICAL_HEURISTIC_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-const ATTENTION_SEED_LINES = 100;
-const ATTENTION_SEED_BYTES = 128 * 1024;
 const SEARCH_STOP_WORDS = new Set([
   'about', 'agent', 'agents', 'across', 'all', 'and', 'are', 'did', 'find',
   'for', 'from', 'have', 'machine', 'other', 'session', 'sessions', 'show',
@@ -54,22 +54,61 @@ const SEARCH_STOP_WORDS = new Set([
   'work', 'working',
 ]);
 
+interface TranscriptGeneration {
+  path: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+interface ProjectionReplacementOptions {
+  hydrated: boolean;
+  retainTranscript?: boolean;
+  attentionSeeded?: boolean;
+  historicalHeuristic?: boolean;
+  /** Whether the read covered the entire current projection. */
+  readComplete?: boolean;
+}
+
 export interface AskEngine {
   ask(params: AskParams): Promise<string>;
   setModel(provider: string, model: string): void;
 }
 
 export interface SideChatServiceHandlers {
-  onTranscript?: (sessionId: string) => void;
-  onActivity?: (sessionId: string, activity: string) => void;
+  onTranscript?: (sessionId: string, source: SessionSource) => void;
+  onActivity?: (
+    sessionId: string,
+    activity: string,
+    source: SessionSource,
+    /** Seeded activity was reconstructed from a canonical replay, not live. */
+    seeded: boolean,
+  ) => void;
   onAttention?: (
     sessionId: string,
     attention: SessionAttention,
     becameNeedsUser: boolean,
+    source: SessionSource,
   ) => void;
   onChat?: (threadId: string) => void;
   onThinking?: (threadId: string, thinking: boolean) => void;
   onThread?: (threadId: string) => void;
+  /** Canonical transcript replacement; clear derived durable state first. */
+  onProjectionReset?: (sessionId: string, source: SessionSource) => void;
+  /** Replay failed before a canonical replacement could be committed. */
+  onProjectionResetAbort?: (
+    sessionId: string,
+    source: SessionSource,
+  ) => void;
+  /** Canonical replacement replay finished; prune events that did not survive. */
+  onProjectionResetComplete?: (
+    sessionId: string,
+    source: SessionSource,
+    canonicalComplete: boolean,
+    discardMissing: boolean,
+  ) => void;
   /** Every normalized agent event, including restart-time transcript seeds. */
   onEvent?: (
     sessionId: string,
@@ -97,9 +136,13 @@ export class SideChatService {
   private readonly attentionDeferredSessions = new Set<string>();
   private readonly threads = new Map<string, ChatThread>();
   private readonly hydratedSessions = new Set<string>();
+  private readonly transcriptGenerations = new Map<
+    string,
+    TranscriptGeneration
+  >();
   private readonly searchCache = new Map<
     string,
-    { mtimeMs: number; size: number; text: string }
+    { dev: number; ino: number; mtimeMs: number; size: number; text: string }
   >();
   private jsonlPaths = new Map<string, string>();
   private sessions: TrackedSession[] = [];
@@ -135,21 +178,38 @@ export class SideChatService {
 
     this.tailer.on(
       'line',
-      ({ sessionId, line, isSeed }: { sessionId: string; line: string; isSeed: boolean }) => {
-        this.consumeLine(sessionId, line, isSeed);
+      ({ sessionId: sessionKey, line, isSeed }: { sessionId: string; line: string; isSeed: boolean }) => {
+        this.consumeLine(sessionKey, line, isSeed);
+      },
+    );
+    this.tailer.on(
+      'reset',
+      ({
+        sessionId: sessionKey,
+        lines,
+        complete,
+      }: {
+        sessionId: string;
+        lines: string[];
+        complete: boolean;
+      }) => {
+        this.replaceSessionProjection(sessionKey, lines, {
+          hydrated: true,
+          readComplete: complete,
+        });
       },
     );
   }
 
   /** Select the fleet thread or a concrete session thread. */
   selectThread(threadId: string): void {
-    const normalized = threadId === FLEET_THREAD_ID || threadId.startsWith('session:')
-      ? threadId
-      : FLEET_THREAD_ID;
+    const normalized = this.normalizeSelectedThreadId(threadId);
     this.ensureThread(normalized);
     this.activeThreadId = normalized;
     const scope = scopeFromThreadId(normalized);
-    if (scope.kind === 'session') this.hydrateSession(scope.sessionId);
+    if (scope.kind === 'session' && scope.source) {
+      this.hydrateSession(scope.source, scope.sessionId);
+    }
     this.reconcileTailers();
     this.handlers.onThread?.(normalized);
   }
@@ -163,7 +223,7 @@ export class SideChatService {
   }
 
   getThread(threadId: string): ChatThread {
-    return this.ensureThread(threadId);
+    return this.ensureThread(this.normalizeSelectedThreadId(threadId));
   }
 
   getThreads(): ChatThread[] {
@@ -172,7 +232,16 @@ export class SideChatService {
 
   /** Backward-compatible alias: null means fleet, an id means that session's thread. */
   setFocus(sessionId: string | null): void {
-    this.selectThread(sessionId ? sessionThreadId(sessionId) : FLEET_THREAD_ID);
+    if (!sessionId) {
+      this.selectThread(FLEET_THREAD_ID);
+      return;
+    }
+    const matches = this.sessions.filter((session) => session.id === sessionId);
+    this.selectThread(
+      matches.length === 1
+        ? sessionThreadId(matches[0]!.source, sessionId)
+        : legacySessionThreadId(sessionId),
+    );
   }
 
   getFocus(): string | null {
@@ -221,8 +290,12 @@ export class SideChatService {
     for (const threadId of changed) this.handlers.onThread?.(threadId);
   }
 
-  getTranscript(sessionId: string): SessionEvent[] {
-    return this.transcripts.get(sessionId) ?? [];
+  getTranscript(
+    session: string | Pick<TrackedSession, 'id' | 'source'>,
+    source?: SessionSource,
+  ): SessionEvent[] {
+    const key = this.resolveSessionKey(session, source);
+    return key ? this.transcripts.get(key) ?? [] : [];
   }
 
   getChat(threadId = this.activeThreadId): ChatTurn[] {
@@ -233,8 +306,15 @@ export class SideChatService {
     return this.ensureThread(threadId).thinking;
   }
 
-  getSessionAttention(sessionId: string): SessionAttention {
-    return this.attention.get(sessionId) ?? { needsUser: false, reason: '' };
+  getSessionAttention(
+    session: string | Pick<TrackedSession, 'id' | 'source'>,
+    source?: SessionSource,
+  ): SessionAttention {
+    const key = this.resolveSessionKey(session, source);
+    return (key ? this.attention.get(key) : undefined) ?? {
+      needsUser: false,
+      reason: '',
+    };
   }
 
   /** Reconcile the set of tailed sessions with the currently active ones. */
@@ -243,18 +323,147 @@ export class SideChatService {
       clearImmediate(this.attentionDrainImmediate);
       this.attentionDrainImmediate = null;
     }
+    const previousPaths = this.jsonlPaths;
+    const nextJsonlPaths = normalizeTranscriptPaths(sessions, jsonlPaths);
+    const sessionsByKey = new Map(
+      sessions.map((session) => [sessionIdentity(session), session]),
+    );
+    const visibleKeys = new Set(sessions.map(sessionIdentity));
+    const removedKeys = new Set(
+      [...this.sources.keys()].filter((sessionKey) => !visibleKeys.has(sessionKey)),
+    );
+    const retargetedKeys = new Set(
+      [...visibleKeys].filter((sessionKey) => {
+        const previous = previousPaths.get(sessionKey);
+        return previous !== undefined && previous !== nextJsonlPaths.get(sessionKey);
+      }),
+    );
+    const activeScope = scopeFromThreadId(this.activeThreadId);
+    const selectedKey =
+      activeScope.kind === 'session' && activeScope.source
+        ? sessionThreadId(activeScope.source, activeScope.sessionId)
+        : null;
+    const currentlyTailed = new Set(this.tailer.tailedSessionIds);
+    const nextGenerations = new Map<string, TranscriptGeneration>();
+    const generationChangedKeys = new Set<string>();
+    for (const session of sessions) {
+      const sessionKey = sessionIdentity(session);
+      const transcriptPath = nextJsonlPaths.get(sessionKey);
+      if (!transcriptPath) continue;
+      const nextGeneration = transcriptGeneration(transcriptPath);
+      if (!nextGeneration) continue;
+      nextGenerations.set(sessionKey, nextGeneration);
+      const previousGeneration = this.transcriptGenerations.get(sessionKey);
+      if (!previousGeneration || retargetedKeys.has(sessionKey)) continue;
+      const remainsTailed = shouldTail(session, selectedKey);
+      if (
+        generationNeedsReplay(
+          previousGeneration,
+          nextGeneration,
+          currentlyTailed.has(sessionKey) && remainsTailed,
+        )
+      ) {
+        generationChangedKeys.add(sessionKey);
+      }
+    }
+    const changedKeys = new Set([
+      ...removedKeys,
+      ...retargetedKeys,
+      ...generationChangedKeys,
+    ]);
+
+    for (const sessionKey of this.tailer.tailedSessionIds) {
+      if (changedKeys.has(sessionKey)) {
+        this.tailer.stopTailing(sessionKey);
+      }
+    }
+
+    // A removed key is a canonical empty projection. Clear it while the old
+    // source namespace is still available to the durable-state handlers.
+    for (const sessionKey of removedKeys) {
+      this.replaceSessionProjection(sessionKey, [], {
+        hydrated: false,
+        attentionSeeded: false,
+      });
+      this.transcriptGenerations.delete(sessionKey);
+    }
+
     this.sessions = sessions;
-    this.jsonlPaths = new Map(jsonlPaths);
+    this.jsonlPaths = nextJsonlPaths;
     this.sources.clear();
     this.attentionDeferredSessions.clear();
-    const visibleIds = new Set(sessions.map((session) => session.id));
-    for (const sessionId of this.attention.keys()) {
-      if (!visibleIds.has(sessionId)) this.attention.delete(sessionId);
+    for (const sessionKey of this.attention.keys()) {
+      if (!visibleKeys.has(sessionKey)) this.attention.delete(sessionKey);
     }
-    for (const sessionId of this.attentionSeededSessions) {
-      if (!visibleIds.has(sessionId)) this.attentionSeededSessions.delete(sessionId);
+    for (const sessionKey of this.attentionSeededSessions) {
+      if (!visibleKeys.has(sessionKey)) this.attentionSeededSessions.delete(sessionKey);
     }
-    for (const session of sessions) this.sources.set(session.id, session.source);
+    for (const session of sessions) {
+      this.sources.set(sessionIdentity(session), session.source);
+    }
+
+    for (const sessionKey of changedKeys) {
+      const oldPath = previousPaths.get(sessionKey);
+      if (oldPath) this.searchCache.delete(oldPath);
+    }
+    const failedGenerationReads = new Set<string>();
+    for (const sessionKey of new Set([
+      ...retargetedKeys,
+      ...generationChangedKeys,
+    ])) {
+      const nextPath = this.jsonlPaths.get(sessionKey);
+      const session = sessionsByKey.get(sessionKey);
+      const retainTranscript =
+        this.hydratedSessions.has(sessionKey) ||
+        (session ? shouldTail(session, selectedKey) : false) ||
+        sessionKey === selectedKey;
+      const replacement = nextPath
+        ? tryReadJsonlTailLines(
+            nextPath,
+            MAX_CANONICAL_RESET_LINES,
+            MAX_CANONICAL_RESET_BYTES,
+          )
+        : { lines: [], success: false, complete: false };
+      if (!replacement.success) failedGenerationReads.add(sessionKey);
+      const allowHistoricalHeuristic = session
+        ? Math.max(
+            0,
+            this.now().getTime() - session.lastEventTime.getTime(),
+          ) <= HISTORICAL_HEURISTIC_MAX_AGE_MS
+        : false;
+      // Once a generation changed, stale private state is no longer valid.
+      // An unreadable replacement clears it but remains unhydrated so the
+      // same generation is retried on the next scan.
+      this.replaceSessionProjection(
+        sessionKey,
+        replacement.lines,
+        {
+          hydrated: replacement.success && retainTranscript,
+          retainTranscript,
+          attentionSeeded: replacement.success,
+          historicalHeuristic:
+            !retainTranscript && allowHistoricalHeuristic,
+          readComplete: replacement.complete,
+        },
+      );
+    }
+
+    for (const [sessionKey, generation] of nextGenerations) {
+      if (!failedGenerationReads.has(sessionKey)) {
+        this.transcriptGenerations.set(sessionKey, generation);
+      }
+    }
+    for (const sessionKey of visibleKeys) {
+      if (!nextJsonlPaths.has(sessionKey)) {
+        this.transcriptGenerations.delete(sessionKey);
+      }
+    }
+
+    this.migrateLegacyThreads();
+
+    if (activeScope.kind === 'session' && activeScope.source) {
+      this.hydrateSession(activeScope.source, activeScope.sessionId);
+    }
 
     this.reconcileTailers();
     if (this.seedHistoricalAttentionBatch()) this.scheduleAttentionDrain();
@@ -270,12 +479,18 @@ export class SideChatService {
   snapshot(threadId = this.activeThreadId, question = ''): WorldSnapshot {
     const thread = this.ensureThread(threadId);
     const now = this.now();
-    const scopedSessionId =
-      thread.scope.kind === 'session' ? thread.scope.sessionId : null;
+    const scopedSession =
+      thread.scope.kind === 'session' && thread.scope.source
+        ? thread.scope
+        : null;
     const sourceSessions =
-      scopedSessionId === null
+      scopedSession === null
         ? this.fleetContextSessions(question)
-        : this.sessions.filter((session) => session.id === scopedSessionId);
+        : this.sessions.filter(
+            (session) =>
+              session.id === scopedSession.sessionId &&
+              session.source === scopedSession.source,
+          );
     const sessions: SessionSnapshot[] = sourceSessions.map((session) => ({
       id: session.id,
       source: session.source,
@@ -288,16 +503,23 @@ export class SideChatService {
       currentActivity: session.currentActivity,
       contextUsedPercent: session.usedPercent,
       contextStatus: session.contextStatus,
-      transcript: this.getTranscript(session.id),
+      transcript: this.getTranscript(session),
     }));
     return {
       now,
       totalSessionCount:
-        scopedSessionId === null
+        scopedSession === null
           ? this.sessions.filter((session) => !session.isInternal).length
           : sourceSessions.length,
       sessions,
-      focusId: thread.scope.kind === 'session' ? thread.scope.sessionId : null,
+      focusId:
+        thread.scope.kind === 'session' && thread.scope.source
+          ? thread.scope.sessionId
+          : null,
+      focusSource:
+        thread.scope.kind === 'session' && thread.scope.source
+          ? thread.scope.source
+          : null,
     };
   }
 
@@ -358,6 +580,22 @@ export class SideChatService {
     return created;
   }
 
+  private normalizeSelectedThreadId(threadId: string): string {
+    if (threadId === FLEET_THREAD_ID) return threadId;
+    const scope = scopeFromThreadId(threadId);
+    if (scope.kind !== 'session') return FLEET_THREAD_ID;
+    if (scope.source) return sessionThreadId(scope.source, scope.sessionId);
+    const matches = this.sessions.filter(
+      (session) => session.id === scope.sessionId,
+    );
+    if (matches.length === 1) return sessionIdentity(matches[0]!);
+    // Preserve the historical programmatic API before the first scan. Once a
+    // catalog exists, an ambiguous bare id must fail closed to the fleet.
+    return matches.length === 0 && this.sessions.length === 0
+      ? legacySessionThreadId(scope.sessionId)
+      : FLEET_THREAD_ID;
+  }
+
   private appendTurn(thread: ChatThread, turn: ChatTurn): void {
     thread.turns = [...thread.turns, turn];
     thread.updatedAt = this.now();
@@ -388,36 +626,187 @@ export class SideChatService {
     this.store?.save([...this.threads.values()]);
   }
 
-  private consumeLine(sessionId: string, line: string, isSeed: boolean): void {
-    const source = this.sources.get(sessionId) ?? 'claude';
+  /**
+   * Move pre-source side chats only when the current catalog proves that one
+   * and only one vendor owns the recorded id. Ambiguous legacy chats stay
+   * untouched instead of being attached to whichever source happened to scan
+   * first.
+   */
+  private migrateLegacyThreads(): void {
+    const sessionsById = new Map<string, TrackedSession[]>();
+    for (const session of this.sessions) {
+      const matches = sessionsById.get(session.id) ?? [];
+      matches.push(session);
+      sessionsById.set(session.id, matches);
+    }
+
+    const migrations = new Map<string, string>();
+    for (const [legacyId, legacy] of [...this.threads]) {
+      const scope = scopeFromThreadId(legacyId);
+      if (scope.kind !== 'session' || scope.source !== null) continue;
+      const matches = sessionsById.get(scope.sessionId) ?? [];
+      if (matches.length !== 1) continue;
+      const canonicalId = sessionThreadId(
+        matches[0]!.source,
+        matches[0]!.id,
+      );
+      const canonical = this.threads.get(canonicalId);
+      this.threads.set(
+        canonicalId,
+        mergeMigratedThreads(legacy, canonical, canonicalId),
+      );
+      this.threads.delete(legacyId);
+      if (this.activeThreadId === legacyId) this.activeThreadId = canonicalId;
+      migrations.set(legacyId, canonicalId);
+    }
+
+    if (migrations.size > 0) {
+      this.store?.save([...this.threads.values()], { migrations });
+    }
+  }
+
+  private resolveSessionKey(
+    session: string | Pick<TrackedSession, 'id' | 'source'>,
+    source?: SessionSource,
+  ): string | null {
+    if (typeof session !== 'string') return sessionIdentity(session);
+    if (source) return sessionThreadId(source, session);
+    const matches = this.sessions.filter((candidate) => candidate.id === session);
+    return matches.length === 1 ? sessionIdentity(matches[0]!) : null;
+  }
+
+  private consumeLine(sessionKey: string, line: string, isSeed: boolean): void {
+    const source = this.sources.get(sessionKey);
+    const scope = scopeFromThreadId(sessionKey);
+    if (!source || scope.kind !== 'session' || !scope.source) return;
+    const sessionId = scope.sessionId;
     const events = classifyEvents(line, source);
     if (events.length === 0) return;
 
-    const buf = this.transcripts.get(sessionId) ?? [];
+    const buf = this.transcripts.get(sessionKey) ?? [];
     for (const [ordinal, event] of events.entries()) {
       buf.push(event);
       this.handlers.onEvent?.(sessionId, source, event, isSeed, line, ordinal);
-      this.updateAttention(sessionId, event);
+      this.updateAttention(sessionKey, event);
       if (!isSeed) {
         const activity = activityFromEvent(event);
-        if (activity) this.handlers.onActivity?.(sessionId, activity);
+        if (activity) {
+          this.handlers.onActivity?.(sessionId, activity, source, false);
+        }
       }
     }
     if (buf.length > MAX_TRANSCRIPT) buf.splice(0, buf.length - MAX_TRANSCRIPT);
-    this.transcripts.set(sessionId, buf);
-    this.handlers.onTranscript?.(sessionId);
+    this.transcripts.set(sessionKey, buf);
+    this.handlers.onTranscript?.(sessionId, source);
   }
 
-  private hydrateSession(sessionId: string): void {
-    if (this.hydratedSessions.has(sessionId)) return;
-    const jsonlPath = this.jsonlPaths.get(sessionId);
-    if (!jsonlPath) return;
-    this.hydratedSessions.add(sessionId);
-    this.attentionSeededSessions.add(sessionId);
-    this.attentionDeferredSessions.delete(sessionId);
-    for (const line of readJsonlTailLines(jsonlPath, MAX_TRANSCRIPT)) {
-      this.consumeLine(sessionId, line, true);
+  /** Atomically replace stale in-memory state after a projected JSONL rewrite. */
+  private replaceSessionProjection(
+    sessionKey: string,
+    lines: string[],
+    options: ProjectionReplacementOptions,
+  ): void {
+    const source = this.sources.get(sessionKey);
+    const scope = scopeFromThreadId(sessionKey);
+    if (!source || scope.kind !== 'session' || !scope.source) return;
+
+    this.handlers.onProjectionReset?.(scope.sessionId, source);
+    const transcript: SessionEvent[] = [];
+    let attention: SessionAttention = { needsUser: false, reason: '' };
+    let latestActivity = '';
+    try {
+      for (const line of lines) {
+        for (const [ordinal, event] of classifyEvents(line, source).entries()) {
+          if (options.retainTranscript !== false) {
+            transcript.push(event);
+            if (transcript.length > MAX_TRANSCRIPT) transcript.shift();
+          }
+          attention = options.historicalHeuristic === undefined
+            ? attentionAfterEvent(attention, event)
+            : attentionAfterHistoricalEvent(
+                attention,
+                event,
+                options.historicalHeuristic,
+              );
+          latestActivity = activityFromEvent(event) || latestActivity;
+          this.handlers.onEvent?.(
+            scope.sessionId,
+            source,
+            event,
+            true,
+            line,
+            ordinal,
+          );
+        }
+      }
+    } catch (error) {
+      this.handlers.onProjectionResetAbort?.(scope.sessionId, source);
+      throw error;
     }
+    try {
+      const sourceProjectionComplete = projectionIsComplete(lines, source);
+      const readComplete = options.readComplete ?? true;
+      this.handlers.onProjectionResetComplete?.(
+        scope.sessionId,
+        source,
+        readComplete && sourceProjectionComplete,
+        // A complete read is authoritative even when OpenCode intentionally
+        // publishes a header-only "building" projection. A bounded tail is
+        // not allowed to delete durable activity it never observed.
+        readComplete,
+      );
+    } catch (error) {
+      this.handlers.onProjectionResetAbort?.(scope.sessionId, source);
+      throw error;
+    }
+    if (latestActivity) {
+      this.handlers.onActivity?.(
+        scope.sessionId,
+        latestActivity,
+        source,
+        true,
+      );
+    }
+    // Swap transcript and attention once so an unchanged wait never flickers
+    // through a false cleared/new transition during replay.
+    if (options.retainTranscript === false) {
+      this.transcripts.delete(sessionKey);
+    } else {
+      this.transcripts.set(sessionKey, transcript);
+    }
+    this.setAttention(sessionKey, attention);
+    if (options.hydrated) {
+      this.hydratedSessions.add(sessionKey);
+    } else {
+      this.hydratedSessions.delete(sessionKey);
+    }
+    if (options.attentionSeeded ?? options.hydrated) {
+      this.attentionSeededSessions.add(sessionKey);
+    } else {
+      this.attentionSeededSessions.delete(sessionKey);
+    }
+    this.attentionDeferredSessions.delete(sessionKey);
+    const jsonlPath = this.jsonlPaths.get(sessionKey);
+    if (jsonlPath) this.searchCache.delete(jsonlPath);
+    this.handlers.onTranscript?.(scope.sessionId, source);
+  }
+
+  private hydrateSession(source: SessionSource, sessionId: string): void {
+    const sessionKey = sessionThreadId(source, sessionId);
+    if (this.hydratedSessions.has(sessionKey)) return;
+    const jsonlPath = this.jsonlPaths.get(sessionKey);
+    if (!jsonlPath) return;
+    const result = tryReadJsonlTailLines(
+      jsonlPath,
+      MAX_CANONICAL_RESET_LINES,
+      MAX_CANONICAL_RESET_BYTES,
+    );
+    if (!result.success) return;
+    this.replaceSessionProjection(sessionKey, result.lines, {
+      hydrated: true,
+      attentionSeeded: true,
+      readComplete: result.complete,
+    });
   }
 
   /**
@@ -431,29 +820,21 @@ export class SideChatService {
   ): boolean {
     const result = tryReadJsonlTailLines(
       jsonlPath,
-      ATTENTION_SEED_LINES,
-      ATTENTION_SEED_BYTES,
+      MAX_CANONICAL_RESET_LINES,
+      MAX_CANONICAL_RESET_BYTES,
     );
     if (!result.success) return false;
 
     const allowHeuristic =
       Math.max(0, this.now().getTime() - session.lastEventTime.getTime()) <=
       HISTORICAL_HEURISTIC_MAX_AGE_MS;
-    let next: SessionAttention = { needsUser: false, reason: '' };
-    for (const line of result.lines) {
-      for (const [ordinal, event] of classifyEvents(line, session.source).entries()) {
-        this.handlers.onEvent?.(
-          session.id,
-          session.source,
-          event,
-          true,
-          line,
-          ordinal,
-        );
-        next = attentionAfterHistoricalEvent(next, event, allowHeuristic);
-      }
-    }
-    this.setAttention(session.id, next);
+    this.replaceSessionProjection(sessionIdentity(session), result.lines, {
+      hydrated: false,
+      retainTranscript: false,
+      attentionSeeded: true,
+      historicalHeuristic: allowHeuristic,
+      readComplete: result.complete,
+    });
     return true;
   }
 
@@ -461,27 +842,28 @@ export class SideChatService {
   private seedHistoricalAttentionBatch(): boolean {
     let attempts = 0;
     for (const session of this.sessions) {
+      const sessionKey = sessionIdentity(session);
       if (
         session.isInternal ||
         session.status !== 'history' ||
-        this.attentionSeededSessions.has(session.id) ||
-        this.attentionDeferredSessions.has(session.id)
+        this.attentionSeededSessions.has(sessionKey) ||
+        this.attentionDeferredSessions.has(sessionKey)
       ) {
         continue;
       }
 
-      const jsonlPath = this.jsonlPaths.get(session.id);
+      const jsonlPath = this.jsonlPaths.get(sessionKey);
       if (!jsonlPath) {
-        this.attentionDeferredSessions.add(session.id);
+        this.attentionDeferredSessions.add(sessionKey);
         continue;
       }
       if (attempts >= MAX_ATTENTION_SEEDS_PER_SYNC) return true;
       attempts += 1;
 
       if (this.seedHistoricalAttention(session, jsonlPath)) {
-        this.attentionSeededSessions.add(session.id);
+        this.attentionSeededSessions.add(sessionKey);
       } else {
-        this.attentionDeferredSessions.add(session.id);
+        this.attentionDeferredSessions.add(sessionKey);
       }
     }
     return false;
@@ -519,7 +901,9 @@ export class SideChatService {
     const hydrate = selectedHistory
       .filter((candidate, index) => candidate.score > 0 || index < 3)
       .slice(0, MAX_SEARCH_HYDRATIONS);
-    for (const { session } of hydrate) this.hydrateSession(session.id);
+    for (const { session } of hydrate) {
+      this.hydrateSession(session.source, session.id);
+    }
 
     return [...recent, ...selectedHistory.map(({ session }) => session)];
   }
@@ -531,22 +915,30 @@ export class SideChatService {
    */
   private reconcileTailers(): void {
     const activeScope = scopeFromThreadId(this.activeThreadId);
-    const selectedSessionId =
-      activeScope.kind === 'session' ? activeScope.sessionId : null;
+    const selectedSessionKey =
+      activeScope.kind === 'session' && activeScope.source
+        ? sessionThreadId(activeScope.source, activeScope.sessionId)
+        : null;
     const activeIds = new Set<string>();
 
     for (const session of this.sessions) {
       const isLive = session.status === 'active' || session.status === 'idle';
-      if (!isLive || (session.isInternal && session.id !== selectedSessionId)) {
+      const sessionKey = sessionIdentity(session);
+      if (!isLive || (session.isInternal && sessionKey !== selectedSessionKey)) {
         continue;
       }
-      activeIds.add(session.id);
-      const jsonlPath = this.jsonlPaths.get(session.id);
-      if (jsonlPath && !this.tailer.tailedSessionIds.includes(session.id)) {
-        this.attentionSeededSessions.add(session.id);
-        this.attentionDeferredSessions.delete(session.id);
-        this.hydratedSessions.add(session.id);
-        this.tailer.startTailing(session.id, jsonlPath);
+      activeIds.add(sessionKey);
+      const jsonlPath = this.jsonlPaths.get(sessionKey);
+      if (jsonlPath && !this.tailer.tailedSessionIds.includes(sessionKey)) {
+        const alreadyHydrated = this.hydratedSessions.has(sessionKey);
+        const readable = this.tailer.startTailing(sessionKey, jsonlPath, {
+          seed: !alreadyHydrated,
+        });
+        if (alreadyHydrated || readable) {
+          this.attentionSeededSessions.add(sessionKey);
+          this.attentionDeferredSessions.delete(sessionKey);
+          this.hydratedSessions.add(sessionKey);
+        }
       }
     }
 
@@ -576,7 +968,7 @@ export class SideChatService {
   }
 
   private searchableTail(session: TrackedSession): string {
-    const jsonlPath = this.jsonlPaths.get(session.id);
+    const jsonlPath = this.jsonlPaths.get(sessionIdentity(session));
     if (!jsonlPath) return '';
     let stat: fs.Stats;
     try {
@@ -585,26 +977,35 @@ export class SideChatService {
       return '';
     }
     const cached = this.searchCache.get(jsonlPath);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    if (
+      cached &&
+      cached.dev === stat.dev &&
+      cached.ino === stat.ino &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.size === stat.size
+    ) {
       return cached.text;
     }
     let fd: number | undefined;
-    let text = '';
+    let text: string;
     try {
       const bytes = Math.min(stat.size, SEARCH_TAIL_BYTES);
       const offset = stat.size - bytes;
       fd = fs.openSync(jsonlPath, 'r');
       const buf = Buffer.alloc(bytes);
-      fs.readSync(fd, buf, 0, bytes, offset);
+      const read = fs.readSync(fd, buf, 0, bytes, offset);
+      if (read !== bytes) return '';
       text = buf.toString('utf-8').toLowerCase();
     } catch {
-      text = '';
+      return '';
     } finally {
       if (fd !== undefined) {
         try { fs.closeSync(fd); } catch { /* ignore */ }
       }
     }
     this.searchCache.set(jsonlPath, {
+      dev: stat.dev,
+      ino: stat.ino,
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       text,
@@ -612,22 +1013,145 @@ export class SideChatService {
     return text;
   }
 
-  private updateAttention(sessionId: string, event: SessionEvent): void {
-    const previous = this.getSessionAttention(sessionId);
+  private updateAttention(sessionKey: string, event: SessionEvent): void {
+    const previous = this.attention.get(sessionKey) ?? {
+      needsUser: false,
+      reason: '',
+    };
     const next = attentionAfterEvent(previous, event);
-    this.setAttention(sessionId, next);
+    this.setAttention(sessionKey, next);
   }
 
-  private setAttention(sessionId: string, next: SessionAttention): void {
-    const previous = this.getSessionAttention(sessionId);
+  private setAttention(sessionKey: string, next: SessionAttention): void {
+    const previous = this.attention.get(sessionKey) ?? {
+      needsUser: false,
+      reason: '',
+    };
     if (next.needsUser === previous.needsUser && next.reason === previous.reason) return;
-    this.attention.set(sessionId, next);
+    this.attention.set(sessionKey, next);
+    const scope = scopeFromThreadId(sessionKey);
+    if (scope.kind !== 'session' || !scope.source) return;
     this.handlers.onAttention?.(
-      sessionId,
+      scope.sessionId,
       next,
       !previous.needsUser && next.needsUser,
+      scope.source,
     );
   }
+}
+
+function sessionIdentity(
+  session: Pick<TrackedSession, 'id' | 'source'>,
+): string {
+  return sessionThreadId(session.source, session.id);
+}
+
+function normalizeTranscriptPaths(
+  sessions: readonly TrackedSession[],
+  paths: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const normalized = new Map<string, string>();
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    counts.set(session.id, (counts.get(session.id) ?? 0) + 1);
+  }
+  for (const session of sessions) {
+    const key = sessionIdentity(session);
+    const transcriptPath = paths.get(key) ??
+      (counts.get(session.id) === 1 ? paths.get(session.id) : undefined);
+    if (transcriptPath) normalized.set(key, transcriptPath);
+  }
+  return normalized;
+}
+
+function shouldTail(session: TrackedSession, selectedKey: string | null): boolean {
+  const live = session.status === 'active' || session.status === 'idle';
+  if (!live) return false;
+  return !session.isInternal || sessionIdentity(session) === selectedKey;
+}
+
+function transcriptGeneration(jsonlPath: string): TranscriptGeneration | null {
+  try {
+    const stat = fs.statSync(jsonlPath);
+    if (!stat.isFile()) return null;
+    return {
+      path: jsonlPath,
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function generationNeedsReplay(
+  previous: TranscriptGeneration,
+  next: TranscriptGeneration,
+  activelyTailed: boolean,
+): boolean {
+  if (
+    previous.path !== next.path ||
+    previous.dev !== next.dev ||
+    previous.ino !== next.ino ||
+    next.size < previous.size
+  ) {
+    return true;
+  }
+  const metadataChanged =
+    previous.size !== next.size ||
+    previous.mtimeMs !== next.mtimeMs ||
+    previous.ctimeMs !== next.ctimeMs;
+  if (!metadataChanged) return false;
+  // An active tailer owns monotonic appends. Historical/temporarily untailed
+  // sessions need a canonical replay because no append observer is present.
+  if (!activelyTailed) return true;
+  return next.size === previous.size;
+}
+
+function projectionIsComplete(
+  lines: readonly string[],
+  source: SessionSource,
+): boolean {
+  if (source !== 'opencode') return true;
+  for (const line of lines.slice(0, 2)) {
+    try {
+      const value = JSON.parse(line) as Record<string, unknown>;
+      if (
+        value['schema'] === 'aside.opencode.v1' &&
+        value['type'] === 'session' &&
+        (value['projectionState'] === 'building' ||
+          value['projectionState'] === 'partial')
+      ) {
+        return false;
+      }
+    } catch {
+      // Classification already treats malformed records as non-events.
+    }
+  }
+  return true;
+}
+
+function mergeMigratedThreads(
+  legacy: ChatThread,
+  canonical: ChatThread | undefined,
+  canonicalId: string,
+): ChatThread {
+  const newer =
+    canonical && canonical.updatedAt >= legacy.updatedAt ? canonical : legacy;
+  const turns = new Map(legacy.turns.map((turn) => [turn.id, turn]));
+  for (const turn of canonical?.turns ?? []) turns.set(turn.id, turn);
+  return {
+    ...newer,
+    id: canonicalId,
+    scope: scopeFromThreadId(canonicalId),
+    turns: [...turns.values()].sort(
+      (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
+    ),
+    thinking: false,
+  };
 }
 
 function searchTokens(question: string): string[] {

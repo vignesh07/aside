@@ -1,6 +1,7 @@
 import { classifyClaudeLine } from './claude-classifier.js';
 import { classifyCodexLine } from './codex-classifier.js';
 import { classifyPiLine } from './pi-classifier.js';
+import { classifyOpenCodeLine } from './opencode-classifier.js';
 import type { SessionEvent } from '../types/events.js';
 import type { SessionSource } from '../types/session.js';
 import { TRUNCATE } from '../config/defaults.js';
@@ -15,7 +16,10 @@ export function classifyLine(raw: string, source: SessionSource): SessionEvent |
   if (source === 'codex') {
     return classifyCodexLine(raw);
   }
-  return classifyPiLine(raw);
+  if (source === 'pi') {
+    return classifyPiLine(raw);
+  }
+  return classifyOpenCodeLine(raw);
 }
 
 /**
@@ -131,6 +135,10 @@ function supplementalEvents(
     // retry semantics have one authoritative implementation.
     return [];
   }
+
+  // OpenCode lifecycle records are already explicit in the normalized cache
+  // and are classified authoritatively by classifyOpenCodeLine.
+  if (source === 'opencode') return [];
 
   if (parsed['type'] !== 'message' || !isRecord(parsed['message'])) return [];
   const message = parsed['message'];

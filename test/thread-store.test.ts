@@ -22,7 +22,7 @@ function tempStore(): FileThreadStore {
 function thread(): ChatThread {
   return {
     id: 'session:abc',
-    scope: { kind: 'session', sessionId: 'abc' },
+    scope: { kind: 'session', source: null, sessionId: 'abc' },
     provider: 'ollama',
     model: 'llama3.2',
     turns: [
@@ -71,7 +71,7 @@ describe('FileThreadStore', () => {
     const second: ChatThread = {
       ...thread(),
       id: 'session:def',
-      scope: { kind: 'session', sessionId: 'def' },
+      scope: { kind: 'session', source: null, sessionId: 'def' },
       turns: [{ ...thread().turns[0]!, id: 't2-2', content: 'from the menubar' }],
       updatedAt: new Date('2026-07-23T12:00:02.000Z'),
     };
@@ -81,6 +81,40 @@ describe('FileThreadStore', () => {
     expect(store.load().map((saved) => saved.id).sort()).toEqual([
       'session:abc',
       'session:def',
+    ]);
+  });
+
+  it('atomically merges and removes a migrated legacy thread id', () => {
+    const store = tempStore();
+    const legacy = thread();
+    store.save([legacy]);
+    const canonicalId = 'session:opencode:abc';
+    const canonical: ChatThread = {
+      ...legacy,
+      id: canonicalId,
+      scope: { kind: 'session', source: 'opencode', sessionId: 'abc' },
+      turns: [{
+        ...legacy.turns[0]!,
+        id: 'canonical-turn',
+        content: 'new canonical history',
+      }],
+      updatedAt: new Date('2026-07-23T12:00:02.000Z'),
+    };
+
+    new FileThreadStore(store.location).save([canonical], {
+      migrations: new Map([['session:abc', canonicalId]]),
+    });
+
+    const restored = store.load();
+    expect(restored.map((saved) => saved.id)).toEqual([canonicalId]);
+    expect(restored[0]?.scope).toEqual({
+      kind: 'session',
+      source: 'opencode',
+      sessionId: 'abc',
+    });
+    expect(restored[0]?.turns.map((turn) => turn.content)).toEqual([
+      'remember me',
+      'new canonical history',
     ]);
   });
 });

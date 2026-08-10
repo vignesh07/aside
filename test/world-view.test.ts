@@ -13,6 +13,7 @@ import { formatEvent } from '../src/core/transcript-format.js';
 import type { SessionEvent } from '../src/types/events.js';
 import type { ChatTurn } from '../src/types/chat.js';
 import type { SessionSnapshot, WorldSnapshot } from '../src/types/world.js';
+import type { SessionSource } from '../src/types/session.js';
 
 const NOW = new Date('2026-07-16T12:00:00.000Z');
 
@@ -34,8 +35,12 @@ function snap(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
   };
 }
 
-function world(sessions: SessionSnapshot[], focusId: string | null = null): WorldSnapshot {
-  return { now: NOW, totalSessionCount: sessions.length, sessions, focusId };
+function world(
+  sessions: SessionSnapshot[],
+  focusId: string | null = null,
+  focusSource: SessionSource | null = focusId === null ? null : 'claude',
+): WorldSnapshot {
+  return { now: NOW, totalSessionCount: sessions.length, sessions, focusId, focusSource };
 }
 
 /** n events, each rendering to a line of roughly `chars` characters. */
@@ -67,13 +72,15 @@ describe('formatDuration', () => {
 
 describe('renderRoster', () => {
   it('says plainly when no agent threads were discovered', () => {
-    expect(renderRoster(world([]))).toMatch(/No Claude Code, Codex, or Pi threads/);
+    expect(renderRoster(world([]))).toMatch(
+      /No Claude Code, Codex, Pi, or OpenCode threads/,
+    );
   });
 
   it('lists every session, including ones with no transcript detail', () => {
     const out = renderRoster(world([snap({ id: 'a' }), snap({ id: 'b', projectName: 'other' })]));
-    expect(out).toContain('[a]');
-    expect(out).toContain('[b]');
+    expect(out).toContain('[claude:a]');
+    expect(out).toContain('[claude:b]');
     expect(out).toContain('(2)');
   });
 
@@ -85,10 +92,23 @@ describe('renderRoster', () => {
 
   it('marks the focused session', () => {
     const out = renderRoster(world([snap({ id: 'a' }), snap({ id: 'b' })], 'b'));
-    const lineB = out.split('\n').find((l) => l.includes('[b]'))!;
-    const lineA = out.split('\n').find((l) => l.includes('[a]'))!;
+    const lineB = out.split('\n').find((l) => l.includes('[claude:b]'))!;
+    const lineA = out.split('\n').find((l) => l.includes('[claude:a]'))!;
     expect(lineB).toMatch(/focused/);
     expect(lineA).not.toMatch(/focused/);
+  });
+
+  it('keeps focus provider-qualified when two tools reuse a session id', () => {
+    const sessions = [
+      snap({ id: 'shared', source: 'codex' }),
+      snap({ id: 'shared', source: 'opencode' }),
+    ];
+    const out = renderRoster(world(sessions, 'shared', 'opencode'));
+    const codex = out.split('\n').find((line) => line.includes('[codex:shared]'))!;
+    const opencode = out.split('\n').find((line) => line.includes('[opencode:shared]'))!;
+
+    expect(codex).not.toMatch(/focused/);
+    expect(opencode).toMatch(/focused/);
   });
 
   it('includes context usage when known', () => {
@@ -99,7 +119,7 @@ describe('renderRoster', () => {
 
 describe('allocateTranscriptBudget', () => {
   it('ignores sessions with no transcript — they cost nothing', () => {
-    const { perSession } = allocateTranscriptBudget([snap({ id: 'empty' })], null, 10_000);
+    const { perSession } = allocateTranscriptBudget([snap({ id: 'empty' })], null, null, 10_000);
     expect(perSession.size).toBe(0);
   });
 
@@ -108,8 +128,23 @@ describe('allocateTranscriptBudget', () => {
       snap({ id: 'a', transcript: bulkTranscript(20) }),
       snap({ id: 'b', transcript: bulkTranscript(20) }),
     ];
-    const { perSession } = allocateTranscriptBudget(sessions, 'a', 10_000);
-    expect(perSession.get('a')!).toBeGreaterThan(perSession.get('b')!);
+    const { perSession } = allocateTranscriptBudget(sessions, 'a', 'claude', 10_000);
+    expect(perSession.get(sessions[0]!)!).toBeGreaterThan(perSession.get(sessions[1]!)!);
+  });
+
+  it('does not grant focus weight to the same raw id from another provider', () => {
+    const sessions = [
+      snap({ id: 'shared', source: 'codex', transcript: bulkTranscript(20) }),
+      snap({ id: 'shared', source: 'opencode', transcript: bulkTranscript(20) }),
+    ];
+    const { perSession } = allocateTranscriptBudget(
+      sessions,
+      'shared',
+      'opencode',
+      10_000,
+    );
+
+    expect(perSession.get(sessions[1]!)!).toBeGreaterThan(perSession.get(sessions[0]!)!);
   });
 
   it('ranks live sessions above idle ones, and idle above history', () => {
@@ -118,16 +153,16 @@ describe('allocateTranscriptBudget', () => {
       snap({ id: 'idle', status: 'idle', transcript: bulkTranscript(20) }),
       snap({ id: 'history', status: 'history', transcript: bulkTranscript(20) }),
     ];
-    const { perSession } = allocateTranscriptBudget(sessions, null, 30_000);
-    expect(perSession.get('active')!).toBeGreaterThan(perSession.get('idle')!);
-    expect(perSession.get('idle')!).toBeGreaterThan(perSession.get('history')!);
+    const { perSession } = allocateTranscriptBudget(sessions, null, null, 30_000);
+    expect(perSession.get(sessions[0]!)!).toBeGreaterThan(perSession.get(sessions[1]!)!);
+    expect(perSession.get(sessions[1]!)!).toBeGreaterThan(perSession.get(sessions[2]!)!);
   });
 
   it('never exceeds the total budget', () => {
     const sessions = Array.from({ length: 6 }, (_, i) =>
       snap({ id: `s${i}`, transcript: bulkTranscript(50) }),
     );
-    const { perSession } = allocateTranscriptBudget(sessions, 's0', 10_000);
+    const { perSession } = allocateTranscriptBudget(sessions, 's0', 'claude', 10_000);
     const spent = [...perSession.values()].reduce((a, b) => a + b, 0);
     expect(spent).toBeLessThanOrEqual(10_000);
   });
@@ -137,7 +172,7 @@ describe('allocateTranscriptBudget', () => {
     const sessions = Array.from({ length: 20 }, (_, i) =>
       snap({ id: `s${i}`, status: 'idle', transcript: bulkTranscript(50) }),
     );
-    const { perSession, omitted } = allocateTranscriptBudget(sessions, 's0', 4_000);
+    const { perSession, omitted } = allocateTranscriptBudget(sessions, 's0', 'claude', 4_000);
     expect(perSession.size).toBeGreaterThan(0);
     expect(omitted.length).toBeGreaterThan(0);
     for (const share of perSession.values()) {
@@ -150,17 +185,18 @@ describe('allocateTranscriptBudget', () => {
     const sessions = Array.from({ length: 20 }, (_, i) =>
       snap({ id: `s${i}`, status: 'idle', transcript: bulkTranscript(50) }),
     );
-    const { perSession } = allocateTranscriptBudget(sessions, 's19', 4_000);
-    expect(perSession.has('s19')).toBe(true);
+    const { perSession } = allocateTranscriptBudget(sessions, 's19', 'claude', 4_000);
+    expect(perSession.has(sessions[19]!)).toBe(true);
   });
 
   it('gives a lone session the whole budget even if it is below the floor', () => {
     const { perSession, omitted } = allocateTranscriptBudget(
       [snap({ id: 'only', transcript: bulkTranscript(5) })],
       null,
+      null,
       MIN_DETAIL_CHARS,
     );
-    expect(perSession.get('only')).toBe(MIN_DETAIL_CHARS);
+    expect(perSession.get([...perSession.keys()][0]!)).toBe(MIN_DETAIL_CHARS);
     expect(omitted).toEqual([]);
   });
 
@@ -168,10 +204,11 @@ describe('allocateTranscriptBudget', () => {
     const { perSession, omitted } = allocateTranscriptBudget(
       [snap({ id: 'a', transcript: bulkTranscript(5) })],
       null,
+      null,
       10,
     );
     expect(perSession.size).toBe(0);
-    expect(omitted).toEqual(['a']);
+    expect(omitted.map((session) => session.id)).toEqual(['a']);
   });
 });
 
@@ -218,8 +255,25 @@ describe('renderDetail', () => {
 
   it('labels each block with its session id', () => {
     const out = renderDetail(world([snap({ id: 'a', transcript: bulkTranscript(3) })]));
-    expect(out).toContain('[a]');
+    expect(out).toContain('[claude:a]');
     expect(out).toContain('=== Recent activity ===');
+  });
+
+  it('renders colliding raw ids as separate provider-qualified blocks', () => {
+    const out = renderDetail(
+      world(
+        [
+          snap({ id: 'shared', source: 'codex', transcript: bulkTranscript(3) }),
+          snap({ id: 'shared', source: 'opencode', transcript: bulkTranscript(3) }),
+        ],
+        'shared',
+        'opencode',
+      ),
+      50_000,
+    );
+
+    expect(out).toContain('[codex:shared]');
+    expect(out).toContain('[opencode:shared]');
   });
 
   it('states that omitted sessions were omitted, rather than implying they were idle', () => {
@@ -243,7 +297,7 @@ describe('renderWorld', () => {
 
   it('includes the roster even when no session has transcript detail', () => {
     const out = renderWorld(world([snap({ id: 'a', idleForMs: 60_000 })]));
-    expect(out).toContain('[a]');
+    expect(out).toContain('[claude:a]');
     expect(out).toMatch(/quiet for 1m/);
   });
 
@@ -259,7 +313,7 @@ describe('renderWorld', () => {
 
   it('puts the roster before the detail', () => {
     const out = renderWorld(world([snap({ id: 'a', transcript: bulkTranscript(3) })]));
-    expect(out.indexOf('Agent sessions aside can see')).toBeLessThan(
+    expect(out.indexOf('Agent threads in this context')).toBeLessThan(
       out.indexOf('=== Recent activity ==='),
     );
   });

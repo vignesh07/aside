@@ -11,7 +11,12 @@ import {
   type RecordedAgentEvent,
 } from '../src/core/activity-ledger.js';
 import { classifyEvents } from '../src/core/event-classifier.js';
-import { SessionTailer, type TailEvent } from '../src/core/session-tailer.js';
+import {
+  SessionTailer,
+  tryReadJsonlTailLines,
+  type TailEvent,
+  type TailResetEvent,
+} from '../src/core/session-tailer.js';
 import type { SessionEvent } from '../src/types/events.js';
 import type {
   SessionSource,
@@ -50,6 +55,21 @@ function newLedger(clock: () => Date = () => new Date(BASE_MS)) {
   const store = new InMemoryActivityLedgerStore();
   const ledger = new ActivityLedger(store, clock);
   return { ledger, store };
+}
+
+class ThrowOnceReplacementStore extends InMemoryActivityLedgerStore {
+  private shouldThrow = true;
+
+  override replaceThreadEvents(
+    key: string,
+    events: import('../src/types/activity.js').ActivityEventRecord[],
+  ): void {
+    if (this.shouldThrow) {
+      this.shouldThrow = false;
+      throw new Error('disk full');
+    }
+    super.replaceThreadEvents(key, events);
+  }
 }
 
 function record(
@@ -186,6 +206,330 @@ describe('activity ledger lifecycle and attention', () => {
       { threadKey: 'codex:shared-id' },
     ]);
     ledger.dispose();
+  });
+
+  it('removes stale durable attention before replaying a replacement projection', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('projection-reset', 'opencode');
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, {
+      kind: 'needs_input',
+      reason: 'Approve the password request?',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"deleted-question"}' });
+    ledger.flush();
+    expect(ledger.attentionFor(openCode).kind).toBe('waiting');
+    expect(store.load().events).toHaveLength(1);
+
+    ledger.resetAgentProjection(openCode.id, openCode.source);
+    expect(ledger.attentionFor(openCode).kind).toBe('none');
+    expect(ledger.getEvents({ threadKey: threadKey('opencode', openCode.id) }))
+      .toEqual([]);
+    expect(store.load().events).toEqual([]);
+
+    record(ledger, openCode, {
+      kind: 'assistant_text',
+      preview: 'The replacement is canonical.',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"surviving-text"}' });
+    expect(ledger.attentionFor(openCode).kind).toBe('none');
+    ledger.dispose();
+  });
+
+  it('keeps surviving event sequences and resolved state across an identical rewrite', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('stable-rebase', 'opencode');
+    const event = {
+      kind: 'turn_complete' as const,
+      durationMs: 100,
+      ts: new Date(BASE_MS).toISOString(),
+    };
+    const evidence = {
+      seeded: true,
+      rawLine: '{"id":"stable-completion","type":"turn"}',
+    };
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, event, evidence);
+    const before = ledger.getEvents({
+      threadKey: threadKey('opencode', openCode.id),
+    })[0]!;
+    ledger.markResolved(openCode);
+    ledger.flush();
+    expect(ledger.attentionFor(openCode).kind).toBe('none');
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, event, evidence);
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source);
+
+    const after = ledger.getEvent(before.eventId)!;
+    expect(after.seq).toBe(before.seq);
+    expect(ledger.attentionFor(openCode).kind).toBe('none');
+    expect(store.load().events).toEqual([after]);
+    ledger.dispose();
+  });
+
+  it('replaces changed event content with a new unread sequence', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('edited-rebase', 'opencode');
+    const originalRawLine =
+      '{"id":"stable-assistant-part","type":"text","text":"old private summary"}';
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, {
+      kind: 'turn_failed',
+      error: 'old private summary',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: originalRawLine });
+    const before = ledger.getEvents({
+      threadKey: threadKey('opencode', openCode.id),
+    })[0]!;
+    ledger.markResolved(openCode);
+    ledger.flush();
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, {
+      kind: 'turn_failed',
+      error: 'new canonical summary',
+      ts: new Date(BASE_MS + 1_000).toISOString(),
+    }, {
+      seeded: true,
+      rawLine:
+        '{"id":"stable-assistant-part","type":"text","text":"new canonical summary"}',
+    });
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source);
+
+    const after = ledger.getEvent(before.eventId)!;
+    expect(after.seq).toBeGreaterThan(before.seq);
+    expect(after.summary).toBe('new canonical summary');
+    expect(after.evidenceHash).not.toBe(before.evidenceHash);
+    expect(after.occurredAtMs).toBe(BASE_MS + 1_000);
+    expect(ledger.attentionFor(openCode)).toMatchObject({ unread: true });
+    expect(store.load().events).toEqual([after]);
+    ledger.dispose();
+  });
+
+  it('persists canonical replay order independently from stable cursor sequences', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('reordered-rebase', 'opencode');
+    const failed = {
+      kind: 'turn_failed' as const,
+      error: 'Canonical failure',
+      ts: new Date(BASE_MS).toISOString(),
+    };
+    const completed = {
+      kind: 'turn_complete' as const,
+      durationMs: 5,
+      ts: new Date(BASE_MS + 1).toISOString(),
+    };
+    const failedEvidence = { seeded: false, rawLine: '{"id":"failed"}' };
+    const completedEvidence = { seeded: false, rawLine: '{"id":"completed"}' };
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, failed, failedEvidence);
+    record(ledger, openCode, completed, completedEvidence);
+    ledger.flush();
+    expect(ledger.attentionFor(openCode).kind).toBe('completed');
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, completed, completedEvidence);
+    record(ledger, openCode, failed, failedEvidence);
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source);
+    expect(ledger.attentionFor(openCode).kind).toBe('failed');
+
+    const restored = new ActivityLedger(store, () => new Date(BASE_MS + 10));
+    restored.syncSessions([openCode]);
+    expect(restored.attentionFor(openCode).kind).toBe('failed');
+    restored.dispose();
+    ledger.dispose();
+  });
+
+  it('bridges stable identity across an incomplete header and final projection', () => {
+    const { ledger } = newLedger();
+    const openCode = trackedSession('deferred-rebase', 'opencode');
+    const completion = {
+      kind: 'turn_complete' as const,
+      durationMs: 5,
+      ts: new Date(BASE_MS).toISOString(),
+    };
+    const evidence = { seeded: true, rawLine: '{"id":"stable-completion"}' };
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, completion, evidence);
+    const original = ledger.getEvents()[0]!;
+    ledger.markResolved(openCode);
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, {
+      kind: 'session_started',
+      ts: new Date(BASE_MS - 1).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"building-header"}' });
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source, false);
+    expect(ledger.getEvent(original.eventId)).toBeNull();
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, completion, evidence);
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source, true);
+
+    expect(ledger.getEvent(original.eventId)?.seq).toBe(original.seq);
+    expect(ledger.attentionFor(openCode).kind).toBe('none');
+    ledger.dispose();
+  });
+
+  it('does not prune unseen durable events after a bounded canonical read', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('bounded-rebase', 'opencode');
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, {
+      kind: 'assistant_text',
+      preview: 'older retained evidence',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"older"}' });
+    record(ledger, openCode, {
+      kind: 'turn_complete',
+      durationMs: 1,
+      ts: new Date(BASE_MS + 1).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"newer"}' });
+    ledger.flush();
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, {
+      kind: 'turn_complete',
+      durationMs: 1,
+      ts: new Date(BASE_MS + 1).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"newer"}' });
+    ledger.finishAgentProjectionRebase(
+      openCode.id,
+      openCode.source,
+      false,
+      false,
+    );
+
+    expect(ledger.getEvents().map((event) => event.summary)).toEqual([
+      'older retained evidence',
+      'Latest turn ended',
+    ]);
+    expect(store.load().events.map((event) => event.summary)).toEqual([
+      'older retained evidence',
+      'Latest turn ended',
+    ]);
+    ledger.dispose();
+  });
+
+  it('removes one deleted event from a complete rewrite of more than 100 records', () => {
+    const { ledger, store } = newLedger();
+    const openCode = trackedSession('large-complete-rebase', 'opencode');
+    const total = 151;
+    const removedIndex = 75;
+    const eventFor = (index: number) => ({
+      kind: 'assistant_text' as const,
+      preview: `canonical event ${index}`,
+      ts: new Date(BASE_MS + index).toISOString(),
+    });
+    const evidenceFor = (index: number) => ({
+      seeded: true,
+      rawLine: JSON.stringify({ id: `canonical-${index}`, type: 'text' }),
+    });
+
+    ledger.syncSessions([openCode]);
+    for (let index = 0; index < total; index += 1) {
+      record(ledger, openCode, eventFor(index), evidenceFor(index));
+    }
+    ledger.flush();
+    const originalSeqs = new Map(
+      ledger.getEvents().map((event) => [event.summary, event.seq]),
+    );
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    for (let index = 0; index < total; index += 1) {
+      if (index === removedIndex) continue;
+      record(ledger, openCode, eventFor(index), evidenceFor(index));
+    }
+    ledger.finishAgentProjectionRebase(
+      openCode.id,
+      openCode.source,
+      true,
+      true,
+    );
+
+    const replacement = ledger.getEvents();
+    expect(replacement).toHaveLength(total - 1);
+    expect(replacement.some(
+      (event) => event.summary === `canonical event ${removedIndex}`,
+    )).toBe(false);
+    expect(replacement.every(
+      (event) => originalSeqs.get(event.summary) === event.seq,
+    )).toBe(true);
+    expect(replacement.map((event) => event.canonicalOrder)).toEqual(
+      Array.from({ length: total - 1 }, (_, index) => index + 1),
+    );
+    expect(store.load().events).toEqual(replacement);
+    ledger.dispose();
+  });
+
+  it('restores memory after a durable replacement failure and retries cleanly', () => {
+    const store = new ThrowOnceReplacementStore();
+    const ledger = new ActivityLedger(store, () => new Date(BASE_MS));
+    const openCode = trackedSession('failed-replace', 'opencode');
+    ledger.syncSessions([openCode]);
+    record(ledger, openCode, {
+      kind: 'assistant_text',
+      preview: 'old private summary',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"old"}' });
+    ledger.flush();
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, {
+      kind: 'assistant_text',
+      preview: 'new canonical summary',
+      ts: new Date(BASE_MS + 1).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"new"}' });
+    expect(() =>
+      ledger.finishAgentProjectionRebase(openCode.id, openCode.source),
+    ).toThrow('disk full');
+    expect(ledger.getEvents().map((event) => event.summary)).toEqual([
+      'old private summary',
+    ]);
+    expect(store.load().events.map((event) => event.summary)).toEqual([
+      'old private summary',
+    ]);
+
+    ledger.beginAgentProjectionRebase(openCode.id, openCode.source);
+    record(ledger, openCode, {
+      kind: 'assistant_text',
+      preview: 'new canonical summary',
+      ts: new Date(BASE_MS + 1).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"new"}' });
+    ledger.finishAgentProjectionRebase(openCode.id, openCode.source);
+    expect(ledger.getEvents().map((event) => event.summary)).toEqual([
+      'new canonical summary',
+    ]);
+    expect(store.load().events.map((event) => event.summary)).toEqual([
+      'new canonical summary',
+    ]);
+    ledger.dispose();
+  });
+
+  it('prunes deleted OpenCode activity only after an authoritative scan', () => {
+    const store = new InMemoryActivityLedgerStore();
+    const openCode = trackedSession('deleted-cold-start', 'opencode');
+    const first = new ActivityLedger(store, () => new Date(BASE_MS));
+    first.syncSessions([openCode]);
+    record(first, openCode, {
+      kind: 'assistant_text',
+      preview: 'private summary',
+      ts: new Date(BASE_MS).toISOString(),
+    }, { seeded: true, rawLine: '{"id":"private"}' });
+    first.flush();
+    first.dispose();
+
+    const failedScan = new ActivityLedger(store, () => new Date(BASE_MS + 1));
+    failedScan.syncSessions([], new Set());
+    expect(failedScan.getEvents()).toHaveLength(1);
+    failedScan.dispose();
+
+    const authoritative = new ActivityLedger(store, () => new Date(BASE_MS + 2));
+    authoritative.syncSessions([], new Set(['opencode']));
+    expect(authoritative.getEvents()).toEqual([]);
+    expect(store.load().events).toEqual([]);
+    authoritative.dispose();
   });
 
   it('treats a recoverable tool error as a warning before successful completion', () => {
@@ -790,6 +1134,31 @@ describe('vendor lifecycle classification', () => {
 });
 
 describe('session tailer record boundaries', () => {
+  it('reports whether a bounded tail covers the whole projection', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-tail-complete-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const lines = ['one', 'two', 'three'];
+    fs.writeFileSync(jsonlPath, `${lines.join('\n')}\n`);
+    try {
+      expect(tryReadJsonlTailLines(jsonlPath, 3, 1_024)).toEqual({
+        lines,
+        success: true,
+        complete: true,
+      });
+      expect(tryReadJsonlTailLines(jsonlPath, 2, 1_024)).toEqual({
+        lines: ['two', 'three'],
+        success: true,
+        complete: false,
+      });
+      expect(tryReadJsonlTailLines(jsonlPath, 3, 6)).toMatchObject({
+        success: true,
+        complete: false,
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('reassembles a record that was already partial when tailing started', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-start-partial-'));
     const jsonlPath = path.join(root, 'session.jsonl');
@@ -855,6 +1224,220 @@ describe('session tailer record boundaries', () => {
       expect(received).toEqual([
         { sessionId: 'partial', line: complete, isSeed: false },
       ]);
+    } finally {
+      tailer.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resets its offset and watch handle after an atomic file replacement', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-replaced-tail-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const original = JSON.stringify({ id: 'old', type: 'message' });
+    const replacement = [
+      JSON.stringify({ id: 'new-1', type: 'message' }),
+      JSON.stringify({ id: 'new-2', type: 'message', padding: 'longer' }),
+    ];
+    fs.writeFileSync(jsonlPath, `${original}\n`);
+    const tailer = new SessionTailer();
+    const received: TailEvent[] = [];
+    const resets: TailResetEvent[] = [];
+    tailer.on('line', (event: TailEvent) => received.push(event));
+    tailer.on('reset', (event: TailResetEvent) => resets.push(event));
+    const readNewLines = (
+      tailer as unknown as {
+        readNewLines(sessionId: string, path: string): void;
+      }
+    ).readNewLines.bind(tailer);
+
+    try {
+      tailer.startTailing('replaced', jsonlPath);
+      expect(received).toEqual([]);
+      expect(resets).toEqual([{
+        sessionId: 'replaced',
+        lines: [original],
+        complete: true,
+      }]);
+      resets.length = 0;
+
+      const tempPath = path.join(root, 'replacement.tmp');
+      fs.writeFileSync(tempPath, `${replacement.join('\n')}\n`);
+      fs.renameSync(tempPath, jsonlPath);
+      readNewLines('replaced', jsonlPath);
+
+      expect(received).toEqual([]);
+      expect(resets).toEqual([{
+        sessionId: 'replaced',
+        lines: replacement,
+        complete: true,
+      }]);
+
+      const appended = JSON.stringify({ id: 'after-reset', type: 'message' });
+      fs.appendFileSync(jsonlPath, `${appended}\n`);
+      readNewLines('replaced', jsonlPath);
+      expect(received).toEqual([{
+        sessionId: 'replaced',
+        line: appended,
+        isSeed: false,
+      }]);
+    } finally {
+      tailer.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retries an unreadable replacement instead of accepting an empty reset', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-retry-reset-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const original = JSON.stringify({ id: 'old', type: 'message' });
+    const replacement = JSON.stringify({ id: 'new', type: 'message' });
+    fs.writeFileSync(jsonlPath, `${original}\n`);
+    const tailer = new SessionTailer();
+    const resets: TailResetEvent[] = [];
+    tailer.on('reset', (event: TailResetEvent) => resets.push(event));
+    const readNewLines = (
+      tailer as unknown as {
+        readNewLines(sessionId: string, path: string): void;
+      }
+    ).readNewLines.bind(tailer);
+
+    try {
+      tailer.startTailing('retry-reset', jsonlPath);
+      resets.length = 0;
+      fs.rmSync(jsonlPath);
+      fs.mkdirSync(jsonlPath);
+      readNewLines('retry-reset', jsonlPath);
+      expect(resets).toEqual([]);
+
+      fs.rmdirSync(jsonlPath);
+      fs.writeFileSync(jsonlPath, `${replacement}\n`);
+      readNewLines('retry-reset', jsonlPath);
+      expect(resets).toEqual([{
+        sessionId: 'retry-reset',
+        lines: [replacement],
+        complete: true,
+      }]);
+    } finally {
+      tailer.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('emits one reset batch for same-inode truncation and preserves a partial tail', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-truncated-tail-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    fs.writeFileSync(jsonlPath, `${JSON.stringify({ id: 'long-original', padding: 'x'.repeat(200) })}\n`);
+    const tailer = new SessionTailer();
+    const received: TailEvent[] = [];
+    const resets: TailResetEvent[] = [];
+    tailer.on('line', (event: TailEvent) => received.push(event));
+    tailer.on('reset', (event: TailResetEvent) => resets.push(event));
+    const readNewLines = (
+      tailer as unknown as {
+        readNewLines(sessionId: string, path: string): void;
+      }
+    ).readNewLines.bind(tailer);
+
+    try {
+      tailer.startTailing('truncated', jsonlPath);
+      resets.length = 0;
+      received.length = 0;
+      const complete = JSON.stringify({ id: 'replacement', type: 'message' });
+      const partial = JSON.stringify({ id: 'partial', type: 'message' });
+      const split = Math.floor(partial.length / 2);
+      fs.truncateSync(jsonlPath, 0);
+      fs.appendFileSync(jsonlPath, `${complete}\n${partial.slice(0, split)}`);
+      readNewLines('truncated', jsonlPath);
+      expect(resets).toEqual([{
+        sessionId: 'truncated',
+        lines: [complete],
+        complete: false,
+      }]);
+      expect(received).toEqual([]);
+
+      fs.appendFileSync(jsonlPath, `${partial.slice(split)}\n`);
+      readNewLines('truncated', jsonlPath);
+      expect(received).toEqual([{
+        sessionId: 'truncated',
+        line: partial,
+        isSeed: false,
+      }]);
+    } finally {
+      tailer.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('detects a same-inode same-size overwrite as a canonical reset', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-same-size-tail-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const original = JSON.stringify({ id: 'same', text: 'old-value' });
+    const replacement = JSON.stringify({ id: 'same', text: 'new-value' });
+    expect(replacement.length).toBe(original.length);
+    fs.writeFileSync(jsonlPath, `${original}\n`);
+    const tailer = new SessionTailer();
+    const resets: TailResetEvent[] = [];
+    tailer.on('reset', (event: TailResetEvent) => resets.push(event));
+    const readNewLines = (
+      tailer as unknown as {
+        readNewLines(sessionId: string, path: string): void;
+      }
+    ).readNewLines.bind(tailer);
+
+    try {
+      tailer.startTailing('same-size', jsonlPath);
+      resets.length = 0;
+      fs.writeFileSync(jsonlPath, `${replacement}\n`);
+      readNewLines('same-size', jsonlPath);
+      expect(resets).toEqual([{
+        sessionId: 'same-size',
+        lines: [replacement],
+        complete: true,
+      }]);
+    } finally {
+      tailer.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retries a canonical reset when its consumer fails to commit', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-reset-listener-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const original = JSON.stringify({ id: 'old', type: 'message' });
+    const replacement = JSON.stringify({ id: 'new', type: 'message' });
+    fs.writeFileSync(jsonlPath, `${original}\n`);
+    const tailer = new SessionTailer();
+    let armed = false;
+    let attempts = 0;
+    let accepted: TailResetEvent | null = null;
+    tailer.on('reset', (event: TailResetEvent) => {
+      if (!armed) return;
+      attempts += 1;
+      if (attempts === 1) throw new Error('durable replacement failed');
+      accepted = event;
+    });
+    const readNewLines = (
+      tailer as unknown as {
+        readNewLines(sessionId: string, path: string): void;
+      }
+    ).readNewLines.bind(tailer);
+
+    try {
+      tailer.startTailing('retry-listener', jsonlPath);
+      armed = true;
+      const tempPath = path.join(root, 'replacement.tmp');
+      fs.writeFileSync(tempPath, `${replacement}\n`);
+      fs.renameSync(tempPath, jsonlPath);
+      readNewLines('retry-listener', jsonlPath);
+      expect(attempts).toBe(1);
+      expect(accepted).toBeNull();
+      readNewLines('retry-listener', jsonlPath);
+      expect(attempts).toBe(2);
+      expect(accepted).toEqual({
+        sessionId: 'retry-listener',
+        lines: [replacement],
+        complete: true,
+      });
     } finally {
       tailer.stopAll();
       fs.rmSync(root, { recursive: true, force: true });

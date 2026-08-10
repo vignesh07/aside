@@ -26,6 +26,8 @@ export const TODAY_CAPTURE_MODEL = 'claude-haiku-4-5-20251001';
 const PI_CAPTURE_PROVIDER = 'anthropic';
 const PI_CAPTURE_MODEL = 'claude-sonnet-4-6';
 const PI_CAPTURE_MODEL_NAME = 'Claude Sonnet 4.6';
+const OPENCODE_CAPTURE_PROVIDER = 'openai';
+const OPENCODE_CAPTURE_MODEL = 'gpt-5.4';
 
 export interface GeneratedTodayCaptureFixture {
   now: string;
@@ -35,9 +37,15 @@ export interface GeneratedTodayCaptureFixture {
   sessions: TrackedSession[];
 }
 
-/** Runtime model choices for captures, including Pi's exact upstream target. */
-export function captureModelCatalog(): ModelOption[] {
-  return [
+/**
+ * Runtime model choices for captures, including Pi's exact upstream target.
+ * A caller may request a large deterministic OpenCode catalog to exercise the
+ * virtualized picker without touching a real client, account, or network.
+ */
+export function captureModelCatalog(
+  options: { openCodeRouteCount?: number } = {},
+): ModelOption[] {
+  const catalog: ModelOption[] = [
     {
       provider: 'claude-cli',
       model: TODAY_CAPTURE_MODEL,
@@ -66,7 +74,34 @@ export function captureModelCatalog(): ModelOption[] {
       model: 'github-copilot/gpt-5',
       label: 'GitHub Copilot · GPT-5',
     },
+    {
+      provider: 'opencode-cli',
+      model: `${OPENCODE_CAPTURE_PROVIDER}/${OPENCODE_CAPTURE_MODEL}`,
+      label: 'OpenAI · GPT-5.4',
+    },
+    {
+      provider: 'opencode-cli',
+      model: 'anthropic/claude-sonnet-4-6',
+      label: 'Anthropic · Claude Sonnet 4.6',
+    },
   ];
+  const routeCount = Math.max(
+    2,
+    Math.min(20_000, Math.floor(options.openCodeRouteCount ?? 2)),
+  );
+  for (let index = 2; index < routeCount; index += 1) {
+    const upstream = index % 3 === 0
+      ? 'anthropic'
+      : index % 3 === 1
+        ? 'google'
+        : 'openai';
+    catalog.push({
+      provider: 'opencode-cli',
+      model: `${upstream}/capture-route-${String(index + 1).padStart(4, '0')}`,
+      label: `${upstream[0]!.toLocaleUpperCase()}${upstream.slice(1)} · Capture Route ${index + 1}`,
+    });
+  }
+  return catalog;
 }
 
 /** Provider/account state for captures, with no filesystem, CLI, or HTTP I/O. */
@@ -80,6 +115,7 @@ export function captureProviderAuthCoordinator(
           'codex-cli',
           'claude-cli',
           'pi-cli',
+          'opencode-cli',
         ]),
         todayRecaps: new Set<ProviderAuthId>(
           todayRecapsEnabled ? ['codex-cli', 'claude-cli'] : [],
@@ -121,6 +157,21 @@ export function captureProviderAuthCoordinator(
           provider: 'github-copilot',
           id: 'gpt-5',
           name: 'GPT-5',
+        },
+      ],
+    }),
+    inspectOpenCode: async () => ({
+      state: 'ready',
+      models: [
+        {
+          provider: OPENCODE_CAPTURE_PROVIDER,
+          id: OPENCODE_CAPTURE_MODEL,
+          name: 'GPT-5.4',
+        },
+        {
+          provider: 'anthropic',
+          id: 'claude-sonnet-4-6',
+          name: 'Claude Sonnet 4.6',
         },
       ],
     }),

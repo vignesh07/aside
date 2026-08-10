@@ -74,10 +74,63 @@ describe('search document extraction', () => {
       }),
       'pi',
     );
+    const opencode = extractSearchDocuments(
+      JSON.stringify({
+        schema: 'aside.opencode.v1',
+        type: 'tool',
+        timestamp: '2026-08-09T12:00:00Z',
+        tool: 'bash',
+        title: 'Run content search tests',
+        input: { command: 'npm test -- search-document' },
+        state: 'error',
+        error: 'OpenCode search test failed',
+      }),
+      'opencode',
+    );
 
     expect(claude[0]?.body).toContain('npm run content-search');
     expect(pi).toMatchObject([
       { kind: 'error', body: 'EADDRINUSE on the search worker' },
+    ]);
+    expect(opencode).toEqual([
+      expect.objectContaining({
+        kind: 'tool',
+        body: expect.stringContaining('npm test -- search-document'),
+      }),
+      expect.objectContaining({
+        kind: 'error',
+        body: 'OpenCode search test failed',
+      }),
+    ]);
+  });
+
+  it('indexes normalized OpenCode user and assistant text', () => {
+    const user = extractSearchDocuments(
+      JSON.stringify({
+        schema: 'aside.opencode.v1',
+        type: 'text',
+        role: 'user',
+        text: 'Add OpenCode session discovery',
+        timestamp: '2026-08-09T12:00:00Z',
+      }),
+      'opencode',
+    );
+    const assistant = extractSearchDocuments(
+      JSON.stringify({
+        schema: 'aside.opencode.v1',
+        type: 'text',
+        role: 'assistant',
+        text: 'Reading the local OpenCode database safely',
+        timestamp: '2026-08-09T12:00:01Z',
+      }),
+      'opencode',
+    );
+
+    expect(user).toMatchObject([
+      { kind: 'user', body: 'Add OpenCode session discovery' },
+    ]);
+    expect(assistant).toMatchObject([
+      { kind: 'assistant', body: 'Reading the local OpenCode database safely' },
     ]);
   });
 

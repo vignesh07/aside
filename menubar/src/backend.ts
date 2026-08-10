@@ -5,7 +5,11 @@
 // renderer over IPC. Keeping it Electron-free means it's unit-testable and the
 // reuse of the TS core is exercised without spinning up a window.
 
-import { scanAllSessions } from '../../dist/core/session-scanner.js';
+import {
+  mergeOpenCodeScanResult,
+  scanAllSessions,
+} from '../../dist/core/session-scanner.js';
+import { OpenCodeScanCoordinator } from '../../dist/core/opencode-scan-coordinator.js';
 import { SideChatService } from '../../dist/core/side-chat-service.js';
 import { SideChatEngine } from '../../dist/core/side-chat-engine.js';
 import { FileThreadStore } from '../../dist/core/thread-store.js';
@@ -33,9 +37,19 @@ import {
   flattenModelCatalog,
   flattenModelCatalogWithLocal,
 } from '../../dist/config/model-catalog.js';
-import { FLEET_THREAD_ID, sessionThreadId } from '../../dist/types/chat.js';
-import type { ModelOption } from '../../dist/config/model-catalog.js';
-import type { TrackedSession } from '../../dist/types/session.js';
+import {
+  FLEET_THREAD_ID,
+  scopeFromThreadId,
+  sessionThreadId,
+} from '../../dist/types/chat.js';
+import type {
+  LocalModelCatalogOptions,
+  ModelOption,
+} from '../../dist/config/model-catalog.js';
+import type {
+  SessionSource,
+  TrackedSession,
+} from '../../dist/types/session.js';
 import type { ChatTurn } from '../../dist/types/chat.js';
 import type {
   ActivityEventRecord,
@@ -194,7 +208,11 @@ export interface ThreadReviewViewState {
 
 /** Injection seam for tests (defaults wire up the real core). */
 export interface BackendDeps {
-  scan?: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
+  scan?: () => {
+    sessions: TrackedSession[];
+    jsonlPaths: Map<string, string>;
+    authoritativeSources?: Set<SessionSource>;
+  };
   service?: SideChatService;
   models?: () => ModelOption[];
   search?: ThreadSearchService;
@@ -209,10 +227,15 @@ const THREAD_REVIEW_EVIDENCE_LIMIT = 240;
 
 export class MenubarBackend {
   private readonly service: SideChatService;
-  private readonly scan: () => { sessions: TrackedSession[]; jsonlPaths: Map<string, string> };
+  private readonly scan: () => {
+    sessions: TrackedSession[];
+    jsonlPaths: Map<string, string>;
+    authoritativeSources?: Set<SessionSource>;
+  };
+  private readonly openCodeScan: OpenCodeScanCoordinator | null;
   /** Starts with the static registry, then refreshes runtime-discovered models. */
   private models: ModelOption[];
-  private readonly loadModels: (() => Promise<ModelOption[]>) | null;
+  private readonly loadModels: ((options?: LocalModelCatalogOptions) => Promise<ModelOption[]>) | null;
   private readonly storagePath: string;
   private readonly search?: ThreadSearchService;
   private readonly activity: ActivityLedger;
@@ -223,6 +246,7 @@ export class MenubarBackend {
   private readonly unsubscribeSearchStatus?: () => void;
   private artifacts: GeneratedArtifact[];
   private readonly analysisInFlight = new Map<string, Promise<unknown>>();
+  private readonly projectionActivityRollback = new Map<string, string>();
   private sessions: TrackedSession[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -233,9 +257,22 @@ export class MenubarBackend {
   ) {
     this.now = deps.now ?? (() => new Date());
     this.timeZone = deps.timeZone;
-    this.scan =
-      deps.scan ??
-      (() => scanAllSessions({}, { includeInternal: true }));
+    if (deps.scan) {
+      this.openCodeScan = null;
+      this.scan = deps.scan;
+    } else {
+      try {
+        this.openCodeScan = new OpenCodeScanCoordinator(
+          () => this.refresh(),
+          { includeInternal: true },
+        );
+      } catch {
+        // Session discovery is additive. A worker startup failure must not
+        // prevent the menubar app or the other vendor scanners from opening.
+        this.openCodeScan = null;
+      }
+      this.scan = () => this.scanSessionsOffMainThread();
+    }
     this.search = deps.search;
     this.unsubscribeSearchStatus = this.search?.onStatus(() => this.emit());
     this.models = (deps.models ?? flattenModelCatalog)();
@@ -269,11 +306,48 @@ export class MenubarBackend {
           onTranscript: () => this.emit(),
           onAttention: () => this.emit(),
           onThread: () => this.emit(),
-          onActivity: (id, activity) => {
-            const s = this.sessions.find((x) => x.id === id);
+          onProjectionReset: (id, source) => {
+            const session = this.sessions.find(
+              (candidate) => candidate.id === id && candidate.source === source,
+            );
+            if (session) {
+              const key = `${source}\u0000${id}`;
+              this.projectionActivityRollback.set(key, session.currentActivity);
+              session.currentActivity = '';
+            }
+            this.activity.beginAgentProjectionRebase(id, source);
+          },
+          onProjectionResetAbort: (id, source) => {
+            this.activity.abortAgentProjectionRebase(id, source);
+            const key = `${source}\u0000${id}`;
+            const prior = this.projectionActivityRollback.get(key);
+            const session = this.sessions.find(
+              (candidate) => candidate.id === id && candidate.source === source,
+            );
+            if (session && prior !== undefined) session.currentActivity = prior;
+            this.projectionActivityRollback.delete(key);
+          },
+          onProjectionResetComplete: (
+            id,
+            source,
+            canonicalComplete,
+            discardMissing,
+          ) => {
+            this.activity.finishAgentProjectionRebase(
+              id,
+              source,
+              canonicalComplete,
+              discardMissing,
+            );
+            this.projectionActivityRollback.delete(`${source}\u0000${id}`);
+          },
+          onActivity: (id, activity, source, seeded) => {
+            const s = this.sessions.find(
+              (candidate) => candidate.id === id && candidate.source === source,
+            );
             if (s) {
               s.currentActivity = activity;
-              s.status = 'active';
+              if (!seeded) s.status = 'active';
             }
             this.emit();
           },
@@ -302,6 +376,7 @@ export class MenubarBackend {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.openCodeScan?.dispose();
     this.service.dispose();
     this.activity.dispose();
     this.unsubscribeSearchStatus?.();
@@ -310,27 +385,50 @@ export class MenubarBackend {
 
   /** Open the fleet conversation or one durable session side thread. */
   selectThread(threadId: string): void {
-    const valid =
-      threadId === FLEET_THREAD_ID ||
-      this.sessions.some((session) => sessionThreadId(session.id) === threadId);
-    const nextThreadId = valid ? threadId : FLEET_THREAD_ID;
+    const scope = scopeFromThreadId(threadId);
+    const legacyMatches =
+      scope.kind === 'session' && !scope.source
+        ? this.sessions.filter((session) => session.id === scope.sessionId)
+        : [];
+    const canonicalLegacy =
+      legacyMatches.length === 1
+        ? sessionThreadId(legacyMatches[0]!.source, legacyMatches[0]!.id)
+        : null;
+    const validCanonical = this.sessions.some(
+      (session) =>
+        sessionThreadId(session.source, session.id) === threadId,
+    );
+    const nextThreadId =
+      threadId === FLEET_THREAD_ID
+        ? FLEET_THREAD_ID
+        : canonicalLegacy ?? (validCanonical ? threadId : FLEET_THREAD_ID);
     this.service.selectThread(nextThreadId);
     this.emit();
   }
 
   /** Mark evidence read only once the corresponding UI is actually visible. */
   markThreadViewed(threadId = this.service.getActiveThreadId()): void {
-    if (!threadId.startsWith('session:')) return;
-    const sessionId = threadId.slice('session:'.length);
-    const selected = this.sessions.find((session) => session.id === sessionId);
+    const scope = scopeFromThreadId(threadId);
+    if (scope.kind !== 'session') return;
+    const matches = this.sessions.filter(
+      (session) =>
+        session.id === scope.sessionId &&
+        (!scope.source || session.source === scope.source),
+    );
+    const selected = matches.length === 1 ? matches[0] : undefined;
     if (selected) this.activity.markViewed(selected);
   }
 
   /** Clear reviewed attention only through an explicit user action. */
   resolveThreadAttention(threadId = this.service.getActiveThreadId()): void {
-    if (!threadId.startsWith('session:')) return;
-    const sessionId = threadId.slice('session:'.length);
-    const selected = this.sessions.find((session) => session.id === sessionId);
+    const scope = scopeFromThreadId(threadId);
+    if (scope.kind !== 'session') return;
+    const matches = this.sessions.filter(
+      (session) =>
+        session.id === scope.sessionId &&
+        (!scope.source || session.source === scope.source),
+    );
+    const selected = matches.length === 1 ? matches[0] : undefined;
     if (selected) this.activity.markResolved(selected);
   }
 
@@ -361,10 +459,10 @@ export class MenubarBackend {
     this.emit();
   }
 
-  /** Refresh models discovered from Pi and Ollama without blocking startup. */
-  async refreshModels(): Promise<void> {
+  /** Refresh local models; OpenCode routes require an already-enabled account. */
+  async refreshModels(options: LocalModelCatalogOptions = {}): Promise<void> {
     if (!this.loadModels) return;
-    const next = await this.loadModels();
+    const next = await this.loadModels(options);
     this.models = next;
     this.emit();
   }
@@ -397,7 +495,7 @@ export class MenubarBackend {
     selection: MenubarSessionTarget,
   ): MenubarThreadTarget {
     const session = this.resolveReviewSession(selection);
-    return this.analysisTargetFor(sessionThreadId(session.id));
+    return this.analysisTargetFor(sessionThreadId(session.source, session.id));
   }
 
   /** Deterministic local Today state. This never calls a provider. */
@@ -477,7 +575,7 @@ export class MenubarBackend {
     target: MenubarThreadTarget,
   ): Promise<ThreadReviewViewState> {
     const session = this.resolveReviewSession(selection);
-    const resolvedThreadId = sessionThreadId(session.id);
+    const resolvedThreadId = sessionThreadId(session.source, session.id);
     const key = threadKey(session.source, session.id);
     const scope = `thread:${key}`;
     this.assertAnalysisTarget(resolvedThreadId, target);
@@ -526,7 +624,7 @@ export class MenubarBackend {
       .filter((session) => {
         const attention = this.activity.attentionFor(
           session,
-          this.service.getSessionAttention(session.id),
+          this.service.getSessionAttention(session),
         );
         return [
           session.projectName,
@@ -584,7 +682,7 @@ export class MenubarBackend {
     const now = Date.now();
     const active = this.service.getActiveThread();
     const sessions = this.sessions.map((s) => {
-      const explicit = this.service.getSessionAttention(s.id);
+      const explicit = this.service.getSessionAttention(s);
       const attention = this.activity.attentionFor(s, explicit);
       return {
         id: s.id,
@@ -597,7 +695,7 @@ export class MenubarBackend {
         status: s.status,
         currentActivity: s.currentActivity,
         idleForMs: Math.max(0, now - s.lastEventTime.getTime()),
-        threadId: sessionThreadId(s.id),
+        threadId: sessionThreadId(s.source, s.id),
         needsUser: explicit.needsUser,
         needsAttention: attention.kind !== 'none',
         attentionKind: attention.kind,
@@ -670,15 +768,45 @@ export class MenubarBackend {
 
   /** Rescan sessions, keep the selected thread valid, and re-sync the tailer. */
   refresh(): void {
-    const { sessions, jsonlPaths } = this.scan();
-    const previous = new Map(this.sessions.map((session) => [session.id, session]));
-    this.sessions = sessions.map((session) => {
-      const prior = previous.get(session.id);
+    const { sessions, jsonlPaths, authoritativeSources } = this.scan();
+    const authoritative = authoritativeSources ?? new Set<SessionSource>([
+      'claude',
+      'codex',
+      'pi',
+      'opencode',
+    ]);
+    const retained = this.sessions.filter(
+      (session) => !authoritative.has(session.source),
+    );
+    const effective = new Map(
+      sessions.map((session) => [
+        `${session.source}\u0000${session.id}`,
+        session,
+      ]),
+    );
+    for (const session of retained) {
+      const key = `${session.source}\u0000${session.id}`;
+      if (!effective.has(key)) effective.set(key, session);
+      if (!jsonlPaths.has(sessionThreadId(session.source, session.id))) {
+        jsonlPaths.set(
+          sessionThreadId(session.source, session.id),
+          session.jsonlPath,
+        );
+      }
+    }
+    const previous = new Map(
+      this.sessions.map((session) => [
+        `${session.source}\u0000${session.id}`,
+        session,
+      ]),
+    );
+    this.sessions = [...effective.values()].map((session) => {
+      const prior = previous.get(`${session.source}\u0000${session.id}`);
       return prior?.currentActivity
         ? { ...session, currentActivity: prior.currentActivity }
         : session;
     });
-    this.activity.syncSessions(this.sessions);
+    this.activity.syncSessions(this.sessions, authoritative);
     this.service.syncSessions(this.sessions, jsonlPaths);
     this.search?.syncSessions(
       this.sessions.map((session) => ({
@@ -694,15 +822,36 @@ export class MenubarBackend {
     );
     this.syncSideChats();
     const active = this.service.getActiveThread();
-    const activeSessionId =
-      active.scope.kind === 'session' ? active.scope.sessionId : null;
+    const activeSession =
+      active.scope.kind === 'session' && active.scope.source
+        ? active.scope
+        : null;
     if (
-      activeSessionId !== null &&
-      !sessions.some((session) => session.id === activeSessionId)
+      activeSession !== null &&
+      !this.sessions.some(
+        (session) =>
+          session.id === activeSession.sessionId &&
+          session.source === activeSession.source,
+      )
     ) {
       this.service.selectThread(FLEET_THREAD_ID);
     }
     this.emit();
+  }
+
+  private scanSessionsOffMainThread(): {
+    sessions: TrackedSession[];
+    jsonlPaths: Map<string, string>;
+    authoritativeSources: Set<SessionSource>;
+  } {
+    const result = scanAllSessions(
+      {},
+      { includeInternal: true, includeOpenCode: false },
+    );
+    const openCode = this.openCodeScan?.scan();
+    if (!openCode) return result;
+
+    return mergeOpenCodeScanResult(result, openCode, {});
   }
 
   private buildTodayView(nowMs: number): TodayViewState {
@@ -775,7 +924,9 @@ export class MenubarBackend {
       });
     if (!includedThreadKeys.includes(key)) includedThreadKeys.unshift(key);
     const artifact = this.latestThreadArtifact(key);
-    const analysisTarget = this.analysisTargetFor(sessionThreadId(session.id));
+    const analysisTarget = this.analysisTargetFor(
+      sessionThreadId(session.source, session.id),
+    );
     const artifactEvidence = this.resolveArtifactEvidence(artifact, events);
     const artifactEvidenceMissingCount = artifact
       ? artifact.evidenceIds.length - artifactEvidence.length
@@ -887,19 +1038,22 @@ export class MenubarBackend {
   ): TrackedSession {
     if (
       !selection ||
-      !['claude', 'codex', 'pi'].includes(selection.source) ||
+      !['claude', 'codex', 'pi', 'opencode'].includes(selection.source) ||
       typeof selection.threadId !== 'string' ||
       !selection.threadId.startsWith('session:')
     ) {
       throw new Error('Choose a valid agent thread to review.');
     }
-    const sessionId = selection.threadId.slice('session:'.length);
-    if (!sessionId || sessionThreadId(sessionId) !== selection.threadId) {
+    const scope = scopeFromThreadId(selection.threadId);
+    if (
+      scope.kind !== 'session' ||
+      (scope.source !== null && scope.source !== selection.source)
+    ) {
       throw new Error('Choose a valid agent thread to review.');
     }
     const matches = this.sessions.filter(
       (session) =>
-        session.id === sessionId &&
+        session.id === scope.sessionId &&
         session.source === selection.source,
     );
     if (matches.length !== 1) {
@@ -1009,9 +1163,10 @@ export class MenubarBackend {
     const chats: IndexableSideChat[] = this.service
       .getThreads()
       .flatMap((thread): IndexableSideChat[] =>
-        thread.scope.kind === 'session'
+        thread.scope.kind === 'session' && thread.scope.source
           ? [{
               sessionId: thread.scope.sessionId,
+              source: thread.scope.source,
               updatedAt: thread.updatedAt.toISOString(),
               turns: thread.turns.map((turn) => ({
                 role: turn.role,

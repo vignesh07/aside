@@ -49,4 +49,6 @@ export interface WorldSnapshot {
    * slice in the prompt — it never hides the other sessions.
    */
   focusId: string | null;
+  /** Provider namespace for `focusId`; raw session ids can collide across tools. */
+  focusSource: SessionSource | null;
 }

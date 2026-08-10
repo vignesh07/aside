@@ -1,5 +1,6 @@
 import {
   getProviders,
+  listConfiguredOpenCodeModels,
   listConfiguredPiModels,
   listInstalledModels,
 } from '../core/providers/index.js';
@@ -11,7 +12,12 @@ export interface ModelOption {
   label?: string;
 }
 
-interface ConfiguredPiModel {
+export interface LocalModelCatalogOptions {
+  /** OpenCode discovery invokes credential-backed provider loaders. */
+  includeOpenCode?: boolean;
+}
+
+interface ConfiguredBrokerModel {
   provider: string;
   id: string;
   name: string;
@@ -32,19 +38,35 @@ const PI_PROVIDER_LABELS: Readonly<Record<string, string>> = {
 
 /** Keep Pi's upstream recipient visible instead of presenting Pi as the cloud. */
 export function configuredPiModelOptions(
-  models: readonly ConfiguredPiModel[],
+  models: readonly ConfiguredBrokerModel[],
+): ModelOption[] {
+  // Pi reports its selected model first, so that ordering is meaningful.
+  return configuredBrokerModelOptions('pi-cli', models, true);
+}
+
+export function configuredOpenCodeModelOptions(
+  models: readonly ConfiguredBrokerModel[],
+): ModelOption[] {
+  // `opencode models` is a catalog, not an authoritative default selection.
+  return configuredBrokerModelOptions('opencode-cli', models, false);
+}
+
+function configuredBrokerModelOptions(
+  provider: 'pi-cli' | 'opencode-cli',
+  models: readonly ConfiguredBrokerModel[],
+  recommendFirst: boolean,
 ): ModelOption[] {
   return models.map((model, index) => ({
-    provider: 'pi-cli',
-    // Pin both halves. A bare model id could silently resolve to another Pi
-    // provider with a model of the same name.
+    provider,
+    // Pin both halves. A bare model id could silently resolve to another
+    // upstream provider with a model of the same name.
     model: `${model.provider}/${model.id}`,
-    label: `${piProviderLabel(model.provider)} · ${model.name}`,
-    ...(index === 0 ? { recommended: true } : {}),
+    label: `${upstreamProviderLabel(model.provider)} · ${model.name}`,
+    ...(recommendFirst && index === 0 ? { recommended: true } : {}),
   }));
 }
 
-function piProviderLabel(provider: string): string {
+function upstreamProviderLabel(provider: string): string {
   const known = PI_PROVIDER_LABELS[provider.toLowerCase()];
   if (known) return known;
   return provider
@@ -80,28 +102,33 @@ export function flattenModelCatalog(): ModelOption[] {
  * The catalog, plus models discovered from the user's local runtimes.
  *
  * The static Ollama entries are guesses at common models; this reports what the
- * user really pulled. Pi is different: Aside exposes the credential-backed
- * models Pi reports as available while keeping every upstream provider/model
- * pair exact. Both lookups are best-effort.
+ * user really pulled. Pi and OpenCode expose client-owned model catalogs;
+ * Aside keeps every upstream provider/model pair exact. All lookups are
+ * best-effort.
  */
-export async function flattenModelCatalogWithLocal(): Promise<ModelOption[]> {
+export async function flattenModelCatalogWithLocal(
+  options: LocalModelCatalogOptions = {},
+): Promise<ModelOption[]> {
   const base = flattenModelCatalog();
-  const [installed, configuredPi] = await Promise.all([
+  const [installed, configuredPi, configuredOpenCode] = await Promise.all([
     listInstalledModels(),
     listConfiguredPiModels(),
+    options.includeOpenCode ? listConfiguredOpenCodeModels() : Promise.resolve([]),
   ]);
 
-  // Pi has no useful static guess: each available upstream provider/model is a
-  // privacy and routing boundary. Real Ollama models replace guesses only when
-  // detected.
+  // Brokered model catalogs have no useful static guess: each upstream
+  // provider/model is a privacy and routing boundary. Real Ollama models
+  // replace guesses only when detected.
   const withoutDynamicEntries = base.filter(
     (option) =>
       option.provider !== 'pi-cli' &&
+      option.provider !== 'opencode-cli' &&
       (installed.length === 0 || option.provider !== 'ollama'),
   );
   return [
     ...withoutDynamicEntries,
     ...configuredPiModelOptions(configuredPi),
+    ...configuredOpenCodeModelOptions(configuredOpenCode),
     ...installed.map((m, i) => ({
       provider: 'ollama',
       model: m.id,

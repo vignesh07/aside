@@ -91,7 +91,17 @@ function coordinatorWith(
     resolveBinary: (provider) =>
       provider === 'codex-cli' ? '/test/bin/codex' : '/test/bin/claude',
     runCommand,
-    inspectPi: async () => ({ state: 'ready' }),
+    inspectPi: async () => ({
+      state: 'ready',
+      models: [{ provider: 'openai-codex', id: 'gpt-5.4', name: 'GPT-5.4' }],
+    }),
+    inspectOpenCode: async (_env, options) =>
+      options?.includeModels
+        ? {
+            state: 'ready' as const,
+            models: [{ provider: 'openai', id: 'gpt-5.4', name: 'GPT-5.4' }],
+          }
+        : { state: 'ready' as const },
     buildEnvironment: () => ({ PATH: '/test/bin' }),
     fetch: readyOllamaFetch(),
     ollamaHost: () => 'http://127.0.0.1:11434',
@@ -100,7 +110,7 @@ function coordinatorWith(
 }
 
 describe('provider probe and Aside consent are separate', () => {
-  it('does not auto-enable existing vendor login or Pi configuration', async () => {
+  it('does not auto-enable existing vendor login or broker configuration', async () => {
     const store = tempStore();
     const auth = coordinatorWith(store, async (command) =>
       signedInResult(commandProvider(command)),
@@ -111,6 +121,12 @@ describe('provider probe and Aside consent are separate', () => {
       { provider: 'codex-cli', state: 'signed_in', enabled: false },
       { provider: 'claude-cli', state: 'signed_in', enabled: false },
       { provider: 'pi-cli', state: 'configured', enabled: false },
+      {
+        provider: 'opencode-cli',
+        state: 'signed_out',
+        enabled: false,
+        reason: 'access_not_granted',
+      },
       { provider: 'ollama', state: 'local_ready', enabled: false },
     ]);
   });
@@ -375,6 +391,127 @@ describe('connect and disconnect', () => {
     expect(store.load().todayRecaps).toContain('pi-cli');
   });
 
+  it('records OpenCode consent only when OpenCode reports configured models', async () => {
+    const store = tempStore();
+    const runCommand = vi.fn(async () => result());
+    const inspectOpenCode = vi.fn(async (
+      env?: NodeJS.ProcessEnv,
+      options?: { includeModels?: boolean },
+    ) => {
+      expect(env).toEqual({ PATH: '/test/bin' });
+      expect(options).toEqual({ includeModels: true });
+      return {
+        state: 'ready',
+        models: [{ provider: 'openai', id: 'gpt-5.4', name: 'GPT-5.4' }],
+      } as const;
+    });
+    const auth = coordinatorWith(store, runCommand, { inspectOpenCode });
+
+    await expect(auth.connect('opencode-cli')).resolves.toEqual({
+      provider: 'opencode-cli',
+      state: 'configured',
+      enabled: true,
+    });
+    expect(inspectOpenCode).toHaveBeenCalledOnce();
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(store.load().enabled).toContain('opencode-cli');
+  });
+
+  it('keeps authenticated OpenCode discovery enabled after explicit consent', async () => {
+    const store = tempStore();
+    const inspectOpenCode = vi.fn(async (
+      _env?: NodeJS.ProcessEnv,
+      options?: { includeModels?: boolean },
+    ) => options?.includeModels
+      ? {
+          state: 'ready' as const,
+          models: [{ provider: 'openai', id: 'gpt-5.4', name: 'GPT-5.4' }],
+        }
+      : { state: 'ready' as const });
+    const auth = coordinatorWith(store, async () => result(), { inspectOpenCode });
+
+    await auth.connect('opencode-cli');
+    await expect(auth.getStatuses()).resolves.toContainEqual({
+      provider: 'opencode-cli',
+      state: 'configured',
+      enabled: true,
+    });
+    expect(inspectOpenCode).toHaveBeenNthCalledWith(
+      1,
+      { PATH: '/test/bin' },
+      { includeModels: true },
+    );
+    expect(inspectOpenCode).toHaveBeenNthCalledWith(
+      2,
+      { PATH: '/test/bin' },
+      { includeModels: true },
+    );
+  });
+
+  it.each([
+    [
+      'unconfigured',
+      'signed_out',
+      'no_models',
+      'OpenCode has no available models. Configure a provider in OpenCode and try again.',
+    ],
+    [
+      'unsupported',
+      'error',
+      'client_unsupported',
+      'This Aside release supports only the audited OpenCode 1.18.15 build.',
+    ],
+    [
+      'auth_unsupported',
+      'error',
+      'auth_configuration_unsupported',
+      'OAuth and well-known OpenCode routes are not supported in this release. Use Zen or a provider API-key route configured in OpenCode.',
+    ],
+    [
+      'routes_unsupported',
+      'error',
+      'no_audited_models',
+      'Aside found OpenCode models, but none use a source-audited route.',
+    ],
+    [
+      'error',
+      'error',
+      'probe_failed',
+      'Aside could not inspect OpenCode safely. Try again.',
+    ],
+  ] as const)(
+    'does not enable OpenCode when inspection reports %s and preserves its safe diagnostic',
+    async (inspectionState, state, reason, message) => {
+      const store = tempStore();
+      const runCommand = vi.fn(async () => result());
+      const auth = coordinatorWith(store, runCommand, {
+        inspectOpenCode: async (_env, options) =>
+          options?.includeModels
+            ? { state: inspectionState }
+            : { state: 'ready' },
+      });
+
+      await expect(auth.probe('opencode-cli')).resolves.toEqual({
+        provider: 'opencode-cli',
+        state: 'signed_out',
+        enabled: false,
+        reason: 'access_not_granted',
+      });
+      await expect(auth.connect('opencode-cli')).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        message,
+        status: {
+          provider: 'opencode-cli',
+          state,
+          enabled: false,
+          reason,
+        },
+      });
+      expect(store.load().enabled).not.toContain('opencode-cli');
+      expect(runCommand).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ['unconfigured', 'signed_out', 'no_models'],
     ['unsupported', 'error', 'client_too_old'],
@@ -420,6 +557,31 @@ describe('connect and disconnect', () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  it('reports missing OpenCode separately and never tries to install or log in', async () => {
+    const runCommand = vi.fn(async () => result());
+    const auth = coordinatorWith(tempStore(), runCommand, {
+      inspectOpenCode: async () => ({ state: 'missing' }),
+    });
+
+    await expect(auth.probe('opencode-cli')).resolves.toEqual({
+      provider: 'opencode-cli',
+      state: 'missing',
+      enabled: false,
+      reason: 'executable_missing',
+    });
+    await expect(auth.connect('opencode-cli')).rejects.toMatchObject({
+      code: 'provider_missing',
+      message: 'OpenCode is not installed or reachable.',
+      status: {
+        provider: 'opencode-cli',
+        state: 'missing',
+        enabled: false,
+        reason: 'executable_missing',
+      },
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it('disconnects Pi from Aside without invoking Pi logout', async () => {
     const store = tempStore();
     store.setEnabled('pi-cli', true);
@@ -438,6 +600,34 @@ describe('connect and disconnect', () => {
       todayRecaps: new Set(),
     });
     expect(inspectPi).toHaveBeenCalledOnce();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it('disconnects OpenCode from Aside without invoking OpenCode logout', async () => {
+    const store = tempStore();
+    store.setEnabled('opencode-cli', true);
+    store.setTodayRecapsEnabled('opencode-cli', true);
+    const runCommand = vi.fn(async () => result());
+    const inspectOpenCode = vi.fn(async (
+      _env?: NodeJS.ProcessEnv,
+      options?: { includeModels?: boolean },
+    ) => {
+      expect(options).toEqual({ includeModels: false });
+      return { state: 'ready' } as const;
+    });
+    const auth = coordinatorWith(store, runCommand, { inspectOpenCode });
+
+    await expect(auth.disconnect('opencode-cli')).resolves.toEqual({
+      provider: 'opencode-cli',
+      state: 'signed_out',
+      enabled: false,
+      reason: 'access_not_granted',
+    });
+    expect(store.load()).toEqual({
+      enabled: new Set(),
+      todayRecaps: new Set(),
+    });
+    expect(inspectOpenCode).toHaveBeenCalledOnce();
     expect(runCommand).not.toHaveBeenCalled();
   });
 
@@ -534,12 +724,14 @@ describe('private atomic consent storage', () => {
         'codex-cli': true,
         'claude-cli': false,
         'pi-cli': false,
+        'opencode-cli': false,
         ollama: true,
       },
       todayRecaps: {
         'codex-cli': false,
         'claude-cli': false,
         'pi-cli': false,
+        'opencode-cli': false,
         ollama: false,
       },
     });

@@ -108,7 +108,7 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     const signature = sessions
       .map(
         (session) =>
-          `${session.source}\u0000${session.sessionId}\u0000${session.jsonlPath}\u0000${session.lastEventMs}`,
+          `${session.source}\u0000${session.sessionId}\u0000${session.jsonlPath}\u0000${session.lastEventMs}\u0000${fileIdentity(session.jsonlPath)}`,
       )
       .join('\u0001');
     if (signature === this.sessionSignature) return;
@@ -122,7 +122,7 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
     const signature = chats
       .map(
         (chat) =>
-          `${chat.sessionId}\u0000${chat.updatedAt}\u0000${chat.turns.length}`,
+          `${chat.source}\u0000${chat.sessionId}\u0000${chat.updatedAt}\u0000${chat.turns.length}`,
       )
       .join('\u0001');
     if (signature === this.sideChatSignature) return;
@@ -181,6 +181,15 @@ export class ThreadSearchCoordinator implements ThreadSearchService {
   private failPendingUsage(error: Error): void {
     for (const pending of this.pendingUsage.values()) pending.reject(error);
     this.pendingUsage.clear();
+  }
+}
+
+function fileIdentity(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return 'missing';
   }
 }
 

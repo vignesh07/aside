@@ -28,18 +28,30 @@ export const MIN_DETAIL_CHARS = 400;
 /** Ranking weights for the detail tier. Focus outranks liveness; liveness outranks history. */
 const WEIGHTS = { focus: 6, active: 3, idle: 1.5, history: 0.5 } as const;
 
-function weightFor(session: SessionSnapshot, focusId: string | null): number {
-  if (session.id === focusId) return WEIGHTS.focus;
+function isFocused(
+  session: SessionSnapshot,
+  focusId: string | null,
+  focusSource: SessionSnapshot['source'] | null,
+): boolean {
+  return session.id === focusId && session.source === focusSource;
+}
+
+function weightFor(
+  session: SessionSnapshot,
+  focusId: string | null,
+  focusSource: SessionSnapshot['source'] | null,
+): number {
+  if (isFocused(session, focusId, focusSource)) return WEIGHTS.focus;
   if (session.status === 'active') return WEIGHTS.active;
   if (session.status === 'idle') return WEIGHTS.idle;
   return WEIGHTS.history;
 }
 
 export interface BudgetAllocation {
-  /** Chars granted per session id. Sessions absent from this map get roster-only. */
-  perSession: Map<string, number>;
-  /** Ids that had transcript but lost their detail slot to the budget. */
-  omitted: string[];
+  /** Chars granted per session. Object keys preserve provider-qualified identity. */
+  perSession: Map<SessionSnapshot, number>;
+  /** Sessions that had transcript but lost their detail slot to the budget. */
+  omitted: SessionSnapshot[];
 }
 
 /**
@@ -54,26 +66,30 @@ export interface BudgetAllocation {
 export function allocateTranscriptBudget(
   sessions: SessionSnapshot[],
   focusId: string | null,
+  focusSource: SessionSnapshot['source'] | null,
   totalChars: number = TRANSCRIPT_BUDGET_CHARS,
 ): BudgetAllocation {
   const candidates = sessions.filter((s) => s.transcript.length > 0);
-  const perSession = new Map<string, number>();
+  const perSession = new Map<SessionSnapshot, number>();
   if (candidates.length === 0 || totalChars < MIN_DETAIL_CHARS) {
-    return { perSession, omitted: candidates.map((s) => s.id) };
+    return { perSession, omitted: candidates };
   }
 
-  let pool = candidates.map((s) => ({ id: s.id, weight: weightFor(s, focusId) }));
+  let pool = candidates.map((session) => ({
+    session,
+    weight: weightFor(session, focusId, focusSource),
+  }));
   for (;;) {
     const totalWeight = pool.reduce((sum, p) => sum + p.weight, 0);
     const shares = pool.map((p) => ({ ...p, share: Math.floor((totalChars * p.weight) / totalWeight) }));
     const starved = shares.some((s) => s.share < MIN_DETAIL_CHARS);
     if (!starved) {
-      for (const s of shares) perSession.set(s.id, s.share);
+      for (const s of shares) perSession.set(s.session, s.share);
       break;
     }
     if (pool.length === 1) {
       // A single candidate always gets the whole budget rather than nothing.
-      perSession.set(pool[0]!.id, totalChars);
+      perSession.set(pool[0]!.session, totalChars);
       break;
     }
     // Drop the weakest candidate and re-split. Ties break on the later session,
@@ -85,7 +101,7 @@ export function allocateTranscriptBudget(
     pool = pool.filter((_, i) => i !== weakest);
   }
 
-  const omitted = candidates.filter((s) => !perSession.has(s.id)).map((s) => s.id);
+  const omitted = candidates.filter((s) => !perSession.has(s));
   return { perSession, omitted };
 }
 
@@ -122,10 +138,12 @@ export function formatDuration(ms: number): string {
  */
 export function renderRoster(world: WorldSnapshot): string {
   if (world.totalSessionCount === 0) {
-    return 'No Claude Code, Codex, or Pi threads were discovered on this machine.';
+    return 'No Claude Code, Codex, Pi, or OpenCode threads were discovered on this machine.';
   }
   const lines = world.sessions.map((s) => {
-    const focus = s.id === world.focusId ? ' <- user is focused here' : '';
+    const focus = isFocused(s, world.focusId, world.focusSource)
+      ? ' <- user is focused here'
+      : '';
     const branch = s.gitBranch ? ` (${s.gitBranch})` : '';
     const quiet = `quiet for ${formatDuration(s.idleForMs)}`;
     const activity = s.currentActivity ? ` | last seen: ${s.currentActivity}` : '';
@@ -133,7 +151,7 @@ export function renderRoster(world: WorldSnapshot): string {
     const title = s.title && s.title.toLowerCase() !== s.projectName.toLowerCase()
       ? ` — ${s.title}`
       : '';
-    return `- [${s.id}] ${s.source} · ${s.projectName}${branch}${title} | ${s.status.toUpperCase()}, ${quiet}${ctx}${activity}${focus}`;
+    return `- [${s.source}:${s.id}] ${s.projectName}${branch}${title} | ${s.status.toUpperCase()}, ${quiet}${ctx}${activity}${focus}`;
   });
   const count =
     world.sessions.length === world.totalSessionCount
@@ -151,17 +169,22 @@ export function renderDetail(
   world: WorldSnapshot,
   totalChars: number = TRANSCRIPT_BUDGET_CHARS,
 ): string {
-  const { perSession, omitted } = allocateTranscriptBudget(world.sessions, world.focusId, totalChars);
+  const { perSession, omitted } = allocateTranscriptBudget(
+    world.sessions,
+    world.focusId,
+    world.focusSource,
+    totalChars,
+  );
   const blocks: string[] = [];
 
   for (const session of world.sessions) {
-    const budget = perSession.get(session.id);
+    const budget = perSession.get(session);
     if (!budget) continue;
     const lines = tailWithinBudget(session.transcript, budget);
     if (lines.length === 0) continue;
     const branch = session.gitBranch ? ` (${session.gitBranch})` : '';
     blocks.push(
-      `--- [${session.id}] ${session.projectName}${branch} — most recent activity, oldest first ---\n${lines.join('\n')}`,
+      `--- [${session.source}:${session.id}] ${session.projectName}${branch} — most recent activity, oldest first ---\n${lines.join('\n')}`,
     );
   }
 

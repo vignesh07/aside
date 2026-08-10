@@ -1,4 +1,4 @@
-export type SessionSource = 'claude' | 'codex' | 'pi';
+export type SessionSource = 'claude' | 'codex' | 'pi' | 'opencode';
 
 /**
  * Activity inferred from transcript modification time.

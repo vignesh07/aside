@@ -9,6 +9,7 @@ export const PROVIDER_AUTH_IDS = [
   'codex-cli',
   'claude-cli',
   'pi-cli',
+  'opencode-cli',
   'ollama',
 ] as const;
 
@@ -36,7 +37,11 @@ export type ProviderAuthReason =
   | 'executable_missing'
   | 'local_unreachable'
   | 'no_models'
+  | 'access_not_granted'
+  | 'no_audited_models'
   | 'client_too_old'
+  | 'client_unsupported'
+  | 'auth_configuration_unsupported'
   | 'account_login_required'
   | 'probe_failed'
   | 'consent_unavailable';
@@ -64,12 +69,39 @@ export type ProviderAuthErrorCode =
 /** An IPC-safe error whose message never includes child-process output. */
 export class ProviderAuthError extends Error {
   readonly name = 'ProviderAuthError';
+  /** Optional renderer-safe result of an explicit provider probe. */
+  readonly status?: ProviderAuthStatus;
 
   constructor(
     readonly code: ProviderAuthErrorCode,
     readonly provider?: ProviderAuthId,
+    status?: ProviderAuthStatus,
   ) {
-    super(messageFor(code, provider));
+    let safeStatus: ProviderAuthStatus | undefined;
+    if (status && status.provider === provider) {
+      safeStatus = { ...status, enabled: false };
+    }
+    super(safeStatus ? messageForStatus(safeStatus) : messageFor(code, provider));
+    this.status = safeStatus;
+  }
+}
+
+function messageForStatus(status: ProviderAuthStatus): string {
+  switch (status.reason) {
+    case 'no_models':
+      return 'OpenCode has no available models. Configure a provider in OpenCode and try again.';
+    case 'no_audited_models':
+      return 'Aside found OpenCode models, but none use a source-audited route.';
+    case 'client_unsupported':
+      return 'This Aside release supports only the audited OpenCode 1.18.15 build.';
+    case 'auth_configuration_unsupported':
+      return 'OAuth and well-known OpenCode routes are not supported in this release. Use Zen or a provider API-key route configured in OpenCode.';
+    case 'probe_failed':
+      return 'Aside could not inspect OpenCode safely. Try again.';
+    case 'executable_missing':
+      return 'OpenCode is not installed or reachable.';
+    default:
+      return messageFor('provider_unavailable', status.provider);
   }
 }
 
@@ -81,9 +113,11 @@ function messageFor(code: ProviderAuthErrorCode, provider?: ProviderAuthId): str
         ? 'Claude'
         : provider === 'pi-cli'
           ? 'Pi'
-          : provider === 'ollama'
-            ? 'Ollama'
-            : 'provider';
+          : provider === 'opencode-cli'
+            ? 'OpenCode'
+            : provider === 'ollama'
+              ? 'Ollama'
+              : 'provider';
   switch (code) {
     case 'invalid_provider':
       return 'That provider is not supported.';

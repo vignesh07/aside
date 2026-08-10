@@ -9,10 +9,11 @@ import type {
   ThreadActivityCursor,
 } from '../../dist/types/activity.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 interface EventRow {
   seq: number;
+  canonical_order: number;
   event_id: string;
   thread_key: string;
   source: ActivityEventRecord['source'];
@@ -69,7 +70,9 @@ export class ActivityDatabase implements ActivityLedgerStore {
 
   load(): ActivityLedgerState {
     const events = this.db
-      .prepare('SELECT * FROM activity_events ORDER BY seq ASC')
+      .prepare(
+        'SELECT * FROM activity_events ORDER BY thread_key, canonical_order, seq',
+      )
       .all() as unknown as EventRow[];
     const cursors = this.db
       .prepare('SELECT * FROM activity_threads ORDER BY thread_key ASC')
@@ -89,17 +92,18 @@ export class ActivityDatabase implements ActivityLedgerStore {
     if (events.length === 0) return;
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO activity_events (
-        seq, event_id, thread_key, source, session_id,
+        seq, canonical_order, event_id, thread_key, source, session_id,
         parent_thread_key, root_thread_key, project_name, project_path, title,
         occurred_at_ms, observed_at_ms, kind, origin_kind, lifecycle, severity, summary,
         origin_id, evidence_hash, seeded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       for (const event of events) {
         insert.run(
           event.seq,
+          event.canonicalOrder ?? event.seq,
           event.eventId,
           event.threadKey,
           event.source,
@@ -156,6 +160,64 @@ export class ActivityDatabase implements ActivityLedgerStore {
     }
   }
 
+  deleteThreadEvents(threadKey: string): void {
+    this.db
+      .prepare('DELETE FROM activity_events WHERE thread_key = ?')
+      .run(threadKey);
+  }
+
+  replaceThreadEvents(
+    threadKey: string,
+    events: ActivityEventRecord[],
+  ): void {
+    const insert = this.db.prepare(`
+      INSERT INTO activity_events (
+        seq, canonical_order, event_id, thread_key, source, session_id,
+        parent_thread_key, root_thread_key, project_name, project_path, title,
+        occurred_at_ms, observed_at_ms, kind, origin_kind, lifecycle, severity, summary,
+        origin_id, evidence_hash, seeded
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .prepare('DELETE FROM activity_events WHERE thread_key = ?')
+        .run(threadKey);
+      for (const event of events) {
+        if (event.threadKey !== threadKey) {
+          throw new Error('Activity replacement crossed thread boundaries.');
+        }
+        insert.run(
+          event.seq,
+          event.canonicalOrder ?? event.seq,
+          event.eventId,
+          event.threadKey,
+          event.source,
+          event.sessionId,
+          event.parentThreadKey ?? null,
+          event.rootThreadKey ?? null,
+          event.projectName,
+          event.projectPath,
+          event.title,
+          event.occurredAtMs,
+          event.observedAtMs,
+          event.kind,
+          event.originKind ?? null,
+          event.lifecycle,
+          event.severity,
+          event.summary,
+          event.originId ?? null,
+          event.evidenceHash,
+          event.seeded ? 1 : 0,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   prune(cutoffOccurredAtMs: number, keepNewest: number): void {
     this.db
       .prepare('DELETE FROM activity_events WHERE occurred_at_ms < ?')
@@ -184,6 +246,7 @@ function initializeSchema(db: DatabaseSync): void {
     db.exec(`
       CREATE TABLE IF NOT EXISTS activity_events (
         seq INTEGER NOT NULL UNIQUE,
+        canonical_order INTEGER NOT NULL,
         event_id TEXT PRIMARY KEY,
         thread_key TEXT NOT NULL,
         source TEXT NOT NULL,
@@ -215,7 +278,7 @@ function initializeSchema(db: DatabaseSync): void {
         viewed_through_seq INTEGER NOT NULL,
         resolved_through_seq INTEGER NOT NULL
       );
-      PRAGMA user_version = 3;
+      PRAGMA user_version = 4;
     `);
     return;
   }
@@ -249,12 +312,29 @@ function initializeSchema(db: DatabaseSync): void {
       db.exec('ROLLBACK');
       throw error;
     }
+    version = 3;
+  }
+  if (version === 3) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(`
+        ALTER TABLE activity_events
+          ADD COLUMN canonical_order INTEGER NOT NULL DEFAULT 0;
+        UPDATE activity_events SET canonical_order = seq;
+        PRAGMA user_version = 4;
+      `);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
   }
 }
 
 function deserializeEvent(row: EventRow): ActivityEventRecord {
   return {
     seq: row.seq,
+    canonicalOrder: row.canonical_order,
     eventId: row.event_id,
     threadKey: row.thread_key,
     source: row.source,

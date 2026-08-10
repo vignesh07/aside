@@ -26,7 +26,7 @@ import type {
   ThreadSearchResult,
 } from './search-types.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 const USAGE_RETENTION_DAYS = 370;
 const USAGE_RETENTION_MS = USAGE_RETENTION_DAYS * 24 * 60 * 60 * 1_000;
 const READ_CHUNK_BYTES = 1024 * 1024;
@@ -69,6 +69,19 @@ interface SnippetRow {
   kind: SearchMatchKind;
   snippet: string;
   score: number;
+}
+
+interface UsageOwnerAggregateRow {
+  timestamp_ms: number | null;
+  provider: string;
+  model: string;
+  local: number | null;
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  cache_write_5m_input_tokens: number | null;
+  cache_write_1h_input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_output_tokens: number | null;
 }
 
 export interface SearchWriterProgress {
@@ -206,7 +219,12 @@ export class ThreadSearchReader {
 export class ThreadSearchWriter {
   private readonly db: DatabaseSync;
   private readonly insertDocument: StatementSync;
-  private readonly insertUsageSample: StatementSync;
+  private readonly ensureUsageSample: StatementSync;
+  private readonly insertUsageOwner: StatementSync;
+  private readonly updateUsageSample: StatementSync;
+  /** Complete latest side-chat snapshot, including chats whose transcript row
+   * has not appeared yet. */
+  private sideChats = new Map<string, IndexableSideChat>();
   private changedDocuments = 0;
 
   constructor(readonly location: string) {
@@ -233,8 +251,8 @@ export class ThreadSearchWriter {
          error_text
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    this.insertUsageSample = this.db.prepare(
-      `INSERT INTO token_usage_samples(
+    this.ensureUsageSample = this.db.prepare(
+      `INSERT OR IGNORE INTO token_usage_samples(
          sample_key,
          timestamp_ms,
          provider,
@@ -246,8 +264,24 @@ export class ThreadSearchWriter {
          cache_write_1h_input_tokens,
          output_tokens,
          reasoning_output_tokens
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(sample_key) DO UPDATE SET
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.insertUsageOwner = this.db.prepare(
+      `INSERT INTO token_usage_sample_owners(
+         thread_key,
+         sample_key,
+         timestamp_ms,
+         provider,
+         model,
+         local,
+         input_tokens,
+         cached_input_tokens,
+         cache_write_5m_input_tokens,
+         cache_write_1h_input_tokens,
+         output_tokens,
+         reasoning_output_tokens
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(thread_key, sample_key) DO UPDATE SET
          provider = CASE
            WHEN excluded.timestamp_ms < timestamp_ms
              AND excluded.provider <> 'unknown'
@@ -284,6 +318,20 @@ export class ThreadSearchWriter {
            reasoning_output_tokens,
            excluded.reasoning_output_tokens
          )`,
+    );
+    this.updateUsageSample = this.db.prepare(
+      `UPDATE token_usage_samples
+       SET timestamp_ms = ?,
+           provider = ?,
+           model = ?,
+           local = ?,
+           input_tokens = ?,
+           cached_input_tokens = ?,
+           cache_write_5m_input_tokens = ?,
+           cache_write_1h_input_tokens = ?,
+           output_tokens = ?,
+           reasoning_output_tokens = ?
+       WHERE sample_key = ?`,
     );
   }
 
@@ -347,11 +395,25 @@ export class ThreadSearchWriter {
       });
       await yieldToWorkerLoop();
     }
+    // A side-chat snapshot can arrive before its session's transcript row.
+    // Reconcile again after creating rows so that message ordering cannot make
+    // a durable side chat permanently invisible to search.
+    this.applySideChats();
     this.pruneExpiredUsageSamples();
   }
 
   syncSideChats(chats: IndexableSideChat[]): void {
-    const seenSessionIds = new Set(chats.map((chat) => chat.sessionId));
+    this.sideChats = new Map(
+      chats.map((chat) => [sideChatThreadKey(chat), chat]),
+    );
+    this.applySideChats();
+  }
+
+  private applySideChats(): void {
+    const chats = [...this.sideChats.values()];
+    const seenThreadKeys = new Set(
+      chats.map(sideChatThreadKey),
+    );
     const transcriptRows = this.db
       .prepare(
         `SELECT thread_key, session_id, sidechat_signature
@@ -367,7 +429,7 @@ export class ThreadSearchWriter {
     try {
       for (const chat of chats) {
         const matching = transcriptRows.filter(
-          (row) => row.session_id === chat.sessionId,
+          (row) => row.thread_key === sideChatThreadKey(chat),
         );
         const signature = sideChatSignature(chat);
         for (const row of matching) {
@@ -401,7 +463,7 @@ export class ThreadSearchWriter {
 
       for (const row of transcriptRows) {
         if (
-          seenSessionIds.has(row.session_id) ||
+          seenThreadKeys.has(row.thread_key) ||
           row.sidechat_signature.length === 0
         ) {
           continue;
@@ -442,6 +504,7 @@ export class ThreadSearchWriter {
       this.db.exec('DELETE FROM search_transcripts');
       this.db.exec('DELETE FROM token_usage_samples');
       this.db.exec('COMMIT');
+      this.sideChats.clear();
       this.changedDocuments = 0;
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -538,6 +601,7 @@ export class ThreadSearchWriter {
         );
       existing = this.transcript(key);
     } else if (mustReset) {
+      const ownedUsageSampleKeys = this.usageSampleKeysForThread(key);
       this.db.exec('BEGIN');
       try {
         this.db
@@ -546,6 +610,13 @@ export class ThreadSearchWriter {
              WHERE thread_key = ? AND origin = 'transcript'`,
           )
           .run(key);
+        this.db
+          .prepare(
+            `DELETE FROM token_usage_sample_owners
+             WHERE thread_key = ?`,
+          )
+          .run(key);
+        this.recomputeUsageSamples(ownedUsageSampleKeys);
         this.db
           .prepare(
             `UPDATE search_transcripts
@@ -662,7 +733,7 @@ export class ThreadSearchWriter {
           );
           usageModel = extracted.model;
           usageProvider = extracted.provider;
-          if (extracted.sample) this.addUsageSample(extracted.sample);
+          if (extracted.sample) this.addUsageSample(key, extracted.sample);
           usageOffset = line.endOffset;
         }
         const processed = Math.min(searchOffset, usageOffset);
@@ -770,9 +841,12 @@ export class ThreadSearchWriter {
     this.changedDocuments += 1;
   }
 
-  private addUsageSample(sample: StoredUsageSample): void {
+  private addUsageSample(
+    threadKeyValue: string,
+    sample: StoredUsageSample,
+  ): void {
     if (sample.timestampMs < Date.now() - USAGE_RETENTION_MS) return;
-    this.insertUsageSample.run(
+    this.ensureUsageSample.run(
       sample.sampleKey,
       sample.timestampMs,
       sample.provider,
@@ -785,12 +859,108 @@ export class ThreadSearchWriter {
       sample.outputTokens,
       sample.reasoningOutputTokens,
     );
+    this.insertUsageOwner.run(
+      threadKeyValue,
+      sample.sampleKey,
+      sample.timestampMs,
+      sample.provider,
+      sample.model,
+      sample.local ? 1 : 0,
+      sample.inputTokens,
+      sample.cachedInputTokens,
+      sample.cacheWrite5mInputTokens,
+      sample.cacheWrite1hInputTokens,
+      sample.outputTokens,
+      sample.reasoningOutputTokens,
+    );
+    this.recomputeUsageSample(sample.sampleKey);
   }
 
   private pruneExpiredUsageSamples(): void {
     this.db
       .prepare('DELETE FROM token_usage_samples WHERE timestamp_ms < ?')
       .run(Date.now() - USAGE_RETENTION_MS);
+  }
+
+  private usageSampleKeysForThread(threadKeyValue: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT sample_key
+           FROM token_usage_sample_owners
+           WHERE thread_key = ?`,
+        )
+        .all(threadKeyValue) as unknown as Array<{ sample_key: string }>
+    ).map((row) => row.sample_key);
+  }
+
+  private recomputeUsageSamples(sampleKeys: Iterable<string>): void {
+    for (const sampleKey of new Set(sampleKeys)) {
+      this.recomputeUsageSample(sampleKey);
+    }
+  }
+
+  private recomputeUsageSample(sampleKey: string): void {
+    const aggregate = this.db
+      .prepare(
+        `WITH owners AS (
+           SELECT *
+           FROM token_usage_sample_owners
+           WHERE sample_key = ?
+         )
+         SELECT
+           MIN(timestamp_ms) AS timestamp_ms,
+           COALESCE(
+             (
+               SELECT provider
+               FROM owners
+               WHERE provider <> 'unknown'
+               ORDER BY timestamp_ms ASC, thread_key ASC
+               LIMIT 1
+             ),
+             'unknown'
+           ) AS provider,
+           COALESCE(
+             (
+               SELECT model
+               FROM owners
+               WHERE model <> 'unknown'
+               ORDER BY timestamp_ms ASC, thread_key ASC
+               LIMIT 1
+             ),
+             'unknown'
+           ) AS model,
+           MAX(local) AS local,
+           MAX(input_tokens) AS input_tokens,
+           MAX(cached_input_tokens) AS cached_input_tokens,
+           MAX(cache_write_5m_input_tokens) AS cache_write_5m_input_tokens,
+           MAX(cache_write_1h_input_tokens) AS cache_write_1h_input_tokens,
+           MAX(output_tokens) AS output_tokens,
+           MAX(reasoning_output_tokens) AS reasoning_output_tokens
+         FROM owners`,
+      )
+      .get(sampleKey) as unknown as UsageOwnerAggregateRow;
+
+    if (aggregate.timestamp_ms === null) {
+      this.db
+        .prepare('DELETE FROM token_usage_samples WHERE sample_key = ?')
+        .run(sampleKey);
+      return;
+    }
+
+    this.updateUsageSample.run(
+      aggregate.timestamp_ms,
+      aggregate.provider,
+      aggregate.model,
+      aggregate.local ?? 0,
+      aggregate.input_tokens ?? 0,
+      aggregate.cached_input_tokens ?? 0,
+      aggregate.cache_write_5m_input_tokens ?? 0,
+      aggregate.cache_write_1h_input_tokens ?? 0,
+      aggregate.output_tokens ?? 0,
+      aggregate.reasoning_output_tokens ?? 0,
+      sampleKey,
+    );
   }
 
   private updateFileState(
@@ -864,12 +1034,16 @@ export class ThreadSearchWriter {
       .all() as unknown as Array<{ thread_key: string }>;
     const stale = existing.filter((row) => !visibleKeys.has(row.thread_key));
     if (stale.length === 0) return;
+    const affectedUsageSampleKeys = stale.flatMap((row) =>
+      this.usageSampleKeysForThread(row.thread_key),
+    );
     this.db.exec('BEGIN');
     try {
       const remove = this.db.prepare(
         'DELETE FROM search_transcripts WHERE thread_key = ?',
       );
       for (const row of stale) remove.run(row.thread_key);
+      this.recomputeUsageSamples(affectedUsageSampleKeys);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -909,6 +1083,8 @@ function initializeSchema(db: DatabaseSync): void {
     version !== 0 &&
     version !== 1 &&
     version !== 2 &&
+    version !== 3 &&
+    version !== 4 &&
     version !== SCHEMA_VERSION
   ) {
     db.exec(`
@@ -916,15 +1092,19 @@ function initializeSchema(db: DatabaseSync): void {
       DROP TRIGGER IF EXISTS search_documents_ad;
       DROP TABLE IF EXISTS search_documents_fts;
       DROP TABLE IF EXISTS search_documents;
+      DROP TABLE IF EXISTS token_usage_sample_owners;
       DROP TABLE IF EXISTS token_usage_samples;
       DROP TABLE IF EXISTS search_transcripts;
     `);
   }
-  if (version === 2) {
-    // v2 was only used by pre-release token-insights builds. Its per-thread
-    // samples multiplied forked Codex history and cannot be migrated safely;
-    // preserve the search index and rebuild just the local counters.
+  if (version === 2 || version === 3 || version === 4) {
+    // v2 multiplied forked counters, while v3 deduplicated globally without
+    // recording which transcripts still owned each sample. v4 recorded only
+    // ownership keys, so a surviving owner could keep a stale MAX payload
+    // after every source rewrote lower. Preserve searchable rows and rebuild
+    // only the local counters with per-owner payloads.
     db.exec(`
+      DROP TABLE IF EXISTS token_usage_sample_owners;
       DROP TABLE IF EXISTS token_usage_samples;
       UPDATE search_transcripts
       SET usage_indexed_offset = 0,
@@ -990,6 +1170,26 @@ function initializeSchema(db: DatabaseSync): void {
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS token_usage_time
       ON token_usage_samples(timestamp_ms, provider, model);
+
+    CREATE TABLE IF NOT EXISTS token_usage_sample_owners(
+      thread_key TEXT NOT NULL
+        REFERENCES search_transcripts(thread_key) ON DELETE CASCADE,
+      sample_key TEXT NOT NULL
+        REFERENCES token_usage_samples(sample_key) ON DELETE CASCADE,
+      timestamp_ms INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      local INTEGER NOT NULL DEFAULT 0 CHECK(local IN (0, 1)),
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(thread_key, sample_key)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS token_usage_owner_sample
+      ON token_usage_sample_owners(sample_key);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS search_documents_fts USING fts5(
       title,
@@ -1188,6 +1388,10 @@ function parseSnippet(value: string): SearchSnippetPart[] {
 
 function threadKey(session: IndexableThread): string {
   return `${session.source}:${session.sessionId}`;
+}
+
+function sideChatThreadKey(chat: IndexableSideChat): string {
+  return `${chat.source}:${chat.sessionId}`;
 }
 
 function metadataSignature(session: IndexableThread): string {

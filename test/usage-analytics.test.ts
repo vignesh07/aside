@@ -220,7 +220,124 @@ describe('local token usage analytics', () => {
     reader.close();
   });
 
-  it('deduplicates forked Codex counters globally and retains history after transcript pruning', async () => {
+  it('rebases usage when a transcript is rewritten and removes it when deleted', async () => {
+    const { root, reader, writer } = tempIndex();
+    const session = thread(root, 'pi', 'replaceable-usage');
+    const record = (id: string, input: number, output: number) =>
+      JSON.stringify({
+        type: 'message',
+        id,
+        timestamp: '2026-07-31T18:00:00Z',
+        message: {
+          role: 'assistant',
+          provider: 'anthropic',
+          model: 'claude-opus-4-6',
+          usage: { input, output, cacheRead: 0, cacheWrite: 0 },
+        },
+      });
+
+    fs.writeFileSync(session.jsonlPath, `${record('same-request', 50, 10)}\n`);
+    await writer.syncSessions([session], () => {});
+    expect(
+      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals,
+    ).toMatchObject({ totalTokens: 60, requests: 1 });
+
+    fs.writeFileSync(session.jsonlPath, `${record('same-request', 7, 3)}\n`);
+    session.lastEventMs += 1;
+    await writer.syncSessions([session], () => {});
+    expect(
+      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals,
+    ).toMatchObject({ totalTokens: 10, requests: 1 });
+
+    await writer.syncSessions([], () => {});
+    expect(
+      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals,
+    ).toMatchObject({ totalTokens: 0, requests: 0 });
+    writer.close();
+    reader.close();
+  });
+
+  it('rebases a shared sample after every owner rewrites lower', async () => {
+    const { root, reader, writer } = tempIndex();
+    const first = thread(root, 'pi', 'shared-usage-first');
+    const second = thread(root, 'pi', 'shared-usage-second');
+    const record = (input: number, output: number) =>
+      JSON.stringify({
+        type: 'message',
+        id: 'shared-request',
+        timestamp: '2026-07-31T18:00:00Z',
+        message: {
+          role: 'assistant',
+          provider: 'anthropic',
+          model: 'claude-opus-4-6',
+          usage: { input, output, cacheRead: 0, cacheWrite: 0 },
+        },
+      });
+    const usage = () =>
+      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals;
+
+    fs.writeFileSync(first.jsonlPath, `${record(50, 10)}\n`);
+    fs.writeFileSync(second.jsonlPath, `${record(50, 10)}\n`);
+    await writer.syncSessions([first, second], () => {});
+    expect(usage()).toMatchObject({ totalTokens: 60, requests: 1 });
+
+    fs.writeFileSync(first.jsonlPath, `${record(7, 3)}\n`);
+    first.lastEventMs += 1;
+    await writer.syncSessions([first, second], () => {});
+    expect(usage()).toMatchObject({ totalTokens: 60, requests: 1 });
+
+    fs.writeFileSync(second.jsonlPath, `${record(7, 3)}\n`);
+    second.lastEventMs += 1;
+    await writer.syncSessions([first, second], () => {});
+    expect(usage()).toMatchObject({ totalTokens: 10, requests: 1 });
+
+    await writer.syncSessions([second], () => {});
+    expect(usage()).toMatchObject({ totalTokens: 10, requests: 1 });
+
+    await writer.syncSessions([], () => {});
+    expect(usage()).toMatchObject({ totalTokens: 0, requests: 0 });
+    writer.close();
+    reader.close();
+  });
+
+  it('extracts normalized OpenCode usage without indexing prompt content', () => {
+    const extracted = extractUsageFromLine(
+      JSON.stringify({
+        schema: 'aside.opencode.v1',
+        id: 'usage-open-code-1',
+        type: 'usage',
+        timestamp: '2026-08-09T12:00:00Z',
+        providerID: 'anthropic',
+        modelID: 'claude-sonnet-4-6',
+        tokens: {
+          input: 120,
+          output: 30,
+          reasoning: 4,
+          cacheRead: 40,
+          cacheWrite: 10,
+        },
+      }),
+      'opencode',
+      '',
+      '',
+      120,
+      'opencode:test',
+    );
+
+    expect(extracted).toMatchObject({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      sample: {
+        inputTokens: 120,
+        outputTokens: 30,
+        reasoningOutputTokens: 4,
+        cachedInputTokens: 40,
+        cacheWrite5mInputTokens: 10,
+      },
+    });
+  });
+
+  it('deduplicates forked Codex counters while any transcript still owns them', async () => {
     const { root, reader, writer } = tempIndex();
     const original = thread(root, 'codex', 'codex-original');
     const fork = thread(root, 'codex', 'codex-fork');
@@ -272,15 +389,15 @@ describe('local token usage analytics', () => {
       expect.objectContaining({ model: 'gpt-5.6-sol', totalTokens: 110 }),
     ]);
 
-    await writer.syncSessions([], () => {});
+    await writer.syncSessions([original], () => {});
     expect(
       reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals,
     ).toMatchObject({ totalTokens: 110, requests: 1 });
 
-    writer.clear();
+    await writer.syncSessions([], () => {});
     expect(
-      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals.totalTokens,
-    ).toBe(0);
+      reader.usage(query, Date.parse('2026-07-31T20:00:00Z')).totals,
+    ).toMatchObject({ totalTokens: 0, requests: 0 });
     writer.close();
     reader.close();
   });
@@ -446,7 +563,7 @@ describe('local token usage analytics', () => {
     ).toEqual({ session_id: 'preserved' });
     expect(
       check.prepare('PRAGMA user_version').get(),
-    ).toEqual({ user_version: 3 });
+    ).toEqual({ user_version: 5 });
     check.close();
   });
 
@@ -524,8 +641,165 @@ describe('local token usage analytics', () => {
     expect(usageColumns.map((column) => column.name)).not.toContain(
       'thread_key',
     );
+    const ownerColumns = check
+      .prepare('PRAGMA table_info(token_usage_sample_owners)')
+      .all() as unknown as Array<{ name: string }>;
+    expect(ownerColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'thread_key',
+        'sample_key',
+        'timestamp_ms',
+        'provider',
+        'model',
+        'input_tokens',
+        'output_tokens',
+      ]),
+    );
     expect(check.prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 3,
+      user_version: 5,
+    });
+    check.close();
+  });
+
+  it('rebuilds v3 counters that have no transcript ownership', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-usage-v3-'));
+    roots.push(root);
+    const location = path.join(root, 'search.sqlite');
+    const initialized = new ThreadSearchReader(location);
+    initialized.close();
+
+    const legacy = new DatabaseSync(location);
+    legacy.exec(`
+      DROP TABLE token_usage_sample_owners;
+      INSERT INTO search_transcripts(
+        thread_key, session_id, source, jsonl_path, project_name, project_path,
+        title, git_branch, last_event_ms, indexed_offset,
+        usage_indexed_offset, usage_model, usage_provider
+      ) VALUES (
+        'codex:v3', 'v3', 'codex', '/tmp/v3.jsonl', 'project', '/tmp',
+        'Preserved v3 work', 'main', 1, 99, 99, 'gpt-5.6-sol', 'openai'
+      );
+      INSERT INTO search_documents(
+        thread_key, origin, kind, timestamp, title, project,
+        user_text, assistant_text, tool_text, error_text
+      ) VALUES (
+        'codex:v3', 'metadata', 'metadata', '', 'Preserved v3 work',
+        'project', '', '', '', ''
+      );
+      INSERT INTO token_usage_samples(
+        sample_key, timestamp_ms, provider, model, local, input_tokens,
+        cached_input_tokens, cache_write_5m_input_tokens,
+        cache_write_1h_input_tokens, output_tokens, reasoning_output_tokens
+      ) VALUES (
+        'unowned-v3', 1785520800000, 'openai', 'gpt-5.6-sol', 0, 100,
+        0, 0, 0, 10, 0
+      );
+      PRAGMA user_version = 3;
+    `);
+    legacy.close();
+
+    const migrated = new ThreadSearchReader(location);
+    expect(migrated.search('preserved')).toHaveLength(1);
+    migrated.close();
+
+    const check = new DatabaseSync(location);
+    expect(
+      check
+        .prepare(
+          `SELECT indexed_offset, usage_indexed_offset, usage_model,
+                  usage_provider
+           FROM search_transcripts WHERE thread_key = 'codex:v3'`,
+        )
+        .get(),
+    ).toEqual({
+      indexed_offset: 99,
+      usage_indexed_offset: 0,
+      usage_model: '',
+      usage_provider: '',
+    });
+    expect(
+      check.prepare('SELECT COUNT(*) AS count FROM token_usage_samples').get(),
+    ).toEqual({ count: 0 });
+    expect(
+      check.prepare('PRAGMA user_version').get(),
+    ).toEqual({ user_version: 5 });
+    check.close();
+  });
+
+  it('rebuilds v4 key-only ownership so stale shared maxima cannot survive', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-usage-v4-'));
+    roots.push(root);
+    const location = path.join(root, 'search.sqlite');
+    const initialized = new ThreadSearchReader(location);
+    initialized.close();
+
+    const legacy = new DatabaseSync(location);
+    legacy.exec(`
+      DROP TABLE token_usage_sample_owners;
+      CREATE TABLE token_usage_sample_owners(
+        thread_key TEXT NOT NULL
+          REFERENCES search_transcripts(thread_key) ON DELETE CASCADE,
+        sample_key TEXT NOT NULL
+          REFERENCES token_usage_samples(sample_key) ON DELETE CASCADE,
+        PRIMARY KEY(thread_key, sample_key)
+      ) WITHOUT ROWID;
+      INSERT INTO search_transcripts(
+        thread_key, session_id, source, jsonl_path, project_name, project_path,
+        title, git_branch, last_event_ms, indexed_offset,
+        usage_indexed_offset, usage_model, usage_provider
+      ) VALUES (
+        'codex:v4', 'v4', 'codex', '/tmp/v4.jsonl', 'project', '/tmp',
+        'Preserved v4 work', 'main', 1, 99, 99, 'gpt-5.6-sol', 'openai'
+      );
+      INSERT INTO search_documents(
+        thread_key, origin, kind, timestamp, title, project,
+        user_text, assistant_text, tool_text, error_text
+      ) VALUES (
+        'codex:v4', 'metadata', 'metadata', '', 'Preserved v4 work',
+        'project', '', '', '', ''
+      );
+      INSERT INTO token_usage_samples(
+        sample_key, timestamp_ms, provider, model, local, input_tokens,
+        cached_input_tokens, cache_write_5m_input_tokens,
+        cache_write_1h_input_tokens, output_tokens, reasoning_output_tokens
+      ) VALUES (
+        'stale-v4', 1785520800000, 'openai', 'gpt-5.6-sol', 0, 100,
+        0, 0, 0, 10, 0
+      );
+      INSERT INTO token_usage_sample_owners(thread_key, sample_key)
+      VALUES ('codex:v4', 'stale-v4');
+      PRAGMA user_version = 4;
+    `);
+    legacy.close();
+
+    const migrated = new ThreadSearchReader(location);
+    expect(migrated.search('preserved')).toHaveLength(1);
+    migrated.close();
+
+    const check = new DatabaseSync(location);
+    expect(
+      check
+        .prepare(
+          `SELECT indexed_offset, usage_indexed_offset, usage_model,
+                  usage_provider
+           FROM search_transcripts WHERE thread_key = 'codex:v4'`,
+        )
+        .get(),
+    ).toEqual({
+      indexed_offset: 99,
+      usage_indexed_offset: 0,
+      usage_model: '',
+      usage_provider: '',
+    });
+    expect(
+      check.prepare('SELECT COUNT(*) AS count FROM token_usage_samples').get(),
+    ).toEqual({ count: 0 });
+    const ownerColumns = check
+      .prepare('PRAGMA table_info(token_usage_sample_owners)')
+      .all() as unknown as Array<{ name: string }>;
+    expect(ownerColumns.map((column) => column.name)).toContain('input_tokens');
+    expect(check.prepare('PRAGMA user_version').get()).toEqual({
+      user_version: 5,
     });
     check.close();
   });

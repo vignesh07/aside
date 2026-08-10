@@ -19,10 +19,20 @@ export const STALLED_AFTER_MS = 20 * 60_000;
 export const FORGOTTEN_AFTER_MS = 24 * 60 * 60_000;
 const MAX_SUMMARY_LENGTH = 240;
 
+interface ProjectionIdentity {
+  seq: number;
+  evidenceHash: string;
+}
+
 export interface ActivityLedgerStore {
   load(): ActivityLedgerState;
   append(events: ActivityEventRecord[]): void;
   saveCursors(cursors: ThreadActivityCursor[]): void;
+  deleteThreadEvents(threadKey: string): void;
+  replaceThreadEvents(
+    threadKey: string,
+    events: ActivityEventRecord[],
+  ): void;
   prune(cutoffOccurredAtMs: number, keepNewest: number): void;
   close?(): void;
 }
@@ -60,6 +70,20 @@ export class InMemoryActivityLedgerStore implements ActivityLedgerStore {
     }
   }
 
+  deleteThreadEvents(threadKey: string): void {
+    for (const [eventId, event] of this.events) {
+      if (event.threadKey === threadKey) this.events.delete(eventId);
+    }
+  }
+
+  replaceThreadEvents(
+    threadKey: string,
+    events: ActivityEventRecord[],
+  ): void {
+    this.deleteThreadEvents(threadKey);
+    for (const event of events) this.events.set(event.eventId, { ...event });
+  }
+
   prune(cutoffOccurredAtMs: number, keepNewest: number): void {
     const kept = [...this.events.values()]
       .filter((event) => event.occurredAtMs >= cutoffOccurredAtMs)
@@ -94,6 +118,25 @@ export class ActivityLedger {
   private readonly cursors = new Map<string, ThreadActivityCursor>();
   private readonly sessions = new Map<string, ActivitySessionMetadata>();
   private readonly pendingEvents: ActivityEventRecord[] = [];
+  /** Surviving stable ids retain their original sequence during a rewrite. */
+  private readonly projectionRebases = new Map<
+    string,
+    {
+      priorEvents: Map<string, ActivityEventRecord>;
+      identities: Map<string, ProjectionIdentity>;
+      nextCanonicalOrder: number;
+    }
+  >();
+  /**
+   * Identity-only bridge across OpenCode's intentionally empty/header-only
+   * invalidation projection and its bounded final rebuild. No transcript text
+   * or summaries are retained here.
+   */
+  private readonly retainedProjectionIdentities = new Map<
+    string,
+    Map<string, ProjectionIdentity>
+  >();
+  private readonly nextCanonicalOrderByThread = new Map<string, number>();
   private readonly firstImport: boolean;
   private readonly startedAtMs: number;
   private nextSeq = 1;
@@ -111,7 +154,7 @@ export class ActivityLedger {
   ) {
     this.startedAtMs = this.now().getTime();
     const restored = store.load();
-    for (const event of [...restored.events].sort((a, b) => a.seq - b.seq)) {
+    for (const event of [...restored.events].sort(compareCanonicalEvents)) {
       this.addEvent(event);
     }
     for (const cursor of restored.cursors) {
@@ -131,11 +174,37 @@ export class ActivityLedger {
     this.pruneInMemory(true);
   }
 
-  syncSessions(sessions: TrackedSession[]): void {
-    this.sessions.clear();
+  syncSessions(
+    sessions: TrackedSession[],
+    authoritativeSources: ReadonlySet<SessionSource> = new Set([
+      'claude',
+      'codex',
+      'pi',
+      'opencode',
+    ]),
+  ): void {
     const byThread = new Map(
       sessions.map((session) => [threadKey(session.source, session.id), session]),
     );
+    // OpenCode's SQLite catalog is the source of truth. If a session no longer
+    // exists there, remove its derived private summaries as well as its cache.
+    // Other adapters predate this authoritative deletion contract and retain
+    // their existing bounded-history behavior.
+    const visibleOpenCode = new Set(
+      sessions
+        .filter((session) => session.source === 'opencode')
+        .map((session) => threadKey(session.source, session.id)),
+    );
+    const missingOpenCode = authoritativeSources.has('opencode')
+      ? new Set(
+          [...this.eventsByThread.keys()].filter(
+            (key) => key.startsWith('opencode:') && !visibleOpenCode.has(key),
+          ),
+        )
+      : new Set<string>();
+    for (const key of missingOpenCode) this.deleteThreadProjection(key);
+
+    this.sessions.clear();
     for (const session of sessions) {
       const key = threadKey(session.source, session.id);
       const parentThreadKey = session.parentSessionId
@@ -177,13 +246,26 @@ export class ActivityLedger {
   recordAgentEvent(input: RecordedAgentEvent): void {
     const metadata = this.sessions.get(threadKey(input.source, input.sessionId));
     if (!metadata) return;
+    const key = threadKey(input.source, input.sessionId);
+    const rebase = this.projectionRebases.get(key);
+    const canonicalOrder = rebase
+      ? rebase.nextCanonicalOrder++
+      : this.takeNextCanonicalOrder(key);
     const normalized = normalizeEvent(
       metadata,
       input,
       this.nextSeq,
+      canonicalOrder,
       this.now().getTime(),
     );
     if (!normalized || this.events.has(normalized.eventId)) return;
+    const prior = rebase?.identities.get(normalized.eventId);
+    if (prior && prior.evidenceHash === normalized.evidenceHash) {
+      // Stable identity preserves only ordering/user cursors. The projected
+      // payload may have changed in place and must replace stale private text.
+      this.addEvent({ ...normalized, seq: prior.seq });
+      return;
+    }
     if (
       normalized.occurredAtMs <
       normalized.observedAtMs - RECORD_MAX_AGE_MS
@@ -203,6 +285,152 @@ export class ActivityLedger {
     this.pruneInMemory();
     this.schedulePersist();
     this.scheduleChange();
+  }
+
+  /**
+   * Begin a canonical projection replay. Existing events leave the live view,
+   * but remain available by stable event id so survivors can keep their
+   * original sequence numbers and user-owned viewed/resolved cursors.
+   */
+  beginAgentProjectionRebase(sessionId: string, source: SessionSource): void {
+    const key = threadKey(source, sessionId);
+    if (this.projectionRebases.has(key)) return;
+    const existing = [...(this.eventsByThread.get(key)?.values() ?? [])];
+    const identities = new Map(this.retainedProjectionIdentities.get(key));
+    for (const event of existing) {
+      identities.set(event.eventId, {
+        seq: event.seq,
+        evidenceHash: event.evidenceHash,
+      });
+    }
+    this.projectionRebases.set(
+      key,
+      {
+        priorEvents: new Map(existing.map((event) => [event.eventId, event])),
+        identities,
+        nextCanonicalOrder: 1,
+      },
+    );
+    for (const event of existing) this.removeEvent(event);
+    for (let index = this.pendingEvents.length - 1; index >= 0; index -= 1) {
+      if (this.pendingEvents[index]?.threadKey === key) {
+        this.pendingEvents.splice(index, 1);
+      }
+    }
+  }
+
+  /** Finish a replay and atomically replace the durable thread projection. */
+  finishAgentProjectionRebase(
+    sessionId: string,
+    source: SessionSource,
+    canonicalComplete = true,
+    discardMissing = true,
+  ): void {
+    const key = threadKey(source, sessionId);
+    const rebase = this.projectionRebases.get(key);
+    if (!rebase) return;
+
+    // New replay events may already be queued by recordAgentEvent. Persist one
+    // canonical thread snapshot instead of appending them after the replace.
+    for (let index = this.pendingEvents.length - 1; index >= 0; index -= 1) {
+      if (this.pendingEvents[index]?.threadKey === key) {
+        this.pendingEvents.splice(index, 1);
+      }
+    }
+    const replayed = [...(this.eventsByThread.get(key)?.values() ?? [])]
+      .sort(compareCanonicalEvents);
+    const replayedIds = new Set(replayed.map((event) => event.eventId));
+    const retained = discardMissing
+      ? []
+      : [...rebase.priorEvents.values()]
+          .filter((event) => !replayedIds.has(event.eventId))
+          .sort(compareCanonicalEvents);
+    // A bounded suffix cannot prove which absent events were deleted versus
+    // merely outside its read window. Retain them conservatively until a later
+    // complete replay removes true deletions; normal 90-day/20k bounds apply.
+    const replacement = [...retained, ...replayed].map((event, index) => ({
+      ...event,
+      canonicalOrder: index + 1,
+    }));
+    for (const event of replayed) this.removeEvent(event);
+    for (const event of replacement) this.addEvent(event);
+    try {
+      this.store.replaceThreadEvents(key, replacement);
+    } catch (error) {
+      // The durable transaction rolled back. Restore the same canonical view
+      // in memory so Today/attention cannot disagree with disk, then allow the
+      // next scanner pass to retry from a clean rebase.
+      for (const event of [
+        ...(this.eventsByThread.get(key)?.values() ?? []),
+      ]) this.removeEvent(event);
+      for (const event of rebase.priorEvents.values()) this.addEvent(event);
+      this.projectionRebases.delete(key);
+      throw error;
+    }
+    this.projectionRebases.delete(key);
+    this.nextCanonicalOrderByThread.set(
+      key,
+      Math.max(0, ...replacement.map(eventCanonicalOrder)) + 1,
+    );
+    if (canonicalComplete) {
+      this.retainedProjectionIdentities.delete(key);
+    } else {
+      const retained = new Map(rebase.identities);
+      for (const event of replacement) {
+        retained.set(event.eventId, {
+          seq: event.seq,
+          evidenceHash: event.evidenceHash,
+        });
+      }
+      this.retainedProjectionIdentities.set(key, retained);
+    }
+    this.scheduleChange();
+  }
+
+  /** Restore the prior in-memory view when canonical replay itself fails. */
+  abortAgentProjectionRebase(sessionId: string, source: SessionSource): void {
+    const key = threadKey(source, sessionId);
+    const rebase = this.projectionRebases.get(key);
+    if (!rebase) return;
+    for (const event of [...(this.eventsByThread.get(key)?.values() ?? [])]) {
+      this.removeEvent(event);
+    }
+    for (const event of rebase.priorEvents.values()) this.addEvent(event);
+    this.nextCanonicalOrderByThread.set(
+      key,
+      Math.max(
+        0,
+        ...[...rebase.priorEvents.values()].map(eventCanonicalOrder),
+      ) + 1,
+    );
+    for (let index = this.pendingEvents.length - 1; index >= 0; index -= 1) {
+      if (this.pendingEvents[index]?.threadKey === key) {
+        this.pendingEvents.splice(index, 1);
+      }
+    }
+    this.projectionRebases.delete(key);
+    this.scheduleChange();
+  }
+
+  /** Destructive compatibility helper for callers that intentionally replay nothing. */
+  resetAgentProjection(sessionId: string, source: SessionSource): void {
+    this.beginAgentProjectionRebase(sessionId, source);
+    this.finishAgentProjectionRebase(sessionId, source);
+  }
+
+  private deleteThreadProjection(key: string): void {
+    for (const event of [...(this.eventsByThread.get(key)?.values() ?? [])]) {
+      this.removeEvent(event);
+    }
+    for (let index = this.pendingEvents.length - 1; index >= 0; index -= 1) {
+      if (this.pendingEvents[index]?.threadKey === key) {
+        this.pendingEvents.splice(index, 1);
+      }
+    }
+    this.projectionRebases.delete(key);
+    this.retainedProjectionIdentities.delete(key);
+    this.nextCanonicalOrderByThread.delete(key);
+    this.store.deleteThreadEvents(key);
   }
 
   markViewed(session: Pick<TrackedSession, 'id' | 'source'>): void {
@@ -240,9 +468,10 @@ export class ActivityLedger {
   ): ThreadAttentionState {
     const key = threadKey(session.source, session.id);
     const cursor = this.cursorFor(key);
-    const events = [...(this.eventsByThread.get(key)?.values() ?? [])];
+    const events = [...(this.eventsByThread.get(key)?.values() ?? [])]
+      .sort(compareCanonicalEvents);
     const phase = reduceLifecycle(events);
-    const latestSeq = phase?.seq ?? 0;
+    const latestSeq = Math.max(0, ...events.map((event) => event.seq));
     const beyondBaseline =
       phase !== null &&
       (!phase.seeded || phase.occurredAtMs > cursor.baselineAtMs);
@@ -436,6 +665,13 @@ export class ActivityLedger {
       new Map<string, ActivityEventRecord>();
     threadEvents.set(event.eventId, event);
     this.eventsByThread.set(event.threadKey, threadEvents);
+    this.nextCanonicalOrderByThread.set(
+      event.threadKey,
+      Math.max(
+        this.nextCanonicalOrderByThread.get(event.threadKey) ?? 1,
+        eventCanonicalOrder(event) + 1,
+      ),
+    );
     const latest = this.latestByThread.get(event.threadKey);
     if (!latest || event.seq > latest.seq) {
       this.latestByThread.set(event.threadKey, event);
@@ -443,7 +679,7 @@ export class ActivityLedger {
     const latestPhase = this.latestPhaseByThread.get(event.threadKey);
     if (
       event.kind !== 'tool_warning' &&
-      (!latestPhase || event.seq > latestPhase.seq)
+      (!latestPhase || compareCanonicalEvents(event, latestPhase) > 0)
     ) {
       this.latestPhaseByThread.set(event.threadKey, event);
     }
@@ -514,7 +750,7 @@ export class ActivityLedger {
       for (const candidate of threadEvents.values()) {
         if (
           candidate.kind !== 'tool_warning' &&
-          (!latestPhase || candidate.seq > latestPhase.seq)
+          (!latestPhase || compareCanonicalEvents(candidate, latestPhase) > 0)
         ) {
           latestPhase = candidate;
         }
@@ -542,6 +778,12 @@ export class ActivityLedger {
       if (!this.disposed) this.onChange?.();
     });
   }
+
+  private takeNextCanonicalOrder(key: string): number {
+    const next = this.nextCanonicalOrderByThread.get(key) ?? 1;
+    this.nextCanonicalOrderByThread.set(key, next + 1);
+    return next;
+  }
 }
 
 export function threadKey(
@@ -555,6 +797,7 @@ function normalizeEvent(
   metadata: ActivitySessionMetadata,
   input: RecordedAgentEvent,
   seq: number,
+  canonicalOrder: number,
   observedAtMs: number,
 ): ActivityEventRecord | null {
   const normalized = normalizedKindAndSummary(input.event);
@@ -574,6 +817,7 @@ function normalizeEvent(
   ].join('\u0000');
   return {
     seq,
+    canonicalOrder,
     eventId: createHash('sha256').update(identity).digest('hex').slice(0, 32),
     threadKey: metadata.threadKey,
     source: metadata.source,
@@ -673,6 +917,22 @@ function reduceLifecycle(events: ActivityEventRecord[]): ActivityEventRecord | n
   return phase;
 }
 
+function eventCanonicalOrder(event: ActivityEventRecord): number {
+  return event.canonicalOrder ?? event.seq;
+}
+
+function compareCanonicalEvents(
+  left: ActivityEventRecord,
+  right: ActivityEventRecord,
+): number {
+  return (
+    left.threadKey.localeCompare(right.threadKey) ||
+    eventCanonicalOrder(left) - eventCanonicalOrder(right) ||
+    left.seq - right.seq ||
+    left.eventId.localeCompare(right.eventId)
+  );
+}
+
 function attentionFromEvent(
   kind: 'failed' | 'interrupted',
   event: ActivityEventRecord,
@@ -744,7 +1004,7 @@ function contextBefore(
   let fallback = '';
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!;
-    if (event.seq >= phase.seq) continue;
+    if (eventCanonicalOrder(event) >= eventCanonicalOrder(phase)) continue;
     if (
       event.kind === 'turn_completed' ||
       event.kind === 'turn_failed' ||

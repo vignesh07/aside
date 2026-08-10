@@ -28,6 +28,11 @@ const models = [
     model: 'openai-codex/gpt-5.4',
     recommended: true,
   },
+  {
+    provider: 'opencode-cli',
+    model: 'openai/gpt-5.4',
+    recommended: true,
+  },
   { provider: 'openai', model: 'direct-api' },
 ];
 
@@ -41,6 +46,7 @@ describe('auth UI state', () => {
   it('allows only enabled and ready providers', () => {
     expect(isProviderUsable(auth('codex-cli', 'signed_in', true))).toBe(true);
     expect(isProviderUsable(auth('pi-cli', 'configured', true))).toBe(true);
+    expect(isProviderUsable(auth('opencode-cli', 'configured', true))).toBe(true);
     expect(isProviderUsable(auth('ollama', 'local_ready', true))).toBe(true);
     expect(isProviderUsable(auth('pi-cli', 'configured'))).toBe(false);
     expect(isProviderUsable(auth('claude-cli', 'signed_out', true))).toBe(false);
@@ -118,10 +124,21 @@ describe('auth UI state', () => {
     ).toBe(true);
   });
 
+  it('requires an enabled OpenCode thread\'s exact upstream model to remain available', () => {
+    const statuses = [auth('opencode-cli', 'configured', true)];
+    expect(
+      canAskWithModel(statuses, models, 'opencode-cli', 'openai/gpt-5.4'),
+    ).toBe(true);
+    expect(
+      canAskWithModel(statuses, models, 'opencode-cli', 'anthropic/claude-opus-4'),
+    ).toBe(false);
+  });
+
   it('names account routes after the clients Aside delegates through', () => {
     expect(providerDisplayName('codex-cli')).toBe('Codex');
     expect(providerDisplayName('claude-cli')).toBe('Claude Code');
     expect(providerDisplayName('pi-cli')).toBe('Pi');
+    expect(providerDisplayName('opencode-cli')).toBe('OpenCode');
   });
 
   it('chooses a provider recommendation without crossing providers', () => {
@@ -134,6 +151,9 @@ describe('auth UI state', () => {
     expect(
       recommendedModelForProvider(models, 'pi-cli')?.model,
     ).toBe('openai-codex/gpt-5.4');
+    expect(
+      recommendedModelForProvider(models, 'opencode-cli')?.model,
+    ).toBeUndefined();
     expect(recommendedModelForProvider(models, 'ollama')).toBeUndefined();
   });
 
@@ -179,6 +199,61 @@ describe('auth UI state', () => {
       title: 'Open the official Pi provider setup guide',
       url: 'https://pi.dev/docs/latest/providers',
     });
+    expect(providerStatusText(auth('opencode-cli', 'missing'))).toBe(
+      'Install OpenCode 1.18.15',
+    );
+    expect(
+      providerStatusText({
+        provider: 'opencode-cli',
+        state: 'signed_out',
+        enabled: false,
+        reason: 'access_not_granted',
+      }),
+    ).toBe(
+      'Audited OpenCode 1.18.15 routes',
+    );
+    expect(
+      providerStatusText({
+        provider: 'opencode-cli',
+        state: 'signed_out',
+        enabled: false,
+        reason: 'no_models',
+      }),
+    ).toBe('No models available through OpenCode');
+    expect(providerHelpLink('opencode-cli', 'executable_missing')).toEqual({
+      label: 'Install 1.18.15…',
+      title: 'Install the audited OpenCode 1.18.15 release',
+      url: 'https://github.com/anomalyco/opencode/releases/tag/v1.18.15',
+    });
+    expect(
+      providerStatusText({
+        provider: 'opencode-cli',
+        state: 'error',
+        enabled: false,
+        reason: 'client_unsupported',
+      }),
+    ).toBe('This OpenCode version is not supported by this Aside release');
+    expect(providerHelpLink('opencode-cli', 'client_unsupported')).toEqual({
+      label: 'Install 1.18.15…',
+      title: 'Install the audited OpenCode 1.18.15 release',
+      url: 'https://github.com/anomalyco/opencode/releases/tag/v1.18.15',
+    });
+    expect(
+      providerStatusText({
+        provider: 'opencode-cli',
+        state: 'error',
+        enabled: false,
+        reason: 'auth_configuration_unsupported',
+      }),
+    ).toBe('OAuth/well-known unavailable · use Zen or a provider API key');
+    expect(
+      providerStatusText({
+        provider: 'opencode-cli',
+        state: 'error',
+        enabled: false,
+        reason: 'no_audited_models',
+      }),
+    ).toBe('No source-audited OpenCode routes are available');
     expect(providerHelpLink('ollama')).toBeUndefined();
   });
 
@@ -194,6 +269,21 @@ describe('auth UI state', () => {
     ]);
     expect(providerStatusText(auth('pi-cli', 'configured'))).toBe(
       'Models available through Pi',
+    );
+  });
+
+  it('shows models delegated through an explicitly enabled OpenCode client', () => {
+    expect(
+      visibleModels(models, [auth('opencode-cli', 'configured', true)]),
+    ).toEqual([
+      {
+        provider: 'opencode-cli',
+        model: 'openai/gpt-5.4',
+        recommended: true,
+      },
+    ]);
+    expect(providerStatusText(auth('opencode-cli', 'configured'))).toBe(
+      'Models available through OpenCode',
     );
   });
 

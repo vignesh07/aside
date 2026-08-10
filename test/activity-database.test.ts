@@ -23,10 +23,13 @@ function database(): ActivityDatabase {
 function event(overrides: Partial<ActivityEventRecord> = {}): ActivityEventRecord {
   return {
     seq: 1,
+    canonicalOrder: 1,
     eventId: 'event-1',
     threadKey: 'codex:session-1',
     source: 'codex',
     sessionId: 'session-1',
+    parentThreadKey: undefined,
+    rootThreadKey: undefined,
     projectName: 'aside',
     projectPath: '/work/aside',
     title: 'Ship attention inbox',
@@ -37,6 +40,7 @@ function event(overrides: Partial<ActivityEventRecord> = {}): ActivityEventRecor
     lifecycle: 'terminal',
     severity: 'info',
     summary: 'Latest turn ended',
+    originId: undefined,
     evidenceHash: 'a'.repeat(64),
     seeded: false,
     ...overrides,
@@ -93,6 +97,71 @@ describe('ActivityDatabase', () => {
     db.close();
   });
 
+  it('atomically replaces only the requested thread and preserves its cursor', () => {
+    const db = database();
+    const other = event({
+      seq: 2,
+      canonicalOrder: 1,
+      eventId: 'other-event',
+      threadKey: 'opencode:other-session',
+      source: 'opencode',
+      sessionId: 'other-session',
+      summary: 'Other thread survives',
+    });
+    db.append([event(), other]);
+    db.saveCursors([{
+      threadKey: 'codex:session-1',
+      baselineAtMs: 100,
+      viewedThroughSeq: 1,
+      resolvedThroughSeq: 1,
+    }]);
+    const replacement = event({
+      seq: 3,
+      canonicalOrder: 1,
+      eventId: 'replacement-event',
+      summary: 'Canonical replacement',
+    });
+
+    db.replaceThreadEvents('codex:session-1', [replacement]);
+
+    expect(db.load()).toEqual({
+      events: [replacement, other],
+      cursors: [{
+        threadKey: 'codex:session-1',
+        baselineAtMs: 100,
+        viewedThroughSeq: 1,
+        resolvedThroughSeq: 1,
+      }],
+    });
+    db.close();
+  });
+
+  it('rolls back a replacement that crosses thread boundaries', () => {
+    const db = database();
+    const other = event({
+      seq: 2,
+      canonicalOrder: 1,
+      eventId: 'other-event',
+      threadKey: 'opencode:other-session',
+      source: 'opencode',
+      sessionId: 'other-session',
+      summary: 'Other thread survives',
+    });
+    db.append([event(), other]);
+    const before = db.load();
+
+    expect(() =>
+      db.replaceThreadEvents('codex:session-1', [{
+        ...other,
+        seq: 3,
+        eventId: 'cross-thread-event',
+      }]),
+    ).toThrow('Activity replacement crossed thread boundaries.');
+
+    expect(db.load()).toEqual(before);
+    db.close();
+  });
+
   it('restores v1 click-resolved tasks as viewed but unresolved', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-activity-v1-'));
     tempDirs.push(root);
@@ -134,12 +203,17 @@ describe('ActivityDatabase', () => {
     const migrated = new ActivityDatabase(location);
     migrated.close();
     const check = new DatabaseSync(location);
-    expect(check.prepare('PRAGMA user_version').get()?.['user_version']).toBe(3);
+    expect(check.prepare('PRAGMA user_version').get()?.['user_version']).toBe(4);
     expect(
       check
         .prepare("SELECT name FROM pragma_table_info('activity_events') WHERE name = 'origin_kind'")
         .get(),
     ).toEqual({ name: 'origin_kind' });
+    expect(
+      check
+        .prepare("SELECT name FROM pragma_table_info('activity_events') WHERE name = 'canonical_order'")
+        .get(),
+    ).toEqual({ name: 'canonical_order' });
     expect(
       check
         .prepare(

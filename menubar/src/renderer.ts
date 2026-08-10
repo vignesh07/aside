@@ -66,7 +66,10 @@ interface AsideBridge {
   refreshProviderAuth(): Promise<ProviderAuthStatus[]>;
   connectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
   disconnectProvider(provider: ProviderAuthId): Promise<ProviderAuthStatus[]>;
-  openProviderHelp(provider: ProviderAuthId): Promise<void>;
+  openProviderHelp(
+    provider: ProviderAuthId,
+    reason?: ProviderAuthStatus['reason'],
+  ): Promise<void>;
   getAppVersion(): Promise<string>;
   getWindowMode(): Promise<{ keepOpen: boolean }>;
   setKeepOpen(keepOpen: boolean): Promise<{ keepOpen: boolean }>;
@@ -112,6 +115,29 @@ const showSubagentThreadsEl = document.getElementById(
   'show-subagent-threads',
 ) as HTMLInputElement;
 const modelsEl = document.getElementById('models') as HTMLSelectElement;
+const modelTriggerEl = document.getElementById('model-trigger') as HTMLButtonElement;
+const modelTriggerProviderEl = document.getElementById(
+  'model-trigger-provider',
+) as HTMLSpanElement;
+const modelTriggerLabelEl = document.getElementById(
+  'model-trigger-label',
+) as HTMLSpanElement;
+const modelTriggerStatusEl = document.getElementById(
+  'model-trigger-status',
+) as HTMLSpanElement;
+const modelPopoverEl = document.getElementById('model-popover') as HTMLElement;
+const modelPickerTitleEl = document.getElementById(
+  'model-picker-title',
+) as HTMLElement;
+const modelSearchEl = document.getElementById('model-search') as HTMLInputElement;
+const modelOptionsEl = document.getElementById('model-options') as HTMLDivElement;
+const modelOptionsVirtualEl = document.getElementById(
+  'model-options-virtual',
+) as HTMLDivElement;
+const modelResultCountEl = document.getElementById(
+  'model-result-count',
+) as HTMLSpanElement;
+const modelConnectEl = document.getElementById('model-connect') as HTMLButtonElement;
 const messagesEl = document.getElementById('messages') as HTMLDivElement;
 const analysisViewEl = document.getElementById('analysis-view') as HTMLDivElement;
 const onboardingEl = document.getElementById('onboarding') as HTMLDivElement;
@@ -244,6 +270,43 @@ let usageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let usageIndexSignature = '';
 let usageScrollToLatest = true;
 
+type ModelOption = MenubarState['models'][number];
+interface PickerModel extends ModelOption {
+  key: string;
+  providerLabel: string;
+  groupKey: string;
+  groupLabel: string;
+  displayLabel: string;
+  searchText: string;
+}
+type PickerEntry =
+  | {
+      kind: 'group';
+      top: number;
+      height: number;
+      provider: string;
+      label: string;
+      count: number;
+    }
+  | {
+      kind: 'option';
+      top: number;
+      height: number;
+      optionIndex: number;
+    };
+
+const MODEL_GROUP_HEIGHT = 27;
+const MODEL_OPTION_HEIGHT = 43;
+const MODEL_OVERSCAN_PX = MODEL_OPTION_HEIGHT * 3;
+let modelPickerModels: PickerModel[] = [];
+let modelPickerEntries: PickerEntry[] = [];
+let modelPickerOptionEntries: Array<Extract<PickerEntry, { kind: 'option' }>> = [];
+let modelPickerActiveIndex = -1;
+let modelPickerScope: ProviderAuthId | null = null;
+let pendingModelProvider: ProviderAuthId | null = null;
+let modelPickerRenderFrame: number | null = null;
+let modelCatalogRenderKey = '';
+
 const modelKey = (provider: string, model: string) => `${provider}:${model}`;
 
 function observerModelLabel(provider: string, model: string): string {
@@ -258,9 +321,9 @@ function observerModelLabel(provider: string, model: string): string {
   return `${providerLabel} · ${modelLabel}`;
 }
 
-function isUnavailablePiModel(provider: string, model: string): boolean {
+function isUnavailableBrokeredModel(provider: string, model: string): boolean {
   return (
-    provider === 'pi-cli' &&
+    (provider === 'pi-cli' || provider === 'opencode-cli') &&
     canAskWithProvider(providerAuth, provider) &&
     !canAskWithModel(
       providerAuth,
@@ -271,9 +334,382 @@ function isUnavailablePiModel(provider: string, model: string): boolean {
   );
 }
 
-function unavailablePiModelCopy(provider: string, model: string): string {
+function unavailableBrokeredModelCopy(provider: string, model: string): string {
+  const recovery = provider === 'opencode-cli'
+    ? 'Check that model route in OpenCode'
+    : 'Reconnect that provider in Pi';
   return `${observerModelLabel(provider, model)} is no longer available. ` +
-    'Reauthenticate that provider in Pi or choose another model.';
+    `${recovery} or choose another model.`;
+}
+
+function modelProviderLabel(provider: string): string {
+  const status = providerAuth.find((item) => item.provider === provider);
+  return status ? providerDisplayName(status.provider) : provider;
+}
+
+function cleanModelLabel(model: ModelOption): string {
+  return (model.label ?? model.model).replace(/\s+\([^()]+\)$/, '');
+}
+
+function upstreamProviderLabel(provider: string): string {
+  const known: Record<string, string> = {
+    anthropic: 'Anthropic',
+    google: 'Google',
+    'github-copilot': 'GitHub Copilot',
+    openai: 'OpenAI',
+    'openai-codex': 'ChatGPT',
+  };
+  return known[provider] ?? provider
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toLocaleUpperCase() ?? ''}${part.slice(1)}`)
+    .join(' ');
+}
+
+function searchableModel(model: ModelOption): PickerModel {
+  const providerLabel = modelProviderLabel(model.provider);
+  const catalogLabel = cleanModelLabel(model);
+  const routeSeparator = model.model.indexOf('/');
+  const upstream =
+    (model.provider === 'pi-cli' || model.provider === 'opencode-cli') &&
+    routeSeparator > 0
+      ? model.model.slice(0, routeSeparator)
+      : '';
+  const groupKey = upstream
+    ? `${model.provider}:${upstream}`
+    : model.provider;
+  const groupLabel = upstream
+    ? `${providerLabel} · ${upstreamProviderLabel(upstream)}`
+    : providerLabel;
+  const upstreamPrefix = upstream
+    ? `${upstreamProviderLabel(upstream)} · `
+    : '';
+  const displayLabel = upstreamPrefix &&
+    catalogLabel.toLocaleLowerCase().startsWith(upstreamPrefix.toLocaleLowerCase())
+    ? catalogLabel.slice(upstreamPrefix.length)
+    : catalogLabel;
+  return {
+    ...model,
+    key: modelKey(model.provider, model.model),
+    providerLabel,
+    groupKey,
+    groupLabel,
+    displayLabel,
+    searchText: [
+      providerLabel,
+      model.provider,
+      upstream,
+      upstreamProviderLabel(upstream),
+      catalogLabel,
+      displayLabel,
+      model.model,
+    ].join(' ').toLocaleLowerCase(),
+  };
+}
+
+function positionModelPicker(): void {
+  if (modelPopoverEl.hidden) return;
+  const gap = 6;
+  const edge = 8;
+  const trigger = modelTriggerEl.getBoundingClientRect();
+  const popover = modelPopoverEl.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(edge, trigger.left),
+    Math.max(edge, window.innerWidth - popover.width - edge),
+  );
+  const preferredTop = trigger.top - popover.height - gap;
+  const top = Math.min(
+    Math.max(edge, preferredTop),
+    Math.max(edge, window.innerHeight - popover.height - edge),
+  );
+  modelPopoverEl.style.left = `${Math.round(left)}px`;
+  modelPopoverEl.style.top = `${Math.round(top)}px`;
+}
+
+function updateModelPickerActiveStyles(): void {
+  for (const option of modelOptionsVirtualEl.querySelectorAll<HTMLElement>(
+    '.model-option',
+  )) {
+    option.classList.toggle(
+      'active',
+      Number(option.dataset['modelIndex']) === modelPickerActiveIndex,
+    );
+  }
+  const activeId = modelPickerActiveIndex >= 0
+    ? `model-option-${modelPickerActiveIndex}`
+    : '';
+  if (activeId && document.getElementById(activeId)) {
+    modelSearchEl.setAttribute('aria-activedescendant', activeId);
+  }
+  else modelSearchEl.removeAttribute('aria-activedescendant');
+}
+
+function firstVisibleModelEntry(minimum: number): number {
+  let low = 0;
+  let high = modelPickerEntries.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const entry = modelPickerEntries[middle]!;
+    if (entry.top + entry.height < minimum) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function renderVirtualModelRows(): void {
+  if (modelPopoverEl.hidden) return;
+  const viewportTop = modelOptionsEl.scrollTop;
+  const viewportBottom = viewportTop + modelOptionsEl.clientHeight;
+  const minimum = Math.max(0, viewportTop - MODEL_OVERSCAN_PX);
+  const maximum = viewportBottom + MODEL_OVERSCAN_PX;
+  const activeKey = latestState
+    ? modelKey(latestState.provider, latestState.model)
+    : '';
+  const fragment = document.createDocumentFragment();
+
+  for (
+    let entryIndex = firstVisibleModelEntry(minimum);
+    entryIndex < modelPickerEntries.length;
+    entryIndex += 1
+  ) {
+    const entry = modelPickerEntries[entryIndex]!;
+    if (entry.top > maximum) break;
+    if (entry.kind === 'group') {
+      const heading = document.createElement('div');
+      heading.className = 'model-group-heading';
+      heading.setAttribute('role', 'presentation');
+      heading.style.top = `${entry.top}px`;
+      heading.style.height = `${entry.height}px`;
+      const label = document.createElement('span');
+      label.textContent = entry.label;
+      const count = document.createElement('span');
+      count.textContent = String(entry.count);
+      heading.append(label, count);
+      fragment.appendChild(heading);
+      continue;
+    }
+
+    const model = modelPickerModels[entry.optionIndex];
+    if (!model) continue;
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.id = `model-option-${entry.optionIndex}`;
+    option.className = 'model-option';
+    option.dataset['modelIndex'] = String(entry.optionIndex);
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(model.key === activeKey));
+    option.tabIndex = -1;
+    option.style.top = `${entry.top}px`;
+    option.style.height = `${entry.height}px`;
+    option.title = `${model.providerLabel} · ${model.model}`;
+
+    const name = document.createElement('span');
+    name.className = 'model-option-name';
+    name.textContent = model.displayLabel;
+    const route = document.createElement('span');
+    route.className = 'model-option-route';
+    route.textContent = model.model;
+    option.append(name, route);
+    if (model.recommended) {
+      const badge = document.createElement('span');
+      badge.className = 'model-option-badge';
+      badge.textContent = 'Recommended';
+      option.appendChild(badge);
+    }
+    option.addEventListener('mousemove', () => {
+      if (modelPickerActiveIndex === entry.optionIndex) return;
+      modelPickerActiveIndex = entry.optionIndex;
+      updateModelPickerActiveStyles();
+    });
+    option.addEventListener('click', () => {
+      selectModelPickerIndex(entry.optionIndex);
+    });
+    fragment.appendChild(option);
+  }
+
+  modelOptionsVirtualEl.replaceChildren(fragment);
+  updateModelPickerActiveStyles();
+}
+
+function rebuildModelPicker(resetScroll: boolean): void {
+  const previousKey = modelPickerModels[modelPickerActiveIndex]?.key;
+  const query = modelSearchEl.value.trim().toLocaleLowerCase();
+  const available = latestState && authPhase === 'ready'
+    ? visibleModels(latestState.models, providerAuth)
+    : [];
+  const matchingModels = available
+    .filter((model) => !modelPickerScope || model.provider === modelPickerScope)
+    .map(searchableModel)
+    .filter((model) => !query || model.searchText.includes(query));
+
+  // Catalogs such as OpenCode often interleave upstream providers. Flatten the
+  // groups into their visual order before assigning indices so Arrow keys move
+  // to the row directly above or below instead of jumping between groups.
+  const groupedModels = new Map<string, PickerModel[]>();
+  for (const model of matchingModels) {
+    const group = groupedModels.get(model.groupKey) ?? [];
+    group.push(model);
+    groupedModels.set(model.groupKey, group);
+  }
+  modelPickerModels = [...groupedModels.values()].flat();
+
+  const byGroup = new Map<
+    string,
+    { provider: string; label: string; indices: number[] }
+  >();
+  for (let index = 0; index < modelPickerModels.length; index += 1) {
+    const model = modelPickerModels[index]!;
+    const group = byGroup.get(model.groupKey) ?? {
+      provider: model.provider,
+      label: model.groupLabel,
+      indices: [],
+    };
+    group.indices.push(index);
+    byGroup.set(model.groupKey, group);
+  }
+  modelPickerEntries = [];
+  modelPickerOptionEntries = new Array(modelPickerModels.length);
+  let top = 0;
+  for (const group of byGroup.values()) {
+    modelPickerEntries.push({
+      kind: 'group',
+      top,
+      height: MODEL_GROUP_HEIGHT,
+      provider: group.provider,
+      label: group.label,
+      count: group.indices.length,
+    });
+    top += MODEL_GROUP_HEIGHT;
+    for (const optionIndex of group.indices) {
+      const entry: Extract<PickerEntry, { kind: 'option' }> = {
+        kind: 'option',
+        top,
+        height: MODEL_OPTION_HEIGHT,
+        optionIndex,
+      };
+      modelPickerEntries.push(entry);
+      modelPickerOptionEntries[optionIndex] = entry;
+      top += MODEL_OPTION_HEIGHT;
+    }
+  }
+  modelOptionsVirtualEl.style.height = `${Math.max(top, 82)}px`;
+  modelOptionsEl.classList.toggle('empty', modelPickerModels.length === 0);
+  const oldEmpty = modelOptionsEl.querySelector('.model-picker-empty');
+  oldEmpty?.remove();
+  if (modelPickerModels.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'model-picker-empty';
+    empty.textContent = query
+      ? 'No matching models'
+      : 'No models are available for this account';
+    modelOptionsEl.appendChild(empty);
+  }
+
+  const selectedKey = latestState
+    ? modelKey(latestState.provider, latestState.model)
+    : '';
+  const preferredIndex = resetScroll
+    ? -1
+    : modelPickerModels.findIndex((model) => model.key === previousKey);
+  const selectedIndex = modelPickerModels.findIndex(
+    (model) => model.key === selectedKey,
+  );
+  modelPickerActiveIndex = preferredIndex >= 0
+    ? preferredIndex
+    : selectedIndex >= 0
+      ? selectedIndex
+      : modelPickerModels.length > 0
+        ? 0
+        : -1;
+  if (resetScroll) {
+    modelOptionsEl.scrollTop = 0;
+    const activeEntry = modelEntryForOption(modelPickerActiveIndex);
+    if (
+      activeEntry &&
+      activeEntry.top + activeEntry.height > modelOptionsEl.clientHeight
+    ) {
+      modelOptionsEl.scrollTop = Math.max(
+        0,
+        activeEntry.top + activeEntry.height - modelOptionsEl.clientHeight,
+      );
+    }
+  }
+  modelResultCountEl.textContent = `${modelPickerModels.length} ${
+    modelPickerModels.length === 1 ? 'model' : 'models'
+  }`;
+  renderVirtualModelRows();
+}
+
+function modelEntryForOption(index: number): Extract<PickerEntry, { kind: 'option' }> | undefined {
+  return modelPickerOptionEntries[index];
+}
+
+function moveModelPickerActive(nextIndex: number): void {
+  if (modelPickerModels.length === 0) return;
+  modelPickerActiveIndex = Math.max(
+    0,
+    Math.min(modelPickerModels.length - 1, nextIndex),
+  );
+  const entry = modelEntryForOption(modelPickerActiveIndex);
+  if (entry) {
+    const top = modelOptionsEl.scrollTop;
+    const bottom = top + modelOptionsEl.clientHeight;
+    if (entry.top < top) modelOptionsEl.scrollTop = entry.top;
+    else if (entry.top + entry.height > bottom) {
+      modelOptionsEl.scrollTop = entry.top + entry.height - modelOptionsEl.clientHeight;
+    }
+  }
+  renderVirtualModelRows();
+}
+
+function selectModelPickerIndex(index: number): void {
+  const model = modelPickerModels[index];
+  if (!model) return;
+  closeModelPicker(false);
+  inputEl.focus();
+  void window.aside
+    .setModel(model.provider, model.model)
+    .catch(() => void refreshProviderAuth());
+}
+
+function openModelPicker(scope: ProviderAuthId | null = null): void {
+  if (modelTriggerEl.disabled || !latestState) return;
+  if (!accountsPopoverEl.hidden) hideAccounts(false);
+  modelPickerScope = scope;
+  modelSearchEl.value = '';
+  modelPickerTitleEl.textContent = scope
+    ? `Choose a ${modelProviderLabel(scope)} model`
+    : 'Choose observer model';
+  modelSearchEl.placeholder = scope
+    ? `Search ${modelProviderLabel(scope)} models`
+    : 'Search models or routes';
+  modelPopoverEl.hidden = false;
+  modelTriggerEl.setAttribute('aria-expanded', 'true');
+  rebuildModelPicker(true);
+  positionModelPicker();
+  modelSearchEl.focus();
+}
+
+function closeModelPicker(restoreFocus = true): void {
+  if (modelPopoverEl.hidden) return;
+  modelPopoverEl.hidden = true;
+  modelTriggerEl.setAttribute('aria-expanded', 'false');
+  modelPickerScope = null;
+  modelSearchEl.value = '';
+  if (modelPickerRenderFrame !== null) {
+    cancelAnimationFrame(modelPickerRenderFrame);
+    modelPickerRenderFrame = null;
+  }
+  if (restoreFocus) modelTriggerEl.focus();
+}
+
+function openPendingModelPicker(): void {
+  const provider = pendingModelProvider;
+  if (!provider || !latestState || busyProviderId) return;
+  const available = visibleModels(latestState.models, providerAuth);
+  if (!available.some((model) => model.provider === provider)) return;
+  pendingModelProvider = null;
+  openModelPicker(provider);
 }
 
 function formatDuration(ms: number): string {
@@ -289,7 +725,8 @@ function formatDuration(ms: number): string {
 function sourceGlyph(source: string): string {
   if (source === 'claude') return 'C';
   if (source === 'codex') return 'X';
-  return 'P';
+  if (source === 'pi') return 'P';
+  return 'O';
 }
 
 function activeSession(state: MenubarState): SessionSummary | undefined {
@@ -300,6 +737,7 @@ function providerMark(provider: ProviderAuthId): string {
   if (provider === 'codex-cli') return 'X';
   if (provider === 'claude-cli') return 'C';
   if (provider === 'pi-cli') return 'P';
+  if (provider === 'opencode-cli') return 'OC';
   return 'O';
 }
 
@@ -721,14 +1159,26 @@ async function connectProvider(provider: ProviderAuthId): Promise<void> {
   if (latestState) render(latestState);
   try {
     const statuses = await window.aside.connectProvider(provider);
+    if (
+      provider === 'opencode-cli' &&
+      statuses.some(
+        (status) => status.provider === provider && isProviderUsable(status),
+      )
+    ) {
+      // OpenCode deliberately has no implicit "first model". Carry the
+      // successful consent action into the exact route picker instead.
+      pendingModelProvider = provider;
+      if (!accountsPopoverEl.hidden) hideAccounts(false);
+    }
     updateProviderAuth(statuses);
-    inputEl.focus();
+    if (provider !== 'opencode-cli') inputEl.focus();
   } catch (error) {
     authError = safeErrorMessage(error);
   } finally {
     busyProviderId = null;
     lastProviderSurfaceKey = '';
     if (latestState) render(latestState);
+    requestAnimationFrame(openPendingModelPicker);
   }
 }
 
@@ -753,17 +1203,21 @@ async function disconnectProvider(provider: ProviderAuthId): Promise<void> {
 function providerRecoveryLink(status: ProviderAuthStatus) {
   if (
     status.state === 'missing' ||
-    (status.provider === 'pi-cli' &&
-      (status.reason === 'no_models' || status.reason === 'client_too_old'))
+    ((status.provider === 'pi-cli' || status.provider === 'opencode-cli') &&
+      (status.reason === 'no_models' ||
+        status.reason === 'client_too_old' ||
+        status.reason === 'client_unsupported' ||
+        status.reason === 'auth_configuration_unsupported' ||
+        status.reason === 'no_audited_models'))
   ) {
-    return providerHelpLink(status.provider);
+    return providerHelpLink(status.provider, status.reason);
   }
   return undefined;
 }
 
-function configuredPiModelSummary(): string | null {
+function configuredBrokerModelSummary(provider: ProviderAuthId): string | null {
   const options = latestState?.models.filter(
-    (model) => model.provider === 'pi-cli',
+    (model) => model.provider === provider,
   ) ?? [];
   if (options.length === 0) return null;
   const upstreamProviders = new Set(
@@ -779,8 +1233,14 @@ function configuredPiModelSummary(): string | null {
 }
 
 function providerDetail(status: ProviderAuthStatus): string {
-  if (status.provider === 'pi-cli' && status.state === 'configured') {
-    return configuredPiModelSummary() ?? 'Authenticated models available through Pi';
+  if (
+    (status.provider === 'pi-cli' || status.provider === 'opencode-cli') &&
+    status.state === 'configured'
+  ) {
+    return configuredBrokerModelSummary(status.provider) ??
+      (status.provider === 'pi-cli'
+        ? 'Authenticated models available through Pi'
+        : 'Models available through OpenCode');
   }
   return providerStatusText(status);
 }
@@ -788,6 +1248,9 @@ function providerDetail(status: ProviderAuthStatus): string {
 function disconnectDetail(status: ProviderAuthStatus): string {
   if (status.provider === 'pi-cli') {
     return 'Only disconnects from Aside. Pi accounts and settings stay unchanged.';
+  }
+  if (status.provider === 'opencode-cli') {
+    return 'Only disconnects from Aside. OpenCode accounts and settings stay unchanged.';
   }
   if (status.provider === 'ollama') {
     return 'Only disconnects from Aside. Ollama stays available on this Mac.';
@@ -797,7 +1260,9 @@ function disconnectDetail(status: ProviderAuthStatus): string {
 
 function providerActionLabel(status: ProviderAuthStatus): string {
   if (busyProviderId === status.provider) {
-    return status.state === 'signed_out' ? 'Waiting…' : 'Working…';
+    return status.state === 'signed_out' && status.reason !== 'access_not_granted'
+      ? 'Waiting…'
+      : 'Working…';
   }
   if (canDisconnectProvider(status)) return 'Disconnect';
   const help = providerRecoveryLink(status);
@@ -805,8 +1270,11 @@ function providerActionLabel(status: ProviderAuthStatus): string {
     return status.reason === 'client_too_old' ? 'Update Guide…' : help.label;
   }
   if (status.state === 'signed_in') return `Use ${providerDisplayName(status.provider)}`;
-  if (status.state === 'configured') return 'Use Pi';
+  if (status.state === 'configured') {
+    return `Use ${providerDisplayName(status.provider)}`;
+  }
   if (status.state === 'local_ready') return 'Use Ollama';
+  if (status.reason === 'access_not_granted') return 'Use OpenCode';
   if (status.state === 'signed_out') return 'Sign in';
   if (status.reason === 'no_models') return 'No models';
   if (status.state === 'error') return 'Try Again';
@@ -834,7 +1302,9 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
       ? disconnectDetail(status)
       : busyProviderId === status.provider
         ? status.state === 'signed_out'
-          ? 'Waiting for sign-in in your browser…'
+          ? status.reason === 'access_not_granted'
+            ? 'Checking source-audited OpenCode routes…'
+            : 'Waiting for sign-in in your browser…'
           : 'Updating Aside…'
         : providerDetail(status);
   detail.title = detail.textContent;
@@ -871,6 +1341,7 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
     (status.state === 'signed_in' ||
       status.state === 'configured' ||
       status.state === 'local_ready' ||
+      status.reason === 'access_not_granted' ||
       help)
       ? ' primary'
       : ''
@@ -890,15 +1361,24 @@ function makeProviderRow(status: ProviderAuthStatus): HTMLDivElement {
       return;
     }
     if (help) {
-      void window.aside.openProviderHelp(status.provider).catch((error) => {
+      void window.aside
+        .openProviderHelp(status.provider, status.reason)
+        .catch((error) => {
         authError = safeErrorMessage(error);
         lastProviderSurfaceKey = '';
         if (latestState) render(latestState);
-      });
+        });
       return;
     }
     if (status.state === 'error') {
-      void refreshProviderAuth();
+      // An OpenCode error shown after the user clicked Use came from the full,
+      // consented route probe. Retrying must repeat that explicit probe; a
+      // routine metadata refresh would only erase the actionable reason.
+      if (status.provider === 'opencode-cli' && !status.enabled) {
+        void connectProvider(status.provider);
+      } else {
+        void refreshProviderAuth();
+      }
       return;
     }
     void connectProvider(status.provider);
@@ -948,6 +1428,7 @@ function showAccounts(): void {
   ) {
     return;
   }
+  closeModelPicker(false);
   accountsPopoverEl.hidden = false;
   accountsButtonEl.setAttribute('aria-expanded', 'true');
   pendingDisconnectId = null;
@@ -957,12 +1438,12 @@ function showAccounts(): void {
   void refreshProviderAuth();
 }
 
-function hideAccounts(): void {
+function hideAccounts(restoreFocus = true): void {
   accountsPopoverEl.hidden = true;
   accountsButtonEl.setAttribute('aria-expanded', 'false');
   pendingDisconnectId = null;
   lastProviderSurfaceKey = '';
-  accountsButtonEl.focus();
+  if (restoreFocus) accountsButtonEl.focus();
 }
 
 function makeThreadButton(
@@ -2143,7 +2624,7 @@ function renderTodayContent(view: TodayViewState): void {
   // On an empty day, `diary.overview` is sufficient; avoid adding a second,
   // visually heavier empty state below it.
   if (view.diary.counts.eventCount > 0) {
-    const modelUnavailable = isUnavailablePiModel(view.provider, view.model);
+    const modelUnavailable = isUnavailableBrokeredModel(view.provider, view.model);
     const canGenerate =
       authPhase === 'ready' &&
       canAskWithModel(
@@ -2163,7 +2644,7 @@ function renderTodayContent(view: TodayViewState): void {
         kind: 'today',
         title: 'Daily recap',
         emptyCopy: modelUnavailable
-          ? unavailablePiModelCopy(view.provider, view.model)
+          ? unavailableBrokeredModelCopy(view.provider, view.model)
           : canGenerate
             ? 'Preparing today’s recap…'
             : 'Connect the selected observer account to add a generated recap.',
@@ -2229,12 +2710,12 @@ function renderReviewContent(view: ThreadReviewViewState): void {
     );
   } else {
     appendInsights(content, view.insights);
-    const modelUnavailable = isUnavailablePiModel(view.provider, view.model);
+    const modelUnavailable = isUnavailableBrokeredModel(view.provider, view.model);
     appendGeneratedArtifact(content, {
       kind: 'review',
       title: 'Thread review',
       emptyCopy: modelUnavailable
-        ? unavailablePiModelCopy(view.provider, view.model)
+        ? unavailableBrokeredModelCopy(view.provider, view.model)
         : 'Generate a review of the goal, approach, friction, observed outcome, and possible next step.',
       buttonId: 'generate-review',
       artifact: view.artifact,
@@ -2499,7 +2980,7 @@ function renderModels(state: MenubarState): void {
   const activeProviderLabel = activeProvider
     ? providerDisplayName(activeProvider.provider)
     : state.provider;
-  const activePiModelUnavailable = isUnavailablePiModel(
+  const activeBrokeredModelUnavailable = isUnavailableBrokeredModel(
     state.provider,
     state.model,
   );
@@ -2511,50 +2992,39 @@ function renderModels(state: MenubarState): void {
       (model) => `${modelKey(model.provider, model.model)}:${model.label ?? ''}`,
     ),
   ].join('|');
-  if (modelsEl.dataset['key'] !== modelsKey) {
-    modelsEl.dataset['key'] = modelsKey;
-    modelsEl.innerHTML = '';
-    if (!activeAvailable) {
-      const locked = document.createElement('option');
-      locked.value = activeKey;
-      locked.textContent = activePiModelUnavailable
-        ? `${activeProviderLabel} · ${state.model} · unavailable`
-        : `${activeProviderLabel} · disconnected`;
-      locked.disabled = true;
-      modelsEl.appendChild(locked);
-    }
-    const byProvider = new Map<string, typeof available>();
-    for (const model of available) {
-      const list = byProvider.get(model.provider) ?? [];
-      list.push(model);
-      byProvider.set(model.provider, list);
-    }
-    for (const [provider, list] of byProvider) {
-      const group = document.createElement('optgroup');
-      const knownProvider = providerAuth.find(
-        (status) => status.provider === provider,
-      );
-      group.label = knownProvider
-        ? providerDisplayName(knownProvider.provider)
-        : provider;
-      for (const model of list) {
-        const option = document.createElement('option');
-        option.value = modelKey(model.provider, model.model);
-        const label = (model.label ?? model.model).replace(/\s+\([^()]+\)$/, '');
-        option.textContent = `${label}${model.recommended ? ' · recommended' : ''}`;
-        group.appendChild(option);
-      }
-      modelsEl.appendChild(group);
-    }
-    const connect = document.createElement('option');
-    connect.value = '__connect__';
-    connect.textContent = available.length > 0
-      ? 'Connect another provider…'
-      : 'Connect an account…';
-    modelsEl.appendChild(connect);
+  if (modelCatalogRenderKey !== modelsKey) {
+    modelCatalogRenderKey = modelsKey;
+    // Keep only the current value in the compatibility select. The searchable
+    // popover virtualizes the actual catalog, so 1,000 OpenCode routes do not
+    // become 1,000 hidden DOM nodes on every state update.
+    const current = document.createElement('option');
+    current.value = activeKey;
+    current.textContent = activeBrokeredModelUnavailable
+      ? `${activeProviderLabel} · ${state.model} · unavailable`
+      : `${activeProviderLabel} · ${state.model}`;
+    modelsEl.replaceChildren(current);
+    if (!modelPopoverEl.hidden) rebuildModelPicker(false);
   }
   modelsEl.value = activeKey;
   modelsEl.disabled = state.thinking || authPhase === 'loading';
+  modelTriggerEl.disabled = modelsEl.disabled;
+  const activeModel = state.models.find(
+    (model) => modelKey(model.provider, model.model) === activeKey,
+  );
+  modelTriggerProviderEl.textContent = activeProviderLabel;
+  modelTriggerLabelEl.textContent = activeModel
+    ? cleanModelLabel(activeModel)
+    : state.model;
+  modelTriggerStatusEl.hidden = !activeBrokeredModelUnavailable;
+  modelTriggerEl.title = `${activeProviderLabel} · ${state.model}${
+    activeBrokeredModelUnavailable
+      ? ' · unavailable'
+      : activeAvailable
+        ? ''
+        : ' · disconnected'
+  }`;
+  if (!modelPopoverEl.hidden) positionModelPicker();
+  if (pendingModelProvider) requestAnimationFrame(openPendingModelPicker);
 }
 
 function renderMessages(state: MenubarState): void {
@@ -2582,7 +3052,7 @@ function renderMessages(state: MenubarState): void {
       ? 'This conversation stays with this session.'
       : state.sessions.length > 0
         ? 'Use the fleet thread, or choose one session from the sidebar.'
-        : 'Claude, Codex, and Pi sessions appear here automatically.';
+        : 'Claude Code, Codex, Pi, and OpenCode sessions appear here automatically.';
     empty.append(title, body);
     messagesEl.appendChild(empty);
   }
@@ -2760,7 +3230,7 @@ function render(state: MenubarState): void {
   const activeProviderLabel = activeAuth
     ? providerDisplayName(activeAuth.provider)
     : state.provider;
-  const activePiModelUnavailable = isUnavailablePiModel(
+  const activeBrokeredModelUnavailable = isUnavailableBrokeredModel(
     state.provider,
     state.model,
   );
@@ -2796,8 +3266,8 @@ function render(state: MenubarState): void {
         ? 'Checking account status…'
         : firstRun
           ? 'Choose an account above to chat…'
-          : activePiModelUnavailable
-            ? 'Choose another Pi model to chat…'
+          : activeBrokeredModelUnavailable
+            ? 'Choose another model for this account…'
           : activeAuth
             ? `${activeAuth.enabled ? 'Reconnect' : 'Connect'} ${activeProviderLabel} to chat…`
             : 'Connect an account to chat…';
@@ -2810,14 +3280,14 @@ function render(state: MenubarState): void {
       ? 'Checking account status…'
       : firstRun
         ? 'Choose a model account above to unlock this side chat.'
-        : activePiModelUnavailable
-          ? unavailablePiModelCopy(state.provider, state.model)
+        : activeBrokeredModelUnavailable
+          ? unavailableBrokeredModelCopy(state.provider, state.model)
         : activeAuth
           ? `This thread uses ${activeProviderLabel}. ${
               activeAuth.enabled ? 'Reconnect it' : 'Connect it'
             } or choose a connected model.`
           : 'Connect an account before sending transcript context to a model.';
-  providerLockActionEl.textContent = activePiModelUnavailable
+  providerLockActionEl.textContent = activeBrokeredModelUnavailable
     ? 'Choose model…'
     : activeAuth?.enabled
       ? 'Reconnect…'
@@ -2832,7 +3302,7 @@ function render(state: MenubarState): void {
         ? 'Connect an account'
         : usable.length === 1
           ? providerDisplayName(usable[0]!.provider)
-          : `${usable.length} accounts`;
+          : `${usable.length} connected`;
   storagePathEl.textContent = state.storagePath;
   diagnosticsEl.textContent =
     `${topLevelCount} threads · ${subagentCount} subagents · ${state.recentSessionCount} recent · ` +
@@ -2854,7 +3324,11 @@ function render(state: MenubarState): void {
 
   renderThreads(state);
   renderModels(state);
-  if (firstRun) modelsEl.disabled = true;
+  if (firstRun) {
+    modelsEl.disabled = true;
+    modelTriggerEl.disabled = true;
+    closeModelPicker(false);
+  }
   renderMessages(state);
   renderAnalysisView();
   renderProviderSurfaces();
@@ -3201,19 +3675,80 @@ function formatShortDate(day: string): string {
   });
 }
 
-modelsEl.addEventListener('change', () => {
-  const raw = modelsEl.value;
-  if (raw === '__connect__') {
-    showAccounts();
-    if (latestState) modelsEl.value = modelKey(latestState.provider, latestState.model);
+modelTriggerEl.addEventListener('click', () => {
+  if (modelPopoverEl.hidden) openModelPicker();
+  else closeModelPicker();
+});
+modelTriggerEl.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  event.preventDefault();
+  if (modelPopoverEl.hidden) openModelPicker();
+  if (event.key === 'ArrowUp') {
+    moveModelPickerActive(modelPickerModels.length - 1);
+  }
+});
+modelSearchEl.addEventListener('input', () => rebuildModelPicker(true));
+modelSearchEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeModelPicker();
     return;
   }
-  const separator = raw.indexOf(':');
-  if (separator === -1) return;
-  void window.aside
-    .setModel(raw.slice(0, separator), raw.slice(separator + 1))
-    .catch(() => void refreshProviderAuth());
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    selectModelPickerIndex(modelPickerActiveIndex);
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    moveModelPickerActive(
+      modelPickerActiveIndex + (event.key === 'ArrowDown' ? 1 : -1),
+    );
+    return;
+  }
+  if (event.key === 'PageDown' || event.key === 'PageUp') {
+    event.preventDefault();
+    const rows = Math.max(
+      1,
+      Math.floor(modelOptionsEl.clientHeight / MODEL_OPTION_HEIGHT) - 1,
+    );
+    moveModelPickerActive(
+      modelPickerActiveIndex + (event.key === 'PageDown' ? rows : -rows),
+    );
+    return;
+  }
+  if (event.key === 'Home' || event.key === 'End') {
+    event.preventDefault();
+    moveModelPickerActive(
+      event.key === 'Home' ? 0 : modelPickerModels.length - 1,
+    );
+  }
 });
+modelPopoverEl.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  closeModelPicker();
+});
+modelOptionsEl.addEventListener('scroll', () => {
+  if (modelPickerRenderFrame !== null) return;
+  modelPickerRenderFrame = requestAnimationFrame(() => {
+    modelPickerRenderFrame = null;
+    renderVirtualModelRows();
+  });
+});
+modelConnectEl.addEventListener('click', () => {
+  closeModelPicker(false);
+  showAccounts();
+});
+document.addEventListener('pointerdown', (event) => {
+  if (modelPopoverEl.hidden) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (modelPopoverEl.contains(target) || modelTriggerEl.contains(target)) return;
+  closeModelPicker(false);
+});
+window.addEventListener('resize', positionModelPicker);
 
 formEl.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -3273,19 +3808,17 @@ accountsButtonEl.addEventListener('click', () => {
   if (accountsPopoverEl.hidden) showAccounts();
   else hideAccounts();
 });
-accountsCloseEl.addEventListener('click', hideAccounts);
+accountsCloseEl.addEventListener('click', () => hideAccounts());
 providerLockActionEl.addEventListener('click', () => {
   if (
     latestState &&
-    isUnavailablePiModel(latestState.provider, latestState.model)
+    isUnavailableBrokeredModel(latestState.provider, latestState.model)
   ) {
-    const picker = modelsEl as HTMLSelectElement & { showPicker?: () => void };
-    picker.focus();
-    try {
-      picker.showPicker?.();
-    } catch {
-      // Focusing the native select is still a useful fallback on older Electron.
-    }
+    const provider = latestState.provider === 'pi-cli' ||
+      latestState.provider === 'opencode-cli'
+      ? latestState.provider
+      : null;
+    openModelPicker(provider);
     return;
   }
   showAccounts();

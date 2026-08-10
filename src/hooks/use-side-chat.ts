@@ -9,10 +9,14 @@ import type { SessionAttention, TrackedSession } from '../types/session.js';
 interface UseSideChatProps {
   sessions: TrackedSession[];
   jsonlPaths: Map<string, string>;
-  selectedSessionId: string | null;
+  selectedThreadId: string | null;
   defaultProvider: string;
   defaultModel: string;
-  onSessionActivity: (sessionId: string, activity: string) => void;
+  onSessionActivity: (
+    sessionId: string,
+    activity: string,
+    source: TrackedSession['source'],
+  ) => void;
 }
 
 interface UseSideChatResult {
@@ -29,7 +33,7 @@ interface UseSideChatResult {
 export function useSideChat({
   sessions,
   jsonlPaths,
-  selectedSessionId,
+  selectedThreadId,
   defaultProvider,
   defaultModel,
   onSessionActivity,
@@ -45,7 +49,8 @@ export function useSideChat({
     serviceRef.current = new SideChatService(
       new SideChatEngine({ provider: defaultProvider, model: defaultModel }),
       {
-        onActivity: (id, activity) => onActivityRef.current(id, activity),
+        onActivity: (id, activity, source) =>
+          onActivityRef.current(id, activity, source),
         onThinking: rerender,
         onChat: rerender,
         onTranscript: rerender,
@@ -67,9 +72,9 @@ export function useSideChat({
 
   useEffect(() => {
     serviceRef.current?.selectThread(
-      selectedSessionId ? sessionThreadId(selectedSessionId) : FLEET_THREAD_ID,
+      selectedThreadId ?? FLEET_THREAD_ID,
     );
-  }, [selectedSessionId]);
+  }, [selectedThreadId]);
 
   useEffect(() => {
     return () => {
@@ -94,10 +99,13 @@ export function useSideChat({
     provider: active?.provider ?? defaultProvider,
     model: active?.model ?? defaultModel,
     attentionBySession: new Map(
-      sessions.map((session) => [session.id, service?.getSessionAttention(session.id) ?? {
-        needsUser: false,
-        reason: '',
-      }]),
+      sessions.map((session) => [
+        sessionThreadId(session.source, session.id),
+        service?.getSessionAttention(session) ?? {
+          needsUser: false,
+          reason: '',
+        },
+      ]),
     ),
     ask,
     setModel,

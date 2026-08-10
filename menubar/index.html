@@ -48,6 +48,40 @@
           --shadow: 0 24px 80px rgba(0, 0, 0, .55);
         }
       }
+      :root[data-capture-theme="light"] {
+        --window: #ffffff;
+        --sidebar: #f5f5f5;
+        --surface: #f7f7f7;
+        --surface-hover: #ededed;
+        --selection: #e7e7e7;
+        --line: rgba(0, 0, 0, .09);
+        --line-strong: rgba(0, 0, 0, .16);
+        --text: #1d1d1f;
+        --secondary: #6e6e73;
+        --tertiary: #9a9a9f;
+        --accent: #007aff;
+        --success: #248a3d;
+        --attention: #c66a00;
+        --danger: #d70015;
+        --shadow: 0 20px 70px rgba(0, 0, 0, .22);
+      }
+      :root[data-capture-theme="dark"] {
+        --window: #1c1c1e;
+        --sidebar: #171719;
+        --surface: #262628;
+        --surface-hover: #2b2b2e;
+        --selection: #303033;
+        --line: rgba(255, 255, 255, .085);
+        --line-strong: rgba(255, 255, 255, .16);
+        --text: #f2f2f2;
+        --secondary: #98989f;
+        --tertiary: #696970;
+        --accent: #0a84ff;
+        --success: #30d158;
+        --attention: #ff9f0a;
+        --danger: #ff453a;
+        --shadow: 0 24px 80px rgba(0, 0, 0, .55);
+      }
       * { box-sizing: border-box; }
       [hidden] { display: none !important; }
       html, body { width: 100%; height: 100%; }
@@ -1368,15 +1402,257 @@
         color: var(--secondary);
         font-size: 9px;
       }
-      #models {
+      .model-picker-anchor {
         min-width: 0;
-        max-width: min(100%, 330px);
-        padding: 1px 15px 1px 0;
+        max-width: min(100%, 360px);
+      }
+      #models { display: none; }
+      #model-trigger {
+        min-width: 0;
+        max-width: 100%;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin: 0;
+        padding: 1px 5px 1px 3px;
         color: var(--secondary);
-        border: 0;
+        border: 1px solid transparent;
+        border-radius: 5px;
         outline: 0;
         background: transparent;
         font-size: 9px;
+        line-height: 1;
+        cursor: default;
+      }
+      #model-trigger:hover:not(:disabled),
+      #model-trigger[aria-expanded="true"] {
+        color: var(--text);
+        border-color: var(--line);
+        background: var(--surface-hover);
+      }
+      #model-trigger:focus-visible {
+        border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+      }
+      #model-trigger:disabled { color: var(--tertiary); }
+      #model-trigger-provider { flex: none; font-weight: 560; }
+      .model-trigger-separator { flex: none; color: var(--tertiary); }
+      #model-trigger-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #model-trigger-status {
+        width: 5px;
+        height: 5px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--attention);
+      }
+      #model-trigger-chevron {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        margin-left: 1px;
+        color: var(--tertiary);
+        transition: transform .14s ease;
+      }
+      #model-trigger[aria-expanded="true"] #model-trigger-chevron {
+        transform: rotate(180deg);
+      }
+
+      /* Searchable observer-model picker */
+      .model-popover {
+        position: fixed;
+        z-index: 40;
+        width: min(370px, calc(100vw - 16px));
+        max-height: calc(100vh - 16px);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--window) 94%, transparent);
+        box-shadow: 0 18px 54px rgba(0, 0, 0, .24), 0 1px 0 rgba(255, 255, 255, .16) inset;
+        -webkit-backdrop-filter: blur(28px) saturate(1.24);
+        backdrop-filter: blur(28px) saturate(1.24);
+      }
+      .model-picker-head {
+        flex: none;
+        padding: 9px 9px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      #model-picker-title {
+        display: block;
+        margin: 0 2px 7px;
+        color: var(--secondary);
+        font-size: 10px;
+        font-weight: 570;
+      }
+      .model-search-wrap { position: relative; }
+      .model-search-icon {
+        position: absolute;
+        top: 50%;
+        left: 8px;
+        width: 12px;
+        height: 12px;
+        color: var(--tertiary);
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+      .model-search-icon svg { display: block; width: 100%; height: 100%; }
+      #model-search {
+        width: 100%;
+        height: 29px;
+        padding: 0 10px 0 27px;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        outline: 0;
+        background: var(--surface);
+        font-size: 11px;
+        user-select: text;
+        -webkit-appearance: none;
+      }
+      #model-search::-webkit-search-cancel-button { display: none; }
+      #model-search:focus {
+        border-color: color-mix(in srgb, var(--accent) 56%, transparent);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
+      }
+      #model-search::placeholder { color: var(--tertiary); }
+      #model-options {
+        position: relative;
+        min-height: 82px;
+        height: min(282px, calc(100vh - 150px));
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+      }
+      #model-options-virtual { position: relative; width: 100%; }
+      .model-group-heading,
+      .model-option {
+        position: absolute;
+        left: 0;
+        width: 100%;
+      }
+      .model-group-heading {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        padding: 8px 12px 3px;
+        color: var(--secondary);
+        font-size: 10px;
+        font-weight: 620;
+        letter-spacing: .01em;
+      }
+      .model-group-heading span:last-child {
+        color: var(--tertiary);
+        font-weight: 450;
+      }
+      .model-option {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-rows: 18px 15px;
+        align-content: center;
+        column-gap: 9px;
+        padding: 4px 11px 4px 12px;
+        color: var(--text);
+        border: 0;
+        outline: 0;
+        background: transparent;
+        text-align: left;
+        cursor: default;
+      }
+      .model-option::after {
+        content: "";
+        width: 4px;
+        height: 8px;
+        grid-column: 2;
+        grid-row: 1 / span 2;
+        place-self: center;
+        border: 1.5px solid transparent;
+        border-top: 0;
+        border-left: 0;
+        transform: rotate(45deg) translate(-1px, -1px);
+      }
+      .model-option[aria-selected="true"]::after { border-color: var(--accent); }
+      .model-option.active { background: var(--selection); }
+      .model-option-name {
+        min-width: 0;
+        overflow: hidden;
+        grid-column: 1;
+        grid-row: 1;
+        font-size: 11px;
+        font-weight: 540;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .model-option-route {
+        min-width: 0;
+        overflow: hidden;
+        grid-column: 1;
+        grid-row: 2;
+        color: var(--tertiary);
+        font: 10px/1.35 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .model-option-badge {
+        align-self: center;
+        grid-column: 1;
+        grid-row: 1;
+        width: fit-content;
+        margin-left: auto;
+        padding-left: 8px;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 540;
+      }
+      .model-picker-empty {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        color: var(--tertiary);
+        font-size: 10px;
+        text-align: center;
+      }
+      .model-picker-foot {
+        min-height: 35px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 7px 5px 10px;
+        color: var(--tertiary);
+        border-top: 1px solid var(--line);
+        font-size: 10px;
+      }
+      #model-result-count {
+        min-width: 0;
+        overflow: hidden;
+        flex: 1;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #model-connect {
+        flex: none;
+        padding: 4px 6px;
+        color: var(--accent);
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        font-size: 10px;
+        cursor: default;
+      }
+      #model-connect:hover,
+      #model-connect:focus-visible { background: var(--surface-hover); outline: 0; }
+
+      @media (prefers-reduced-motion: reduce) {
+        #model-trigger-chevron { transition: none; }
       }
 
       /* Accounts popover */
@@ -2092,12 +2368,68 @@
               <button id="send" type="submit" aria-label="Send">↑</button>
             </form>
             <div class="composer-meta">
-              <select id="models" title="Observer model for this thread"></select>
+              <div class="model-picker-anchor">
+                <button
+                  id="model-trigger"
+                  type="button"
+                  title="Observer model for this thread"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+                  aria-controls="model-popover"
+                >
+                  <span id="model-trigger-provider">Observer</span>
+                  <span class="model-trigger-separator">·</span>
+                  <span id="model-trigger-label">Choose model</span>
+                  <span id="model-trigger-status" aria-label="Unavailable" hidden></span>
+                  <svg id="model-trigger-chevron" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                    <path d="m2 3.5 3 3 3-3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </button>
+                <select id="models" aria-hidden="true" tabindex="-1" title="Observer model for this thread"></select>
+              </div>
             </div>
           </div>
         </div>
       </section>
     </main>
+
+    <section
+      id="model-popover"
+      class="model-popover"
+      role="dialog"
+      aria-labelledby="model-picker-title"
+      hidden
+    >
+      <div class="model-picker-head">
+        <strong id="model-picker-title">Choose observer model</strong>
+        <div class="model-search-wrap">
+          <span class="model-search-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.3" stroke="currentColor" stroke-width="1.4"></circle>
+              <path d="m10.2 10.2 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path>
+            </svg>
+          </span>
+          <input
+            id="model-search"
+            type="search"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls="model-options"
+            aria-expanded="true"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search models or routes"
+          />
+        </div>
+      </div>
+      <div id="model-options" role="listbox" aria-label="Observer models" tabindex="-1">
+        <div id="model-options-virtual"></div>
+      </div>
+      <div class="model-picker-foot">
+        <span id="model-result-count" role="status" aria-live="polite"></span>
+        <button id="model-connect" type="button">Manage model access…</button>
+      </div>
+    </section>
 
     <section
       id="accounts-popover"
@@ -2124,7 +2456,8 @@
         <div id="settings-view" class="settings-body">
           <div class="settings-section">
             <h3>Accounts</h3>
-            <p>Aside can use models through Codex, Claude Code, Pi, or local Ollama. Credentials stay with those clients; Disconnect only revokes Aside’s permission.</p>
+            <p>Aside can use models through Codex, Claude Code, Pi, OpenCode, or local Ollama. Disconnect only revokes Aside’s permission.</p>
+            <p>OpenCode uses audited 1.18.15 routes in a tool-free sandbox. Zen works without credentials; API routes use the selected provider’s OpenCode credential. OAuth and well-known routes are not supported yet.</p>
             <div id="settings-error" class="surface-message" role="status" aria-live="polite" hidden></div>
             <div id="settings-providers"></div>
           </div>
@@ -2144,14 +2477,14 @@
           <div class="settings-section">
             <h3>Observer boundary</h3>
             <p>Aside only reads local agent session logs. It never writes to an agent session or project.</p>
-            <p>Codex and Claude Code send scoped context to their services. Pi sends it to the exact upstream provider and model chosen for this thread. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
+            <p>Codex and Claude Code send scoped context to their services. Pi and OpenCode send it to the exact upstream provider and model chosen for this thread. Common credential patterns are redacted first, but automatic redaction can miss sensitive prose. Choose Ollama to keep inference local.</p>
           </div>
           <div class="settings-section">
             <h3>Thread list</h3>
             <label class="settings-toggle" for="show-subagent-threads">
               <span class="settings-toggle-copy">
                 <strong>Show subagents</strong>
-                <span>Keep Codex and Claude workers beneath their parent task.</span>
+                <span>Keep Codex and Claude Code subagents beneath their parent task.</span>
               </span>
               <input id="show-subagent-threads" type="checkbox" />
             </label>
@@ -2164,6 +2497,7 @@
           <div class="settings-section">
             <h3>Local content search</h3>
             <p>User prompts, agent replies, commands, failures, and side chats are indexed locally. Common credential patterns are redacted before indexing.</p>
+            <p>OpenCode transcripts are normalized into a private, rebuildable local cache for search, attention, and side chats. Cache entries are pruned when Aside observes their source sessions being deleted in OpenCode.</p>
             <div class="settings-update">
               <div class="settings-update-copy">
                 <span id="search-index-status" role="status" aria-live="polite">Preparing content index…</span>
@@ -2220,7 +2554,7 @@
             <div>
               <p class="usage-kicker">On this Mac</p>
               <h3>Token activity</h3>
-              <p class="usage-subtitle">Claude Code, Codex, and Pi usage — prompts stay out of these statistics.</p>
+              <p class="usage-subtitle">Claude Code, Codex, Pi, and OpenCode usage — prompts stay out of these statistics.</p>
             </div>
             <div class="usage-range" role="group" aria-label="Usage range">
               <button type="button" data-usage-days="90" aria-pressed="false">90D</button>

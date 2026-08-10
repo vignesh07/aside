@@ -48,6 +48,7 @@ body:
         - Codex
         - Claude Code
         - Pi
+        - OpenCode
         - More than one
     validations:
       required: true
@@ -57,7 +58,7 @@ body:
     attributes:
       label: Aside version
       description: Find this in Aside Settings under Updates.
-      placeholder: 0.1.11
+      placeholder: e.g. 0.2.0
     validations:
       required: true
 

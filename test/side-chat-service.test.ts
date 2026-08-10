@@ -10,8 +10,12 @@ import {
 } from '../src/core/side-chat-service.js';
 import type { AskParams } from '../src/core/side-chat-engine.js';
 import type { TrackedSession } from '../src/types/session.js';
+import { sessionThreadId } from '../src/types/chat.js';
 import type { ChatThread } from '../src/types/chat.js';
-import type { ThreadStore } from '../src/core/thread-store.js';
+import type {
+  ThreadStore,
+  ThreadStoreSaveOptions,
+} from '../src/core/thread-store.js';
 
 class FakeEngine implements AskEngine {
   calls: AskParams[] = [];
@@ -129,6 +133,34 @@ describe('SideChatService.ask', () => {
     expect(engine.calls.map((call) => call.threadId)).toEqual(['session:a', 'session:b']);
   });
 
+  it('keeps same-id sessions from different sources in separate chats and scopes', async () => {
+    const engine = new FakeEngine();
+    const svc = new SideChatService(engine, {}, clock);
+    svc.syncSessions([
+      session('same', { source: 'codex' }),
+      session('same', { source: 'claude' }),
+    ], new Map());
+
+    svc.selectThread(sessionThreadId('codex', 'same'));
+    await svc.ask('codex only');
+    svc.selectThread(sessionThreadId('claude', 'same'));
+    await svc.ask('claude only');
+
+    expect(svc.getChat().map((turn) => turn.content)).toEqual([
+      'claude only',
+      'ok',
+    ]);
+    expect(
+      svc.getThread(sessionThreadId('codex', 'same')).turns.map(
+        (turn) => turn.content,
+      ),
+    ).toEqual(['codex only', 'ok']);
+    expect(engine.calls.map((call) => call.world.sessions[0]?.source)).toEqual([
+      'codex',
+      'claude',
+    ]);
+  });
+
   it('records an error turn when the engine throws', async () => {
     const engine = new FakeEngine(async () => {
       throw new Error('rate limited');
@@ -221,7 +253,7 @@ describe('SideChatService.snapshot', () => {
     expect(svc.snapshot().sessions.map((item) => item.id)).toEqual(['worker']);
     expect(svc.getThreads().map((thread) => thread.id)).toEqual([
       'fleet',
-      'session:worker',
+      'session:codex:worker',
     ]);
   });
 
@@ -276,9 +308,336 @@ describe('SideChatService.snapshot', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('retries a selected historical hydration after its deferred projection appears', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-deferred-history-'));
+    const jsonlPath = path.join(root, 'history.jsonl');
+    const tracked = session('deferred', {
+      status: 'history',
+      jsonlPath,
+    });
+    try {
+      const svc = new SideChatService(new FakeEngine(), {}, clock);
+      const paths = new Map([['deferred', jsonlPath]]);
+      svc.syncSessions([tracked], paths);
+      svc.selectThread('session:deferred');
+      expect(svc.getTranscript(tracked)).toEqual([]);
+
+      fs.writeFileSync(jsonlPath, `${claudeAssistantLine('projection is ready')}\n`);
+      svc.syncSessions([tracked], paths);
+
+      expect(svc.getTranscript(tracked)).toContainEqual(
+        expect.objectContaining({
+          kind: 'assistant_text',
+          preview: 'projection is ready',
+        }),
+      );
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces derived state when a session path changes or disappears', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-retargeted-session-'));
+    const firstPath = path.join(root, 'first.jsonl');
+    const secondPath = path.join(root, 'second.jsonl');
+    fs.writeFileSync(firstPath, `${claudeAssistantLine('old private projection')}\n`);
+    fs.writeFileSync(secondPath, `${claudeAssistantLine('new canonical projection')}\n`);
+    const tracked = session('retargeted', { jsonlPath: firstPath });
+    const resets: string[] = [];
+    const completed: string[] = [];
+    const svc = new SideChatService(
+      new FakeEngine(),
+      {
+        onProjectionReset: (id) => resets.push(id),
+        onProjectionResetComplete: (id) => completed.push(id),
+      },
+      clock,
+    );
+
+    try {
+      svc.syncSessions([tracked], new Map([['retargeted', firstPath]]));
+      expect(svc.getTranscript(tracked)).toContainEqual(
+        expect.objectContaining({ preview: 'old private projection' }),
+      );
+
+      const retargeted = { ...tracked, jsonlPath: secondPath };
+      svc.syncSessions(
+        [retargeted],
+        new Map([['retargeted', secondPath]]),
+      );
+      expect(svc.getTranscript(retargeted)).toContainEqual(
+        expect.objectContaining({ preview: 'new canonical projection' }),
+      );
+      expect(svc.getTranscript(retargeted)).not.toContainEqual(
+        expect.objectContaining({ preview: 'old private projection' }),
+      );
+
+      svc.syncSessions([], new Map());
+      svc.syncSessions(
+        [retargeted],
+        new Map([['retargeted', secondPath]]),
+      );
+      expect(svc.getTranscript(retargeted)).toEqual([
+        expect.objectContaining({ preview: 'new canonical projection' }),
+      ]);
+      expect(resets).toHaveLength(4);
+      expect(completed).toEqual(resets);
+      svc.dispose();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a selected historical session after an atomic same-path rewrite', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-history-rewrite-'));
+    const jsonlPath = path.join(root, 'history.jsonl');
+    fs.writeFileSync(jsonlPath, `${claudeAssistantLine('old private text')}\n`);
+    const tracked = session('same-path-history', {
+      status: 'history',
+      jsonlPath,
+    });
+    const svc = new SideChatService(new FakeEngine(), {}, clock);
+    const paths = new Map([['same-path-history', jsonlPath]]);
+    try {
+      svc.syncSessions([tracked], paths);
+      svc.selectThread('session:same-path-history');
+      expect(svc.getTranscript(tracked)).toContainEqual(
+        expect.objectContaining({ preview: 'old private text' }),
+      );
+
+      const replacement = path.join(root, 'replacement.jsonl');
+      fs.writeFileSync(replacement, `${claudeAssistantLine('new canonical text')}\n`);
+      fs.renameSync(replacement, jsonlPath);
+      svc.syncSessions([tracked], paths);
+
+      expect(svc.getTranscript(tracked)).toContainEqual(
+        expect.objectContaining({ preview: 'new canonical text' }),
+      );
+      expect(svc.getTranscript(tracked)).not.toContainEqual(
+        expect.objectContaining({ preview: 'old private text' }),
+      );
+    } finally {
+      svc.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a same-path rewrite after an active session was temporarily historical', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-paused-tail-rewrite-'));
+    const jsonlPath = path.join(root, 'session.jsonl');
+    const openCodeText = (sourceId: string, text: string): string => JSON.stringify({
+      schema: 'aside.opencode.v1',
+      id: sourceId,
+      sourceId,
+      sessionId: 'status-transition',
+      timestamp: NOW.toISOString(),
+      type: 'text',
+      role: 'assistant',
+      text,
+    });
+    fs.writeFileSync(jsonlPath, `${openCodeText('old', 'old private text')}\n`);
+    const active = session('status-transition', {
+      source: 'opencode',
+      status: 'active',
+      jsonlPath,
+    });
+    const svc = new SideChatService(new FakeEngine(), {}, clock);
+    const paths = new Map([['status-transition', jsonlPath]]);
+
+    try {
+      svc.syncSessions([active], paths);
+      expect(svc.getTranscript(active)).toContainEqual(
+        expect.objectContaining({ preview: 'old private text' }),
+      );
+
+      const historical = { ...active, status: 'history' as const };
+      svc.syncSessions([historical], paths);
+      expect(
+        (svc as unknown as { tailer: { tailedSessionIds: string[] } })
+          .tailer.tailedSessionIds,
+      ).toEqual([]);
+
+      const replacement = path.join(root, 'replacement.jsonl');
+      fs.writeFileSync(
+        replacement,
+        `${openCodeText('new', 'new canonical text')}\n`,
+      );
+      fs.renameSync(replacement, jsonlPath);
+      svc.syncSessions([{ ...historical, status: 'active' }], paths);
+
+      expect(svc.getTranscript(active)).toContainEqual(
+        expect.objectContaining({ preview: 'new canonical text' }),
+      );
+      expect(svc.getTranscript(active)).not.toContainEqual(
+        expect.objectContaining({ preview: 'old private text' }),
+      );
+    } finally {
+      svc.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recomputes unselected historical attention after a same-path rewrite', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-rewrite-'));
+    const jsonlPath = path.join(root, 'history.jsonl');
+    fs.writeFileSync(jsonlPath, `${claudeInputRequestLine('Approve the old request?')}\n`);
+    const tracked = session('attention-history', {
+      status: 'history',
+      source: 'claude',
+      jsonlPath,
+    });
+    const svc = new SideChatService(new FakeEngine(), {}, clock);
+    const paths = new Map([['attention-history', jsonlPath]]);
+    try {
+      svc.syncSessions([tracked], paths);
+      expect(svc.getSessionAttention(tracked)).toMatchObject({ needsUser: true });
+
+      const replacement = path.join(root, 'replacement.jsonl');
+      fs.writeFileSync(replacement, `${claudeAssistantLine('Request was cleared.')}\n`);
+      fs.renameSync(replacement, jsonlPath);
+      svc.syncSessions([tracked], paths);
+
+      expect(svc.getSessionAttention(tracked)).toEqual({
+        needsUser: false,
+        reason: '',
+      });
+      expect(svc.getTranscript(tracked)).toEqual([]);
+    } finally {
+      svc.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('SideChatService restart attention reconstruction', () => {
+  it('atomically rebuilds transcript, attention, and search state after projection replacement', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-projection-reset-'));
+    const jsonlPath = path.join(root, 'projection.jsonl');
+    const tracked = session('projection', {
+      source: 'opencode',
+      jsonlPath,
+      status: 'active',
+    });
+    const record = (fields: Record<string, unknown>): string => JSON.stringify({
+      schema: 'aside.opencode.v1',
+      id: String(fields['sourceId'] ?? fields['type'] ?? 'record'),
+      sourceId: String(fields['sourceId'] ?? fields['type'] ?? 'record'),
+      sessionId: 'projection',
+      timestamp: NOW.toISOString(),
+      ...fields,
+    });
+    const header = record({ type: 'session', sourceId: 'session', cwd: root });
+    const waiting = record({
+      type: 'tool',
+      sourceId: 'question',
+      tool: 'question',
+      state: 'pending',
+      input: { question: 'Approve the password request?' },
+    });
+    const oldText = record({
+      type: 'text',
+      sourceId: 'old-text',
+      role: 'assistant',
+      text: 'private text removed by the rewrite',
+    });
+    fs.writeFileSync(jsonlPath, `${[header, oldText, waiting].join('\n')}\n`);
+
+    const attentionChanges: Array<{ needsUser: boolean; became: boolean }> = [];
+    const seeded: boolean[] = [];
+    const activities: Array<{ activity: string; seeded: boolean }> = [];
+    const svc = new SideChatService(
+      new FakeEngine(),
+      {
+        onAttention: (_id, attention, became) => {
+          attentionChanges.push({ needsUser: attention.needsUser, became });
+        },
+        onEvent: (_id, _source, _event, isSeed) => seeded.push(isSeed),
+        onActivity: (_id, activity, _source, isSeed) => {
+          activities.push({ activity, seeded: isSeed });
+        },
+      },
+      clock,
+    );
+    const internals = svc as unknown as {
+      tailer: { readNewLines(sessionId: string, path: string): void };
+      searchableTail(session: TrackedSession): string;
+      searchCache: Map<string, unknown>;
+    };
+
+    try {
+      svc.syncSessions([tracked], new Map([['projection', jsonlPath]]));
+      expect(svc.getSessionAttention(tracked)).toMatchObject({ needsUser: true });
+      expect(internals.searchableTail(tracked)).toContain('private text');
+      expect(internals.searchCache.size).toBe(1);
+
+      const replacementPath = path.join(root, 'replacement.jsonl');
+      fs.writeFileSync(replacementPath, `${[header, waiting].join('\n')}\n`);
+      fs.renameSync(replacementPath, jsonlPath);
+      internals.tailer.readNewLines(
+        sessionThreadId('opencode', 'projection'),
+        jsonlPath,
+      );
+      expect(svc.getTranscript(tracked)).toContainEqual(
+        expect.objectContaining({
+          kind: 'needs_input',
+          reason: 'Approve the password request?',
+        }),
+      );
+      expect(svc.getTranscript(tracked)).not.toContainEqual(
+        expect.objectContaining({ preview: 'private text removed by the rewrite' }),
+      );
+      expect(attentionChanges).toEqual([{ needsUser: true, became: true }]);
+      expect(internals.searchCache.size).toBe(0);
+
+      const surviving = record({
+        type: 'text',
+        sourceId: 'surviving-text',
+        role: 'assistant',
+        text: 'The replacement is now canonical.',
+      });
+      const clearedPath = path.join(root, 'cleared.jsonl');
+      fs.writeFileSync(clearedPath, `${[header, surviving].join('\n')}\n`);
+      fs.renameSync(clearedPath, jsonlPath);
+      internals.tailer.readNewLines(
+        sessionThreadId('opencode', 'projection'),
+        jsonlPath,
+      );
+
+      expect(svc.getTranscript(tracked)).toEqual([
+        expect.objectContaining({ kind: 'session_started' }),
+        expect.objectContaining({
+          kind: 'assistant_text',
+          preview: 'The replacement is now canonical.',
+        }),
+      ]);
+      expect(svc.getSessionAttention(tracked)).toEqual({
+        needsUser: false,
+        reason: '',
+      });
+      expect(attentionChanges).toEqual([
+        { needsUser: true, became: true },
+        { needsUser: false, became: false },
+      ]);
+      expect(seeded.every(Boolean)).toBe(true);
+      expect(activities).toEqual([
+        {
+          activity: 'Needs you: Approve the password request?',
+          seeded: true,
+        },
+        {
+          activity: 'Needs you: Approve the password request?',
+          seeded: true,
+        },
+        { activity: 'Responding...', seeded: true },
+      ]);
+    } finally {
+      svc.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('restores needs-user state for a historical session without selecting or tailing it', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aside-attention-restart-'));
     const jsonlPath = path.join(root, 'waiting.jsonl');
@@ -536,5 +895,69 @@ describe('SideChatService focus', () => {
     expect(restored.getChat().map((turn) => turn.content)).toEqual(['remember this', 'ok']);
     expect(restored.getActiveThread().provider).toBe('ollama');
     expect(restored.getActiveThread().model).toBe('llama3.2');
+  });
+
+  it('migrates a legacy side chat only when one source owns its session id', () => {
+    class MemoryStore implements ThreadStore {
+      threads: ChatThread[] = [{
+        id: 'session:legacy',
+        scope: { kind: 'session', source: null, sessionId: 'legacy' },
+        provider: 'ollama',
+        model: 'llama3.2',
+        turns: [{
+          id: 'legacy-turn',
+          role: 'user',
+          content: 'keep this history',
+          timestamp: NOW,
+        }],
+        thinking: false,
+        updatedAt: NOW,
+      }];
+      migrations = new Map<string, string>();
+      load() { return structuredClone(this.threads); }
+      save(threads: ChatThread[], options?: ThreadStoreSaveOptions) {
+        this.threads = structuredClone(threads);
+        this.migrations = new Map(options?.migrations);
+      }
+    }
+    const store = new MemoryStore();
+    const svc = new SideChatService(new FakeEngine(), {}, clock, { store });
+    svc.syncSessions([session('legacy', { source: 'opencode' })], new Map());
+
+    const canonical = sessionThreadId('opencode', 'legacy');
+    expect(svc.getThreads().map((thread) => thread.id)).toEqual([
+      'fleet',
+      canonical,
+    ]);
+    expect(svc.getThread(canonical).turns[0]?.content).toBe('keep this history');
+    expect(store.migrations).toEqual(new Map([['session:legacy', canonical]]));
+  });
+
+  it('leaves an ambiguous legacy side chat unassigned', () => {
+    const legacy: ChatThread = {
+      id: 'session:same',
+      scope: { kind: 'session', source: null, sessionId: 'same' },
+      provider: 'ollama',
+      model: 'llama3.2',
+      turns: [],
+      thinking: false,
+      updatedAt: NOW,
+    };
+    const store: ThreadStore = {
+      load: () => [legacy],
+      save: () => {},
+    };
+    const svc = new SideChatService(new FakeEngine(), {}, clock, { store });
+    svc.syncSessions([
+      session('same', { source: 'codex' }),
+      session('same', { source: 'opencode' }),
+    ], new Map());
+
+    expect(svc.getThreads().map((thread) => thread.id)).toEqual([
+      'session:same',
+      'fleet',
+    ]);
+    svc.selectThread('session:same');
+    expect(svc.getActiveThreadId()).toBe('fleet');
   });
 });

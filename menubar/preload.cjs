@@ -25,7 +25,8 @@ contextBridge.exposeInMainWorld('aside', {
   refreshProviderAuth: () => ipcRenderer.invoke('aside:auth:refresh'),
   connectProvider: (provider) => ipcRenderer.invoke('aside:auth:connect', provider),
   disconnectProvider: (provider) => ipcRenderer.invoke('aside:auth:disconnect', provider),
-  openProviderHelp: (provider) => ipcRenderer.invoke('aside:auth:help', provider),
+  openProviderHelp: (provider, reason) =>
+    ipcRenderer.invoke('aside:auth:help', provider, reason),
   getAppVersion: () => ipcRenderer.invoke('aside:app-version'),
   getWindowMode: () => ipcRenderer.invoke('aside:window-mode:get'),
   setKeepOpen: (keepOpen) => ipcRenderer.invoke('aside:window-mode:set', keepOpen),

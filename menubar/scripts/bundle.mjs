@@ -49,6 +49,16 @@ await esbuild.build({
   platform: 'node',
 });
 
+// OpenCode's SQLite catalog can be large and changes while an agent is active.
+// Its exact revision walk belongs beside search indexing, never on Electron's
+// main loop.
+await esbuild.build({
+  ...shared,
+  entryPoints: [path.join(root, '..', 'src', 'core', 'opencode-scan-worker.ts')],
+  outfile: path.join(root, 'build', 'opencode-scan-worker.js'),
+  platform: 'node',
+});
+
 // Renderer. Runs in the browser context and touches only the window.aside
 // bridge, so it has no node externals.
 await esbuild.build({
@@ -58,4 +68,4 @@ await esbuild.build({
   platform: 'browser',
 });
 
-console.log('bundled -> build/main.js, build/renderer.js');
+console.log('bundled -> build/main.js, build/renderer.js, workers');

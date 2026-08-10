@@ -155,6 +155,7 @@ describe('thread content search index', () => {
     writer.syncSideChats([
       {
         sessionId: session.sessionId,
+        source: session.source,
         updatedAt: '2026-07-23T12:00:00Z',
         turns: [
           {
@@ -171,6 +172,72 @@ describe('thread content search index', () => {
       sessionId: 'sidechat',
       kind: 'side_user',
     });
+    writer.close();
+    reader.close();
+  });
+
+  it('indexes a side chat that arrives before its transcript row exists', async () => {
+    const { root, reader, writer } = tempIndex();
+    const session = thread(root, 'deferred-sidechat');
+    writer.syncSideChats([
+      {
+        sessionId: session.sessionId,
+        source: session.source,
+        updatedAt: '2026-08-09T12:00:00Z',
+        turns: [
+          {
+            role: 'assistant',
+            content: 'The deferred heliotrope decision is ready.',
+            timestamp: '2026-08-09T12:00:00Z',
+          },
+        ],
+      },
+    ]);
+    expect(reader.search('heliotrope')).toEqual([]);
+
+    fs.writeFileSync(session.jsonlPath, `${codexLine('ordinary work')}\n`);
+    await writer.syncSessions([session], () => {});
+
+    expect(reader.search('heliotrope')).toEqual([
+      expect.objectContaining({
+        source: 'codex',
+        sessionId: 'deferred-sidechat',
+        kind: 'side_assistant',
+      }),
+    ]);
+    writer.close();
+    reader.close();
+  });
+
+  it('keeps same-id side chats attached to their exact source', async () => {
+    const { root, reader, writer } = tempIndex();
+    const codex = thread(root, 'same-id');
+    const pi: IndexableThread = {
+      ...codex,
+      source: 'pi',
+      jsonlPath: path.join(root, 'same-id-pi.jsonl'),
+    };
+    fs.writeFileSync(codex.jsonlPath, `${codexLine('codex transcript')}\n`);
+    fs.writeFileSync(pi.jsonlPath, '');
+    await writer.syncSessions([codex, pi], () => {});
+    writer.syncSideChats([
+      {
+        sessionId: 'same-id',
+        source: 'codex',
+        updatedAt: '2026-08-09T12:00:00Z',
+        turns: [
+          {
+            role: 'user',
+            content: 'source-qualified heliotrope chat',
+            timestamp: '2026-08-09T12:00:00Z',
+          },
+        ],
+      },
+    ]);
+
+    expect(reader.search('heliotrope')).toEqual([
+      expect.objectContaining({ source: 'codex', sessionId: 'same-id' }),
+    ]);
     writer.close();
     reader.close();
   });

@@ -314,9 +314,9 @@ export default function Home() {
             Don&apos;t interrupt it.
           </h1>
           <p className="hero-summary hero-rise hero-delay-2">
-            Aside finds the Codex, Claude Code, and Pi threads already on your
-            Mac. Pick one and ask a separate model what changed, why it chose
-            that path, or what it needs next.
+            Aside finds the Codex, Claude Code, Pi, and OpenCode threads already
+            on your Mac. Pick one and ask a separate model what changed, why it
+            chose that path, or what it needs next.
           </p>
           <div className="hero-actions hero-rise hero-delay-3">
             <DownloadButtons />
@@ -364,7 +364,7 @@ export default function Home() {
               <p className="feature-note">
                 <strong>Usage sits beside Today.</strong> Open a 90-day or
                 one-year view of token and model activity across Codex, Claude
-                Code, and Pi/OpenCode where logs expose it. Cost figures are
+                Code, Pi, and OpenCode where logs expose it. Cost figures are
                 API-equivalent estimates, not invoices; local runs show
                 local-model equivalents.
               </p>
@@ -453,8 +453,8 @@ export default function Home() {
               <h3>Find the thread from what happened inside it.</h3>
               <p>
                 Search prompts, agent replies, commands, file paths, failures,
-                and Aside side chats across Codex, Claude Code, and Pi—even
-                older work. The index stays on your Mac.
+                and Aside side chats across Codex, Claude Code, Pi, and
+                OpenCode—even older work. The index stays on your Mac.
               </p>
               <p className="feature-note">
                 <strong>Subagent work stays attached:</strong> Codex and Claude
@@ -575,7 +575,9 @@ export default function Home() {
               <p>
                 The searchable index, thread list, and every side chat are
                 stored locally with user-only permissions. Search queries never
-                leave your machine.
+                leave your machine. OpenCode sessions use a private,
+                rebuildable local transcript cache; Aside prunes an entry when
+                it observes that session being deleted in OpenCode.
               </p>
             </article>
             <article className="reveal">
@@ -588,12 +590,16 @@ export default function Home() {
             </article>
             <article className="reveal">
               <span>03</span>
-              <h3>Your login stays with the vendor.</h3>
+              <h3>Provider access stays with the client.</h3>
               <p>
-                Aside can use your existing Codex or Claude Code sign-in, or
-                any model Pi reports from accounts authenticated there.
-                Credentials stay with those clients; Aside stores only your
-                permission and the exact provider/model chosen for each thread.
+                Aside can use your existing Codex or Claude Code sign-in, Pi
+                routes, and audited OpenCode 1.18.15 routes. It stores only your
+                permission and the route chosen for each thread between runs.
+                OpenCode requests run tool-free without user/project config,
+                external plugins, custom endpoints, or shell API-key variables.
+                Zen routes need no credential; API-key routes use the selected
+                provider credential configured in OpenCode. OAuth and well-known
+                routes are not supported yet.
               </p>
             </article>
           </div>
@@ -669,6 +675,9 @@ export default function Home() {
             <span>
               <b>π</b> Pi
             </span>
+            <span>
+              <b>O</b> OpenCode
+            </span>
           </div>
         </div>
       </section>
@@ -723,12 +732,31 @@ export default function Home() {
           </details>
           <details className="reveal">
             <summary>
+              Do the coding tools need to be installed? <span>+</span>
+            </summary>
+            <p>
+              Aside can discover supported session history already stored on
+              your Mac. To use a coding client as the model for a side chat,
+              that client must also be installed and configured. OpenCode
+              provider access currently requires the audited OpenCode 1.18.15
+              client; credential-free Zen routes work without another account.
+            </p>
+          </details>
+          <details className="reveal">
+            <summary>
               Do I need separate API keys? <span>+</span>
             </summary>
             <p>
-              No. Aside can use Codex&apos;s existing ChatGPT sign-in, Claude
-              Code&apos;s existing Claude account, or any account already
-              authenticated in Pi. Aside never copies those credentials.
+              No separate keys go into Aside settings. It can use Codex&apos;s existing
+              ChatGPT sign-in, Claude Code&apos;s existing Claude account, Pi
+              routes, or audited OpenCode 1.18.15 routes. Configure provider
+              access in those clients. For OpenCode, credential-free Zen and
+              provider API-key routes are supported; OAuth and well-known routes
+              are not. Aside isolates only the API credentials needed for model
+              discovery or the selected route and never modifies OpenCode&apos;s
+              canonical auth file. Routes that depend on user/project config,
+              external plugins, custom endpoints, or shell API-key variables
+              stay unavailable.
             </p>
           </details>
           <details className="reveal">
@@ -736,8 +764,8 @@ export default function Home() {
               Which agents are supported? <span>+</span>
             </summary>
             <p>
-              Aside currently discovers Codex, Claude Code, and Pi transcripts
-              stored on your Mac.
+              Aside currently discovers Codex, Claude Code, Pi, and OpenCode
+              transcripts stored on your Mac.
             </p>
           </details>
           <details className="reveal">
@@ -767,7 +795,7 @@ export default function Home() {
           <Brand />
           <p>Read-only side chats for coding agents.</p>
           <div>
-            <span>macOS preview · v0.1.11</span>
+            <span>macOS preview</span>
             <a href="#privacy">Privacy</a>
             <a href="#top">Back to top ↑</a>
           </div>

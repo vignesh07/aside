@@ -12,6 +12,7 @@ export const COLORS = {
   badgeClaude: '#c084fc',
   badgeCodex: '#00ff41',
   badgePi: '#ffb86c',
+  badgeOpenCode: '#55b9ff',
 
   healthSafe: '#00ff41',
   healthCaution: '#ffee32',
