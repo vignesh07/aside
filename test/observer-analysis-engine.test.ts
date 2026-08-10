@@ -133,7 +133,44 @@ describe('ObserverAnalysisEngine', () => {
         model: 'gpt-test',
         evidence: pack(),
       }),
-    ).rejects.toThrow('outside the supplied scope');
+    ).rejects.toThrow("couldn't verify the model's source links");
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('repairs one invalid citation response using the exact allowed refs', async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce(JSON.stringify({
+        summary: { text: 'Work moved forward.', evidence: ['activity:not-supplied'] },
+        highlights: [],
+        risks: [],
+        nextSteps: [],
+      }))
+      .mockResolvedValueOnce(JSON.stringify({
+        summary: { text: 'Verification work moved forward.', evidence: ['activity:event-1'] },
+        highlights: [],
+        risks: [],
+        nextSteps: [],
+      }));
+    const engine = new ObserverAnalysisEngine(complete, () => {}, () => NOW);
+
+    const artifact = await engine.generateDailyRecap({
+      day: '2026-07-26',
+      provider: 'codex-cli',
+      model: 'gpt-test',
+      evidence: pack(),
+    });
+
+    expect(artifact.evidenceIds).toEqual(['event-1']);
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]![1].question).toContain(
+      '["activity:event-1","activity:event-2"]',
+    );
+    expect(complete.mock.calls[0]![1].context).toContain(
+      'Allowed evidence refs: ["activity:event-1","activity:event-2"]',
+    );
+    expect(complete.mock.calls[0]![1].conversationId).not.toBe(
+      complete.mock.calls[1]![1].conversationId,
+    );
   });
 
   it('keeps prompt-like transcript content inside an escaped evidence block', async () => {

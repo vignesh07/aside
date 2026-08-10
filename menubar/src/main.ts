@@ -79,6 +79,7 @@ import {
   shouldHideOnBlur,
   shouldRestoreDetachedPosition,
 } from './window-presentation.js';
+import { startAfterRendererLoad } from './startup-sequence.js';
 import { DEFAULT_PROVIDER, DEFAULT_MODEL } from '../../dist/config/defaults.js';
 import {
   ActivityLedger,
@@ -796,7 +797,11 @@ app.whenReady().then(() => {
       timeZone: todayCapture?.timeZone,
     },
   );
-  backend.start();
+  // Let the packaged renderer finish loading before the first synchronous
+  // vendor catalog walk. Starting discovery in the same turn as loadURL()
+  // blocks our custom protocol handler on large histories and leaves Electron
+  // showing only the window background until the scan completes.
+  startAfterRendererLoad(win.webContents, () => backend?.start());
   providerAuth = CAPTURE_PATH
     ? captureProviderAuthCoordinator(!CAPTURE_TODAY_PERMISSION)
     : new ProviderAuthCoordinator();
